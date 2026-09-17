@@ -120,6 +120,12 @@ pub enum StorageError {
     #[error("主体 {subject_id} 的世代 {new_epoch} 已经有一个迁移事务")]
     TransactionAlreadyExists { subject_id: String, new_epoch: u64 },
 
+    #[error("回合 {episode_id} 中找不到游戏请求 {request_id}")]
+    GameRequestNotFound {
+        episode_id: String,
+        request_id: String,
+    },
+
     #[error("迁移事务 {transaction_id} 不能从 {from} 迁移到 {to}")]
     IllegalTransactionTransition {
         transaction_id: String,

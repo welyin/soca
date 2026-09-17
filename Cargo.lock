@@ -435,6 +435,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soca-game-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "soca-contracts",
+ "soca-storage",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "soca-storage"
 version = "0.1.0"
 dependencies = [

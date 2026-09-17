@@ -5,6 +5,7 @@ members = [
     "crates/storage",
     "crates/core",
     "crates/core-topology",
+    "crates/game-host",
 ]
 
 [workspace.package]

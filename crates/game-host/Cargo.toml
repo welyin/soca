@@ -1,0 +1,20 @@
+[package]
+name = "soca-game-host"
+description = "游戏规则宿主：幂等账、新鲜度校验与终局区分（实施规格 §8、§11；工单 ENG-06 宿主侧）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+soca-contracts = { path = "../contracts" }
+soca-storage = { path = "../storage" }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
