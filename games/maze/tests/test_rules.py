@@ -19,7 +19,11 @@ sys.path.insert(0, str(GAME_DIR))
 from maze_engine import (  # noqa: E402
     ACTION_MAP,
     DEFAULT_ENV_ID,
+    FORWARD_COLUMN_DELTA,
+    LEFT_ROW_DELTA,
     RULES_VERSION,
+    VIEW_AGENT_COLUMN,
+    VIEW_AGENT_ROW,
     DomainError,
     MazeEngine,
 )
@@ -151,6 +155,36 @@ class MazeProjectionTests(unittest.TestCase):
         fresh = self.engine.reset(7)
         baseline = self.engine.reset(7)
         self.assertEqual(fresh, baseline)
+
+    def test_forward_shifts_the_view_by_one_column(self) -> None:
+        """视图约定是规则事实，必须被行为测试守住。
+
+        前进一格时，视野内容整体沿列+ 方向移动一格——等价于"前方在视图里的列号减 1"。
+        认知单元靠这条约定做无漂移里程计：它能不能正确判断"我是否移动了"取决于此。
+        若 MiniGrid 的视图约定漂移，这条断言会失败，而不是让地图静默出错。
+        """
+        before = self.engine.reset(7)["percept"]["view"]
+        after = self.engine.step({"op": "forward"})["percept"]["view"]
+
+        for row in range(VIEW_AGENT_ROW * 2 + 1):
+            for column in range(1, VIEW_AGENT_COLUMN + 1):
+                self.assertEqual(
+                    before[row][column - 1],
+                    after[row][column],
+                    f"期望内容沿列+ 移动一格：row={row} col={column}",
+                )
+
+    def test_the_declared_view_convention_matches_the_engine_constants(self) -> None:
+        manifest = json.loads((GAME_DIR / "manifest.json").read_text(encoding="utf-8"))
+        convention = manifest["public"]["view_convention"]
+        self.assertEqual(convention["kind"], "agent_centric_rotating")
+        self.assertEqual(convention["agent_row"], VIEW_AGENT_ROW)
+        self.assertEqual(convention["agent_column"], VIEW_AGENT_COLUMN)
+        self.assertEqual(convention["forward_column_delta"], FORWARD_COLUMN_DELTA)
+        self.assertEqual(convention["left_row_delta"], LEFT_ROW_DELTA)
+        # agent 位于最后一行正中；视图尺寸必须与之自洽。
+        self.assertEqual(VIEW_AGENT_COLUMN, manifest["public"]["view_size"] - 1)
+        self.assertEqual(VIEW_AGENT_ROW, manifest["public"]["view_size"] // 2)
 
     def test_manifest_facts_match_the_engine(self) -> None:
         facts = self.engine.manifest_facts()

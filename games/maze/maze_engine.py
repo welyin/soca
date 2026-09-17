@@ -40,6 +40,22 @@ ACTION_MAP: dict[str, int] = {
 
 MISSION_MAX_CHARS = 2048
 
+#: 视图约定（规则事实，不含任何隐藏世界状态）。
+#:
+#: MiniGrid 的 `image` 是**以 agent 为中心且随朝向旋转**的局部视图：agent_dir 变了，视图
+#: 跟着转，因此"前方"在视图里永远是同一个方向。实测（见 tests/test_rules.py）得到：
+#:
+#:     agent 自己   → (row = VIEW_SIZE // 2, col = VIEW_SIZE - 1) = (3, 6)
+#:     前进一格     → 列号减 1
+#:     agent 的左手 → 行号减 1；右手 → 行号加 1
+#:
+#: 也就是说列的增减对应前后、行的增减对应左右。这条约定必须与 manifest 的
+#: `view_convention` 一致：认知单元要靠它做无漂移的里程计，写错会让地图静默出错。
+VIEW_AGENT_ROW = 3
+VIEW_AGENT_COLUMN = 6
+FORWARD_COLUMN_DELTA = -1
+LEFT_ROW_DELTA = -1
+
 # MiniGrid 的 `image` 是三通道整数编码。下表把它翻成公开协议的词汇。
 _OBJECT = {
     0: "unseen",
