@@ -30,6 +30,7 @@ pub mod data_state;
 pub mod envelope;
 pub mod error;
 pub mod game;
+pub mod goal;
 pub mod ids;
 pub mod inference;
 pub mod instance;
@@ -66,6 +67,10 @@ pub use crate::game::{
     MazeView, MinesCell, MinesMode, MinesView, MoveAction, MoveOp, Outcome, Percept, PixelFormat,
     PixelMode, PixelView, PublicId, ReceiptCode, ReceiptStatus, RevealOp, SetFlagOp,
     TargetedAction, GAME_PROTOCOL_VERSION, MAX_COORDINATE, MAZE_VIEW_MAX, MINES_BOARD_MAX,
+};
+pub use crate::goal::{
+    ExplorationQuota, Goal, GoalBudget, GoalOrigin, GoalStack, GoalState, MAX_ACTIVATIONS_PER_GOAL,
+    MAX_GOALS, MAX_GOAL_DEPTH,
 };
 pub use crate::inference::{
     ActionOutcomeSlice, BeliefSummary, CandidateKind, CapabilitySlice, ContextBundle,

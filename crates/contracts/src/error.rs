@@ -126,6 +126,44 @@ pub enum ContractError {
     #[error("本次上下文不允许提出 {kind} 类候选（§8 的输出 Schema）")]
     CandidateKindNotAllowed { kind: &'static str },
 
+    // ---- L6 目标栈（§4.1 L6、§2、§4.2）----
+    #[error(
+        "目标的出处是 {provenance}，不是用户明确通道；§2 明确不承诺自主产生目标，\
+         屏幕文字、转写、文档与模型输出都不是指令来源"
+    )]
+    GoalNotDelegated { provenance: &'static str },
+
+    #[error("目标深度 {actual} 超过上限 {limit}（§4.2：禁止递归无限生成子任务）")]
+    GoalDepthExceeded { limit: usize, actual: usize },
+
+    #[error("子目标的权限等级 {child_level} 宽于父目标的 {parent_level}（§12.2：授权不给子单元自动扩大）")]
+    GoalPermissionWidened {
+        parent_level: &'static str,
+        child_level: &'static str,
+    },
+
+    #[error("目标额度超限：{field} 上限 {limit}，实际 {actual}")]
+    GoalBudgetExceeded {
+        field: &'static str,
+        limit: usize,
+        actual: usize,
+    },
+
+    #[error("目标数 {actual} 超过上限 {limit}")]
+    GoalLimitExceeded { limit: usize, actual: usize },
+
+    #[error("目标 {goal_id} 处于 {state} 状态，不能推进")]
+    GoalNotActive {
+        goal_id: String,
+        state: &'static str,
+    },
+
+    #[error("探索配额已用尽：上限 {limit}，实际 {actual}（§4.1 L6）")]
+    ExplorationQuotaExhausted { limit: usize, actual: usize },
+
+    #[error("失败关闭：{0}")]
+    FailClosed(&'static str),
+
     #[error("预测对象 {subject:?} 与期望作用对象 {expectation_subject:?} 不一致")]
     ExpectationSubjectMismatch {
         subject: String,
