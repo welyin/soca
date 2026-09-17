@@ -26,7 +26,11 @@
 pub mod engine;
 pub mod error;
 pub mod host;
+pub mod process;
 
 pub use crate::engine::{Engine, EngineFactory, EngineStep, ProbeFactory, ProtocolProbeEngine};
-pub use crate::error::{EngineError, HostError};
+pub use crate::error::{EngineError, HostError, ProcessEngineError};
 pub use crate::host::{GameHost, HostConfig};
+pub use crate::process::{
+    EngineTimeouts, ProcessEngine, ProcessEngineConfig, ProcessFactory, MAX_FRAME_BYTES,
+};

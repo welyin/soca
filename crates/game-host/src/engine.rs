@@ -10,6 +10,7 @@
 //! 本模块只提供 [`ProtocolProbeEngine`]——一个明确标注为测试替身的最小引擎，
 //! 用来验证宿主与客户端的协议行为（幂等、过期观测、世代、截断与自然终局）。
 
+use serde::{Deserialize, Serialize};
 use soca_contracts::{GameAction, GameKind, Outcome, Percept};
 
 use crate::error::EngineError;
@@ -18,7 +19,8 @@ use crate::error::EngineError;
 ///
 /// 所有字段都是**公开面**已经可以承载的内容：宿主会把它们包装成带标识的
 /// [`soca_contracts::GameObservation`]，不会再加任何来自引擎内部的字段。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngineStep {
     /// 已投影的公开感知。
     pub percept: Percept,
