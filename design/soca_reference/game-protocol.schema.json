@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SoCA game actor protocol v1",
+  "description": "Public agent-plane messages only. Engine state, seeds, reset and evaluator records use a separate privileged interface.",
+  "oneOf": [
+    { "$ref": "#/$defs/Observation" },
+    { "$ref": "#/$defs/ActionRequest" },
+    { "$ref": "#/$defs/ActionReceipt" }
+  ],
+  "$defs": {
+    "Id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "Observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "type", "session_id", "episode_id", "observation_id", "step_index", "game", "terminated", "truncated", "outcome", "reward", "percept"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "type": { "const": "observation" },
+        "session_id": { "$ref": "#/$defs/Id" },
+        "episode_id": { "$ref": "#/$defs/Id" },
+        "observation_id": { "$ref": "#/$defs/Id" },
+        "step_index": { "type": "integer", "minimum": 0 },
+        "game": { "enum": ["maze", "minesweeper"] },
+        "terminated": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "outcome": { "enum": ["running", "won", "lost", "timeout", "aborted", "infrastructure_error"] },
+        "reward": { "type": "number" },
+        "percept": {
+          "oneOf": [
+            { "$ref": "#/$defs/MazeView" },
+            { "$ref": "#/$defs/MinesView" },
+            { "$ref": "#/$defs/PixelView" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "game": { "const": "maze" } } },
+          "then": { "properties": { "percept": { "oneOf": [{ "$ref": "#/$defs/MazeView" }, { "$ref": "#/$defs/PixelView" }] } } },
+          "else": { "properties": { "percept": { "oneOf": [{ "$ref": "#/$defs/MinesView" }, { "$ref": "#/$defs/PixelView" }] } } }
+        }
+      ]
+    },
+    "MazeView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "mission", "direction", "view", "carrying"],
+      "properties": {
+        "mode": { "const": "symbolic_maze" },
+        "mission": { "type": "string", "maxLength": 2048 },
+        "direction": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "view": {
+          "type": "array", "minItems": 1, "maxItems": 31,
+          "items": {
+            "type": "array", "minItems": 1, "maxItems": 31,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["object", "color", "state"],
+              "properties": {
+                "object": { "enum": ["unseen", "empty", "wall", "door", "key", "ball", "box", "goal", "lava", "agent", "floor"] },
+                "color": { "enum": ["none", "red", "green", "blue", "purple", "yellow", "grey"] },
+                "state": { "enum": ["none", "open", "closed", "locked"] }
+              }
+            }
+          }
+        },
+        "carrying": { "enum": ["none", "key", "ball", "box"] }
+      }
+    },
+    "MinesView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "width", "height", "total_mines", "board"],
+      "properties": {
+        "mode": { "const": "symbolic_mines" },
+        "width": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "height": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "total_mines": { "type": "integer", "minimum": 1, "maximum": 4095 },
+        "board": {
+          "type": "array", "minItems": 2, "maxItems": 64,
+          "items": {
+            "type": "array", "minItems": 2, "maxItems": 64,
+            "items": { "enum": ["covered", "flagged", "detonated", 0, 1, 2, 3, 4, 5, 6, 7, 8] }
+          }
+        }
+      }
+    },
+    "PixelView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "frame_artifact_id", "width", "height", "pixel_format"],
+      "properties": {
+        "mode": { "const": "pixels" },
+        "frame_artifact_id": { "$ref": "#/$defs/Id" },
+        "width": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "pixel_format": { "const": "RGB8" }
+      }
+    },
+    "ActionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "type", "request_id", "episode_id", "expected_observation_id", "actor_id", "topology_epoch", "permit_id", "action"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "type": { "const": "action_request" },
+        "request_id": { "$ref": "#/$defs/Id" },
+        "episode_id": { "$ref": "#/$defs/Id" },
+        "expected_observation_id": { "$ref": "#/$defs/Id" },
+        "actor_id": { "$ref": "#/$defs/Id" },
+        "topology_epoch": { "type": "integer", "minimum": 1 },
+        "permit_id": { "$ref": "#/$defs/Id" },
+        "action": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false, "required": ["op"],
+              "properties": { "op": { "enum": ["turn_left", "turn_right", "forward", "pickup", "toggle"] } }
+            },
+            {
+              "type": "object", "additionalProperties": false, "required": ["op", "row", "column"],
+              "properties": {
+                "op": { "enum": ["reveal", "chord"] },
+                "row": { "type": "integer", "minimum": 0, "maximum": 63 },
+                "column": { "type": "integer", "minimum": 0, "maximum": 63 }
+              }
+            },
+            {
+              "type": "object", "additionalProperties": false, "required": ["op", "row", "column", "flagged"],
+              "properties": {
+                "op": { "const": "set_flag" },
+                "row": { "type": "integer", "minimum": 0, "maximum": 63 },
+                "column": { "type": "integer", "minimum": 0, "maximum": 63 },
+                "flagged": { "type": "boolean" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ActionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "type", "request_id", "episode_id", "status", "code", "observation_id"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "type": { "const": "action_receipt" },
+        "request_id": { "$ref": "#/$defs/Id" },
+        "episode_id": { "$ref": "#/$defs/Id" },
+        "status": { "enum": ["applied", "no_change", "rejected", "unknown_commit"] },
+        "code": { "enum": ["OK", "NO_CHANGE", "STALE_OBSERVATION", "STALE_TOPOLOGY", "EPISODE_FINISHED", "INVALID_ACTION", "PERMISSION_DENIED", "BUDGET_EXHAUSTED", "IDEMPOTENCY_CONFLICT", "ENGINE_UNAVAILABLE"] },
+        "observation_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] }
+      }
+    }
+  }
+}
