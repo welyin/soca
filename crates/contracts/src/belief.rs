@@ -179,6 +179,39 @@ impl Uncertainty {
     }
 }
 
+/// 机器可检查的期望（§7.2："动作前可检查的预期结果"）。
+///
+/// §7.2 用"可检查"限定预测，§6.3 又要求记录对象、预计变化、时间窗、失败条件。散文部分给人
+/// 读，本类型给确定性检查器读——两者都必须存在：
+///
+/// * 只有散文，后验结果无法判定，`Verdict` 只能靠人拍脑袋；
+/// * 只有结构化字段，审计记录读起来像机器码，用户无法据此追责。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Expectation {
+    /// 指定对象在动作后的版本应等于给定值。
+    VersionEquals {
+        /// 对象引用。核验时与观测的 `subject` 逐字比较。
+        subject_ref: String,
+        /// 期望的版本标识。
+        expected: String,
+    },
+    /// 指定对象在动作后应不存在。
+    Absent {
+        /// 对象引用。
+        subject_ref: String,
+    },
+}
+
+impl Expectation {
+    /// 期望指向的对象引用。
+    pub fn subject_ref(&self) -> &str {
+        match self {
+            Self::VersionEquals { subject_ref, .. } | Self::Absent { subject_ref } => subject_ref,
+        }
+    }
+}
+
 /// 动作前可检查的预期结果（§6.3）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,8 +220,10 @@ pub struct Prediction {
     pub prediction_ref: PredictionRef,
     /// 预测对象。
     pub subject: String,
-    /// 预计变化。
+    /// 预计变化。给人读的散文，不参与判定。
     pub expected_change: String,
+    /// 机器可检查的期望。参与判定，不给人读。
+    pub expectation: Expectation,
     /// 预期成立的时间窗。
     pub window: TimeWindow,
     /// 失败条件。至少一条，否则无法证伪。
@@ -202,10 +237,14 @@ impl Prediction {
     ///
     /// 拒绝没有失败条件的"预测"：§17 的闭环正确性验收要求先记录预测、动作后逐条后验检查，
     /// 没有失败条件就无法判定后验结果。
+    ///
+    /// `expectation` 也是必需参数：没有机器可检查的期望，后验判定就只能靠猜。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         prediction_ref: PredictionRef,
         subject: String,
         expected_change: String,
+        expectation: Expectation,
         window: TimeWindow,
         failure_conditions: Vec<String>,
         uncertainty: Uncertainty,
@@ -215,6 +254,13 @@ impl Prediction {
                 field: "prediction.failure_conditions",
             });
         }
+        // 期望必须作用在同一个对象上，否则"预测 A、检查 B"这种错位会静默通过。
+        if expectation.subject_ref() != subject {
+            return Err(ContractError::ExpectationSubjectMismatch {
+                subject,
+                expectation_subject: expectation.subject_ref().to_string(),
+            });
+        }
         if let Some(probability) = &uncertainty.probability {
             probability.validate()?;
         }
@@ -222,6 +268,7 @@ impl Prediction {
             prediction_ref,
             subject,
             expected_change,
+            expectation,
             window,
             failure_conditions,
             uncertainty,

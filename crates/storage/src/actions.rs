@@ -744,9 +744,58 @@ impl Store {
         Ok(next)
     }
 
+    /// 读取某个任务下的全部动作，按创建顺序升序。
+    pub fn actions_for_task(
+        &self,
+        task_id: &soca_contracts::TaskId,
+        limit: usize,
+    ) -> Result<Vec<ActionRecord>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = {
+            let mut stmt = self.connection().prepare(
+                "SELECT action_id FROM actions WHERE task_id = ?1 ORDER BY rowid LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![task_id.to_string(), limit as i64], |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        };
+
+        let mut records = Vec::new();
+        for id in ids {
+            records.push(require_action(self.connection(), &id)?);
+        }
+        Ok(records)
+    }
+
     /// 读取一条动作记录。
     pub fn action(&self, action_id: &str) -> Result<Option<ActionRecord>, StorageError> {
         load_action(self.connection(), action_id)
+    }
+
+    /// 读取某个动作的投递时刻。`None` 表示从未投递。
+    ///
+    /// 投递标记是"副作用是否可能已经发生"的唯一依据，因此重放与审计都必须能读到它，
+    /// 而不能从动作状态反推。
+    pub fn dispatched_at(&self, action_id: &str) -> Result<Option<WallClock>, StorageError> {
+        let value: Option<Option<String>> = self
+            .connection()
+            .query_row(
+                "SELECT dispatched_at_utc FROM outbox WHERE action_id = ?1",
+                params![action_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match value.flatten() {
+            Some(text) => Ok(Some(WallClock::from_rfc3339(&text)?)),
+            None => Ok(None),
+        }
     }
 
     /// 读取一条执行回执。

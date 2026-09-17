@@ -250,24 +250,36 @@ impl ExecutionPermit {
         )
     }
 
-    /// 判断本许可是否授权这次具体动作。
+    /// 完整授权判定：有效期、剩余次数、工具、范围、参数摘要、等级。
     ///
-    /// 执行代理在真正产生副作用前调用它。任何一项不符即拒绝，且拒绝原因写入审计账
-    /// （§6.8）。
+    /// 在**受理**时调用，`uses_so_far` 必须是本次扣减**之前**的次数。受理成功即意味着这次
+    /// 使用已被原子预留（§10.3：新任务必须原子预留资源）。
+    ///
+    /// 交接给执行代理时不要再用它——那时次数已经扣过了，再判一次会把同一个动作算两次。
+    /// 交接用 [`ExecutionPermit::revalidate`]。
     pub fn authorizes(
         &self,
         intent: &ActionIntent,
         now: WallClock,
         uses_so_far: u8,
     ) -> Result<(), ContractError> {
-        if now >= self.expires_at {
-            return Err(ContractError::PermitExpired {
-                expires_at: self.expires_at.to_string(),
-            });
-        }
         if uses_so_far >= self.max_uses {
             return Err(ContractError::PermitExhausted {
                 max_uses: self.max_uses,
+            });
+        }
+        self.revalidate(intent, now)
+    }
+
+    /// 重新确认许可**此刻**仍然授权这次具体动作。
+    ///
+    /// 不含次数判定：次数在受理时已经扣减。保留有效期与参数绑定判定，因为
+    /// "受理通过、交接时已过期"或"受理后参数被改过"都必须被拦住（§12.2：短期授权、
+    /// 绑定具体参数与版本）。
+    pub fn revalidate(&self, intent: &ActionIntent, now: WallClock) -> Result<(), ContractError> {
+        if now >= self.expires_at {
+            return Err(ContractError::PermitExpired {
+                expires_at: self.expires_at.to_string(),
             });
         }
         if self.tool_id != intent.tool_id {

@@ -71,6 +71,12 @@ pub enum ContractError {
     #[error("{field} 必须至少包含一个引用")]
     MissingRefs { field: &'static str },
 
+    #[error("预测对象 {subject:?} 与期望作用对象 {expectation_subject:?} 不一致")]
+    ExpectationSubjectMismatch {
+        subject: String,
+        expectation_subject: String,
+    },
+
     #[error("同一证据同时出现在支持与反对两侧，矛盾未解决：{sample}")]
     ContradictoryEvidence { sample: String },
 

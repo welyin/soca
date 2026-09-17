@@ -103,12 +103,19 @@ fn new_permit(intent: &ActionIntent, permit: &str, max_uses: u8) -> ExecutionPer
     .expect("合法执行许可")
 }
 
+/// 预测与观测共用的对象引用。核验时两者逐字比较。
+const PREDICTED_SUBJECT: &str = "file:D:\\资料\\摘要\\summary.md";
+
 /// 与给定意图配套的预测。§6.3 要求动作前必须有可检查的预测。
 fn prediction_for(intent: &ActionIntent) -> Prediction {
     Prediction::new(
         intent.prediction_ref.clone(),
-        "授权目录中的目标文件内容".to_string(),
+        PREDICTED_SUBJECT.to_string(),
         "写入后文件版本变为新内容的哈希".to_string(),
+        Expectation::VersionEquals {
+            subject_ref: PREDICTED_SUBJECT.to_string(),
+            expected: "sha256:new".to_string(),
+        },
         TimeWindow::new(at(0), at(60)).expect("合法时间窗"),
         vec!["哈希不一致".to_string(), "文件不存在".to_string()],
         Uncertainty {
@@ -819,13 +826,17 @@ fn an_uncalibrated_probability_is_refused_on_the_way_into_the_store() {
     // 绕过 Prediction::new 直接拼一个结构体，模拟"别的代码路径"塞进来的自评分数。
     let forged = Prediction {
         prediction_ref: prediction_ref(),
-        subject: "授权目录中的目标文件内容".to_string(),
+        subject: PREDICTED_SUBJECT.to_string(),
         expected_change: "写入后文件版本变为新内容的哈希".to_string(),
+        expectation: Expectation::VersionEquals {
+            subject_ref: PREDICTED_SUBJECT.to_string(),
+            expected: "sha256:new".to_string(),
+        },
         window: TimeWindow::new(at(0), at(60)).unwrap(),
         failure_conditions: vec!["哈希不一致".to_string()],
         uncertainty: Uncertainty {
             probability: Some(CalibratedProbability {
-                subject: "授权目录中的目标文件内容".to_string(),
+                subject: PREDICTED_SUBJECT.to_string(),
                 horizon: TimeWindow::new(at(0), at(60)).unwrap(),
                 model_version: ModelVersion::new("sha256:llm-weights").expect("固定模型版本"),
                 calibration: CalibrationSource::Uncalibrated,

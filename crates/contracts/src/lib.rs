@@ -40,8 +40,8 @@ pub use crate::action::{
     Verdict, V1_FORBIDDEN_TOOL_PREFIXES,
 };
 pub use crate::belief::{
-    CalibratedProbability, CalibrationSource, Hypothesis, ModelSelfReport, Observation, Prediction,
-    Uncertainty,
+    CalibratedProbability, CalibrationSource, Expectation, Hypothesis, ModelSelfReport,
+    Observation, Prediction, Uncertainty,
 };
 pub use crate::data_state::{DataState, DataStateKind};
 pub use crate::envelope::{

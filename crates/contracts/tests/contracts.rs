@@ -86,6 +86,10 @@ fn sample_prediction() -> Prediction {
         PredictionRef::new("prediction:pred-7").expect("固定预测引用"),
         "已生成文件的内容哈希".to_string(),
         "与草稿哈希一致，且文件在授权目录内可见".to_string(),
+        Expectation::VersionEquals {
+            subject_ref: "已生成文件的内容哈希".to_string(),
+            expected: "sha256:new".to_string(),
+        },
         window(0, 60),
         vec!["哈希不一致".to_string(), "文件不存在".to_string()],
         uncertainty_none(),
@@ -343,6 +347,9 @@ fn prediction_requires_falsifiable_failure_conditions() {
         PredictionRef::new("prediction:pred-8").expect("固定预测引用"),
         "整理结果".to_string(),
         "会变好".to_string(),
+        Expectation::Absent {
+            subject_ref: "整理结果".to_string(),
+        },
         window(0, 60),
         Vec::new(),
         uncertainty_none(),
@@ -353,6 +360,27 @@ fn prediction_requires_falsifiable_failure_conditions() {
             field: "prediction.failure_conditions"
         })
     );
+}
+
+#[test]
+fn a_prediction_cannot_expect_a_different_object_than_it_names() {
+    // "预测 A、检查 B"这种错位必须被拒绝，否则后验判定会静默通过。
+    let mismatched = Prediction::new(
+        PredictionRef::new("prediction:pred-8").expect("固定预测引用"),
+        "已生成文件的内容哈希".to_string(),
+        "与草稿哈希一致".to_string(),
+        Expectation::VersionEquals {
+            subject_ref: "另一个对象".to_string(),
+            expected: "sha256:new".to_string(),
+        },
+        window(0, 60),
+        vec!["哈希不一致".to_string()],
+        uncertainty_none(),
+    );
+    assert!(matches!(
+        mismatched,
+        Err(ContractError::ExpectationSubjectMismatch { .. })
+    ));
 }
 
 #[test]
@@ -371,6 +399,10 @@ fn prediction_rejects_uncalibrated_probability_payload() {
         PredictionRef::new("prediction:pred-9").expect("固定预测引用"),
         "哈希一致".to_string(),
         "无变化".to_string(),
+        Expectation::VersionEquals {
+            subject_ref: "哈希一致".to_string(),
+            expected: "sha256:abc".to_string(),
+        },
         window(0, 60),
         vec!["哈希改变".to_string()],
         uncertainty,

@@ -218,6 +218,69 @@ impl Store {
         Ok(events)
     }
 
+    /// 读取某个任务下的全部事件，按提交序升序。
+    ///
+    /// 重放需要按任务取事件，而不是从头扫全库。本方法与 [`Store::read_events_after`] 共用同一
+    /// 个提交序概念，因此两者返回的顺序一致。
+    pub fn events_for_task(
+        &self,
+        task_id: &soca_contracts::TaskId,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.connection().prepare(
+            "SELECT sequence, envelope_json, recorded_at_utc
+               FROM events
+              WHERE task_id = ?1
+              ORDER BY sequence
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![task_id.to_string(), limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            let (sequence, envelope_json, recorded_at) = row?;
+            events.push(StoredEvent {
+                sequence,
+                envelope: serde_json::from_str(&envelope_json)?,
+                recorded_at: WallClock::from_rfc3339(&recorded_at)?,
+            });
+        }
+        Ok(events)
+    }
+
+    /// 某个事件流的下一个可用序号，初值为 `1`。
+    ///
+    /// §7.1 的流内顺序由 `(source_id, source_epoch, boot_id, source_sequence)` 定义，而表上对
+    /// 这个四元组有唯一约束。因此"下一个序号"必须从库里读，不能由调用方自己记一个计数器：
+    /// 进程重启或会话重建时，自记的计数器会从零重来，直接撞上唯一约束。
+    pub fn next_stream_sequence(
+        &self,
+        source_id: &soca_contracts::SourceId,
+        source_epoch: u32,
+        boot_id: &soca_contracts::BootId,
+    ) -> Result<u64, StorageError> {
+        let highest: Option<i64> = self.connection().query_row(
+            "SELECT MAX(source_sequence) FROM events
+              WHERE source_id = ?1 AND source_epoch = ?2 AND boot_id = ?3",
+            params![
+                source_id.to_string(),
+                i64::from(source_epoch),
+                boot_id.to_string()
+            ],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(highest.map_or(1, |value| (value as u64).saturating_add(1)))
+    }
+
     /// 最新提交序。用作游标的高水位；没有任何事件时返回 `0`。
     pub fn latest_sequence(&self) -> Result<i64, StorageError> {
         let sequence: i64 = self.connection().query_row(
