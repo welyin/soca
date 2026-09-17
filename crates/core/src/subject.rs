@@ -30,11 +30,12 @@
 
 use serde::Serialize;
 use soca_contracts::{
-    ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateSet, CapabilitySlice,
-    CognitiveUnit, ContextBundle, DataClass, EgressPolicy, EvidenceSlice, ExplorationQuota,
-    GoalBudget, GoalId, GoalStack, ModelBackend, ModelBudget, ModelOutput, ModelVersion,
-    Observation, OutputSchema, PermissionScope, Provenance, TaskId, ToolId, UserChannel, WallClock,
-    MAX_CONTEXT_EVIDENCE,
+    ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateReview, CandidateSet,
+    CapabilitySlice, CognitiveUnit, ContextBundle, DataClass, EgressPolicy, EvidenceSlice,
+    ExplorationQuota, GoalBudget, GoalId, GoalStack, ModelBackend, ModelBudget, ModelOutput,
+    ModelVersion, Observation, OutputSchema, PermissionScope, Provenance, Selection,
+    SelectionPolicy, TaskId, ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE,
+    select as select_candidate,
 };
 use soca_core_actors::DesktopAndFilesCluster;
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
@@ -408,6 +409,26 @@ impl Subject {
             output: validated.output,
             attempts: validated.attempts,
         })
+    }
+
+    /// §4.1 L3、§6 第 5 步：在当前候选里选一条推进。
+    ///
+    /// 检验档案由调用方给出。本版没有能生成它们的工具验证器——那是 §4.3"证据与风险评估"
+    /// 簇里"代码/工具验证"与"反方假设"两个槽位——所以传空档案是合法的：选择仍会按证据门槛、
+    /// 未决冲突与检验结果工作，只是少了"主动去找反例"这一步。
+    ///
+    /// 返回候选集合一起交出去，是因为选择结果是**下标**：调用方要能自己看到被选中的是哪一条，
+    /// 而不是只能相信一个数字。
+    pub fn select(
+        &self,
+        reports: Vec<CandidateReview>,
+        policy: &SelectionPolicy,
+        risk: ActionLevel,
+        at: WallClock,
+    ) -> Result<(CandidateSet, Selection), CoreError> {
+        let candidates = self.cluster.propose(at)?;
+        let selection = select_candidate(&candidates, reports, policy, risk)?;
+        Ok((candidates, selection))
     }
 
     /// 记一次探索（§4.1 L6 的探索配额）。

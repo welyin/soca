@@ -36,6 +36,7 @@ pub mod inference;
 pub mod instance;
 pub mod memory;
 pub mod policy;
+pub mod selection;
 pub mod time;
 pub mod topology;
 pub mod unit;
@@ -89,6 +90,10 @@ pub use crate::ids::{
 pub use crate::memory::{MemoryEntry, MemoryKind, MemoryStatus};
 pub use crate::policy::{
     ActionLevel, ApprovalRequirement, DataClass, EgressPolicy, EgressVerdict, PermissionScope,
+};
+pub use crate::selection::{
+    select, CandidateReview, Selection, SelectionOutcome, SelectionPolicy, VerificationKind,
+    VerificationOutcome,
 };
 pub use crate::time::{Monotonic, TimeWindow, WallClock};
 pub use crate::topology::{
