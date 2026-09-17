@@ -1,0 +1,20 @@
+[package]
+name = "soca-storage"
+description = "SoCA 存储层：带 outbox 的事件日志、动作账与单元目录（架构文档 §7.3 / §9.3）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+soca-contracts = { path = "../contracts" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
