@@ -403,6 +403,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 
 [[package]]
+name = "soca-console"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soca-contracts",
+ "soca-core",
+ "soca-core-actors",
+ "soca-model-gateway",
+ "soca-storage",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "soca-contracts"
 version = "0.1.0"
 dependencies = [

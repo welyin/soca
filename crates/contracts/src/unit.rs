@@ -500,7 +500,10 @@ impl CandidateSet {
 /// [`CognitiveUnit::observe`] 与 [`CognitiveUnit::handle_result`] 这两处，也就是"收到事实"
 /// 与"比较预测和现实"这两个时刻。让 `propose` 能改状态，等于允许单元在提出主张时顺手把自己
 /// 的信念调成方便通过的样子。
-pub trait CognitiveUnit {
+///
+/// 要求 `Send`：§4.1 L4 把重计算放进有上限的 worker 池，单元要能在池里移动。不要求 `Send`
+/// 会把整个架构钉死在一条线程上，而那是一条等到最后才发现的结构性限制。
+pub trait CognitiveUnit: Send {
     /// 单元标识。
     fn unit_id(&self) -> &UnitId;
 

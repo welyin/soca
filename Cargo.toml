@@ -8,6 +8,7 @@ members = [
     "crates/game-host",
     "crates/core-actors",
     "crates/model-gateway",
+    "crates/console",
 ]
 
 [workspace.package]

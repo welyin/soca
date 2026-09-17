@@ -41,7 +41,9 @@ pub struct ModelRequest {
 /// 收 `&self` 而不是 `&mut self`：§5 要求模型服务"按模型家族 0–2 个起步，**不按单元数启动**"，
 /// 也就是许多认知单元共享同一个模型服务。`&self` 才能让一个传输层挂在 `Arc` 后面被共享。
 /// 因此实现方若有计数需求，用原子量而不是 `&mut self`。
-pub trait Transport {
+///
+/// `Send + Sync` 是那句"共享"的具体含义：一个不能被多个单元同时使用的传输层，谈不上共享。
+pub trait Transport: Send + Sync {
     /// 发一次调用。
     ///
     /// 实现方**必须**遵守 `request.budget.max_wall_millis` 设置自己的超时，并在超时后
