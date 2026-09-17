@@ -9,7 +9,7 @@ use soca_contracts::{
     ActionLevel, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota, GoalBudget, GoalId,
     PermissionScope, SelectionPolicy, UserChannel, WallClock,
 };
-use soca_core::Subject;
+use soca_core::{RoundOutcome, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
 
 use crate::http::{Request, Response};
@@ -54,6 +54,7 @@ pub fn handle(
         ("GET", "/api/model") => Response::json(200, &model.summary()),
         ("POST", "/api/model") => connect_model(subject, model, request),
         ("POST", "/api/model/reset") => reset_model(subject, model),
+        ("POST", "/api/loop") => run_loop(subject, request, at),
         ("POST", "/api/select") => select_ladder(subject, request, at),
         ("POST", "/api/chat") => chat(subject, request, at),
         ("POST", "/api/observe") => observe(subject, request, at),
@@ -290,6 +291,61 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
         }
         Err(error) => internal(error.to_string()),
     }
+}
+
+/// 连续跑若干轮 §6 的闭环。
+///
+/// 轮数上限 32：一个 HTTP 请求不该能把主体占住任意长的时间。真正需要长跑的场景要的是
+/// 一个后台调度器（§4.1 L4 的调度器与预算仲裁），而不是一个更长的请求——把它塞进请求里，
+/// 界面会一直转圈，而你也无从知道它跑到哪一轮了。
+fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let risk = match parse_risk(payload.get("risk").and_then(Value::as_str)) {
+        Ok(level) => level,
+        Err(message) => return Response::text(400, message),
+    };
+    let rounds = payload
+        .get("rounds")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 32) as i64;
+
+    let policy = SelectionPolicy::default();
+    let mut reports = Vec::new();
+    for index in 0..rounds {
+        // 每一轮的时刻往后挪一秒。同一时刻连推多轮会让审计账里的时间序看起来像同一件事，
+        // 而"先观测、后得出结论"这个顺序正是靠时间序读出来的。
+        let report = match subject.run_round(&policy, risk, at.plus_seconds(index + 1)) {
+            Ok(report) => report,
+            Err(error) => {
+                return Response::json(
+                    500,
+                    &json!({"error": "round_failed", "detail": error.to_string()}),
+                );
+            }
+        };
+        let finished = matches!(report.outcome, RoundOutcome::Finished { .. });
+        reports.push(json!({
+            "round": report.round,
+            "outcome": report.outcome,
+            "selected": report.selected,
+            "activations": report.activations,
+        }));
+        if finished {
+            break;
+        }
+    }
+
+    Response::json(
+        200,
+        &json!({
+            "risk": risk.as_str(),
+            "rounds": reports,
+            "state": subject.public_state(at).ok(),
+        }),
+    )
 }
 
 /// §4.1 L3、§6 第 4–5 步：在当前候选上做检验，然后选一条推进。

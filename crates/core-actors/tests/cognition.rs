@@ -92,7 +92,22 @@ fn file_version_does_not_guess_before_it_observes() {
     let watcher = FileVersion::new(WATCHED).expect("构造");
     let set = watcher.propose(at(0)).expect("提出候选");
 
-    assert!(set.candidates.is_empty(), "没看见过就不下结论");
+    // "不下结论"与"不去要证据"是两件事。只报未决而不提请求，闭环每一轮都会停在
+    // "需要更多信息"上——它说得出缺哪条观测，却没有任何人去取。
+    assert!(
+        !set.candidates
+            .iter()
+            .any(|candidate| matches!(candidate, Candidate::Claim { .. })),
+        "没看见过就不下结论"
+    );
+    assert!(
+        matches!(
+            set.candidates.as_slice(),
+            [Candidate::RequestObservation { subject_ref, .. }] if subject_ref == WATCHED
+        ),
+        "但要知道自己缺什么并把它要出来：{:?}",
+        set.candidates
+    );
     assert_eq!(set.unresolved.len(), 1);
     assert!(
         set.unresolved[0].missing[0].contains("尚未收到"),
@@ -166,8 +181,17 @@ fn file_version_drops_a_refuted_version() {
     );
     let set = watcher.propose(at(1)).expect("提出候选");
     assert!(
-        set.candidates.is_empty(),
+        !set.candidates
+            .iter()
+            .any(|candidate| matches!(candidate, Candidate::Claim { .. })),
         "退回未知状态，而不是继续用旧值"
+    );
+    assert!(
+        set.candidates
+            .iter()
+            .any(|candidate| matches!(candidate, Candidate::RequestObservation { .. })),
+        "被现实否定之后要重新观测——既不能继续用旧值，也不能干等着：{:?}",
+        set.candidates
     );
 }
 

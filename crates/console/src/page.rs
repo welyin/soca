@@ -189,6 +189,8 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
         <option value="a4">A4 高风险</option>
       </select>
       <button id="run-select" class="ghost">检验并选择</button>
+      <input id="loop-rounds" type="number" min="1" max="32" value="4" style="width:76px" title="跑几轮">
+      <button id="run-loop">跑几轮闭环</button>
     </div>
     <div class="hint">
       证据门槛是风险等级的函数：A0/A1 要 1 条，A2 起要 3 条。被检验否定的候选直接出局，
@@ -417,6 +419,48 @@ $("run-select").onclick = async function () {
   $("run-select").disabled = false;
   refresh();
 };
+
+$("run-loop").onclick = async function () {
+  $("run-loop").disabled = true;
+  try {
+    const result = await api("loop", {
+      risk: $("select-risk").value,
+      rounds: parseInt($("loop-rounds").value, 10) || 1,
+    });
+    $("select-out").textContent = JSON.stringify(result, null, 2);
+    result.rounds.forEach(function (round) {
+      log("第 " + round.round + " 轮：" + describeStep(round.outcome), "ok");
+    });
+  } catch (error) {
+    $("select-out").textContent = error.message;
+    log("闭环失败：" + error.message, "err");
+  }
+  $("run-loop").disabled = false;
+  refresh();
+};
+
+function describeStep(outcome) {
+  switch (outcome.kind) {
+    case "advanced":
+      switch (outcome.step.kind) {
+        case "observation":
+          return "补了一次观测：" + outcome.step.subject_ref;
+        case "claim":
+          return "记下结论" + (outcome.step.recorded ? "（新增）" : "（已记过，跳过）") +
+            "：" + outcome.step.statement;
+        default:
+          return "未能推进（" + outcome.step.candidate_kind + "）：" + outcome.step.reason;
+      }
+    case "needs_input":
+      return "需要输入：" + outcome.missing.join("；");
+    case "idle":
+      return "空转：没有可推进的候选";
+    case "finished":
+      return "结束：" + outcome.reason;
+    default:
+      return outcome.kind;
+  }
+}
 
 $("message").addEventListener("keydown", function (event) {
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) $("send").click();

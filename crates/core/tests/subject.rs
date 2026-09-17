@@ -7,10 +7,10 @@
 use soca_contracts::{
     ActionLevel, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
     GoalBudget, GoalId, GoalState, ModelBackend, ModelBudget, ModelOutput, ModelProposal,
-    ModelSelfReport, ModelVersion, OutputSchema, PermissionScope, SelectionPolicy, SubjectId,
-    TokenUsage, UserChannel, VerificationKind, Verdict, WallClock, MAX_CONTEXT_EVIDENCE,
+    MemoryKind, ModelSelfReport, ModelVersion, OutputSchema, PermissionScope, SelectionPolicy,
+    SubjectId, TokenUsage, UserChannel, VerificationKind, Verdict, WallClock, MAX_CONTEXT_EVIDENCE,
 };
-use soca_core::{ActionBroker, SimulatedOs, Subject};
+use soca_core::{ActionBroker, AdvanceStep, RoundOutcome, SimulatedOs, Subject};
 use soca_core_actors::{DesktopAndFilesCluster, Precondition};
 use soca_model_gateway::{DeterministicTransport, Transport, TransportError};
 use soca_storage::Store;
@@ -592,6 +592,182 @@ fn an_open_question_is_reported_but_does_not_freeze_the_selection() {
         "但它也不能被吞掉：选好了不等于什么都清楚了。实际：{}",
         selection.rationale
     );
+}
+
+// ---------------------------------------------------------------------------
+// §6 的闭环驱动
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_round_turns_current_evidence_into_a_recorded_conclusion() {
+    // 这一条是整条闭环真正跑起来的证据：证据 → 候选 → 检验 → 选择 → 结论落进 L5。
+    // 在此之前每一步都有测试，但没有任何东西把它们串成一轮。
+    let mut subject = new_subject(Vec::new());
+    let goal_id = delegate_a_goal(&mut subject);
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(1))
+        .expect("先给一次关于守望对象的观测");
+
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+        .expect("跑一轮");
+
+    assert_eq!(report.round, 1);
+    assert_eq!(report.activations, 1, "一轮消耗一次激活（§4.2）");
+    assert_eq!(report.goal_id.as_ref(), Some(&goal_id));
+    assert!(report.selection.is_some(), "报告要带上检验与选择的记录");
+
+    match &report.outcome {
+        RoundOutcome::Advanced {
+            step:
+                AdvanceStep::Claim {
+                    statement,
+                    memory_id,
+                    recorded,
+                },
+        } => {
+            assert!(statement.contains("版本"), "实际：{statement}");
+            assert!(memory_id.starts_with("memory:"), "实际：{memory_id}");
+            assert!(recorded, "第一次写入应当是新增");
+        }
+        other => panic!("应当记下一条结论，实际：{other:?}"),
+    }
+
+    // 结论确实进了 L5，而且带着证据与出处。
+    let recalled = subject
+        .store()
+        .recall(&owner(), Some(MemoryKind::Fact), at(3))
+        .expect("召回");
+    assert_eq!(recalled.len(), 1);
+    assert_eq!(recalled[0].evidence_refs.len(), 1);
+    assert!(
+        !recalled[0].provenance.is_instruction_authority(),
+        "结论是推出来的，不是用户指令（§7.1）"
+    );
+}
+
+#[test]
+fn running_the_loop_repeatedly_records_each_conclusion_once() {
+    // 两条性质一起测：
+    //  1. 条目标识由「命题 + 证据集合」派生，所以同一条结论写两遍是幂等的；
+    //  2. 闭环不会反复推进同一条结论（§6 第 2 步的路由雏形）。
+    //
+    // 少了第 2 条的话，环路会每一轮都选中证据最多的那条结论，跑满额度而什么都没变——
+    // 而那是"看起来在工作"里最像故障的一种。
+    let mut subject = new_subject(Vec::new());
+    let goal_id = delegate_a_goal(&mut subject);
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(1))
+        .expect("观测");
+
+    let mut claimed = 0;
+    for round in 0..6 {
+        let report = subject
+            .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(2 + round))
+            .expect("跑一轮");
+        if let RoundOutcome::Advanced {
+            step: AdvanceStep::Claim { recorded, .. },
+        } = &report.outcome
+        {
+            assert!(recorded, "同一条结论不该被写第二次：{:?}", report.outcome);
+            claimed += 1;
+        }
+    }
+
+    assert_eq!(claimed, 1, "一条结论只该被记一次");
+    assert_eq!(
+        subject.store().memory_count(&owner()).expect("计数"),
+        1,
+        "跑六轮也只有一条记忆"
+    );
+}
+
+#[test]
+fn a_round_without_evidence_goes_and_gets_some() {
+    // 没有证据时，簇提出的是观测请求而不是结论。观测请求会被真的执行（§6 第 1 步）——
+    // 这一轮不是空转，它补上了下一轮需要的东西。
+    let mut subject = new_subject(Vec::new());
+    let goal_id = delegate_a_goal(&mut subject);
+    subject.accept(&goal_id, at(1)).expect("受理");
+
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+        .expect("跑一轮");
+
+    match &report.outcome {
+        RoundOutcome::Advanced {
+            step:
+                AdvanceStep::Observation {
+                    subject_ref,
+                    evidence_ref,
+                },
+        } => {
+            assert!(!subject_ref.is_empty());
+            assert!(evidence_ref.starts_with("obs:"), "实际：{evidence_ref}");
+        }
+        other => panic!("没有证据时应当去观测，实际：{other:?}"),
+    }
+    assert_eq!(
+        subject.public_state(at(3)).expect("状态").observed_evidence,
+        1,
+        "这一轮补到的证据要真的进账"
+    );
+}
+
+#[test]
+fn a_round_without_an_open_goal_reports_finished_instead_of_an_error() {
+    // §6 第 9 步的"结束"是一条正常走向，不是一个异常。"没有目标可推进"和"程序坏了"
+    // 对界面与审计的含义完全不同。
+    let mut subject = new_subject(Vec::new());
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(0))
+        .expect("跑一轮");
+
+    assert!(matches!(report.outcome, RoundOutcome::Finished { .. }));
+    assert!(report.selection.is_none());
+    assert_eq!(report.activations, 0, "没干活就不该扣额度");
+}
+
+#[test]
+fn the_loop_stops_when_all_goals_exhaust_their_activations() {
+    // §4.2：额度耗尽之后是"请求预算升级或返回部分结果"，两条路都需要一个明确的停止点。
+    let mut subject = new_subject(Vec::new());
+    let goal_id = subject
+        .delegate(
+            "为已授权目录生成摘要",
+            UserChannel::Chat,
+            scope(ActionLevel::A1),
+            GoalBudget::new(4, 1, 4096, 3_600_000).expect("只有一次激活的额度"),
+            ExplorationQuota::new(0),
+            at(0),
+            None,
+        )
+        .expect("委托");
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(1))
+        .expect("观测");
+
+    let first = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+        .expect("第一轮");
+    assert!(
+        matches!(first.outcome, RoundOutcome::Advanced { .. }),
+        "额度还在，应当推进：{:?}",
+        first.outcome
+    );
+
+    let second = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(3))
+        .expect("第二轮");
+    assert!(
+        matches!(second.outcome, RoundOutcome::Finished { .. }),
+        "额度用尽应当停下来，实际：{:?}",
+        second.outcome
+    );
+    assert_eq!(second.activations, 0);
 }
 
 #[test]

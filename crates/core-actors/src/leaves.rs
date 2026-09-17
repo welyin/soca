@@ -204,7 +204,14 @@ impl CognitiveUnit for FileVersion {
                 unresolved: Vec::new(),
             }),
             None => Ok(CandidateSet {
-                candidates: Vec::new(),
+                // **知道自己缺什么，就把它要出来。** 只报"未决"而不提请求，会让闭环每一轮
+                // 都停在"需要更多信息"上——它说得出缺哪条观测，却没有任何人去取。
+                // 同一个簇里的 `ActionPrecondition` 一直是这么做的（缺前提就申请观测），
+                // 这里原本漏了，表现是闭环第一轮之后再也推不动。
+                candidates: vec![Candidate::RequestObservation {
+                    subject_ref: self.watched.clone(),
+                    reason: "尚无该对象的任何观测，无法给出结论".to_string(),
+                }],
                 conflicts: Vec::new(),
                 unresolved: vec![Unresolved {
                     question: format!("{} 当前是什么版本", self.watched),

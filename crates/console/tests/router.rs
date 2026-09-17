@@ -672,6 +672,70 @@ fn a_high_risk_run_searches_for_counter_examples() {
 }
 
 #[test]
+fn the_loop_advances_the_subject_over_several_rounds() {
+    // 一次请求跑若干轮 §6 的闭环，而且要真的改变状态——不是把同一轮重复报几遍。
+    let mut subject = subject();
+    let goal_id = json(&call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        r#"{"message":"核对摘要文件"}"#,
+    ))["goal_id"]
+        .as_str()
+        .expect("有标识")
+        .to_string();
+    assert!(goal_id.starts_with("goal:"));
+
+    let response = call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 4})),
+    );
+    assert_eq!(response.status, 200);
+    let payload = json(&response);
+    let rounds = payload["rounds"].as_array().expect("数组");
+    assert!(!rounds.is_empty());
+
+    // 第一轮没有证据，应当去观测。
+    assert_eq!(rounds[0]["outcome"]["kind"], "advanced");
+    assert_eq!(rounds[0]["outcome"]["step"]["kind"], "observation");
+    assert_eq!(rounds[0]["activations"], 1);
+
+    // 观测补上之后，后续某一轮应当把结论写进记忆。
+    assert!(
+        rounds.iter().any(|round| round["outcome"]["step"]["kind"] == "claim"),
+        "跑了几轮之后应当得出一条结论：{rounds:?}"
+    );
+
+    let state = &payload["state"];
+    assert!(
+        state["observed_evidence"].as_u64().expect("数字") >= 1,
+        "闭环补到的证据要真的进账"
+    );
+    assert!(
+        state["ledger_records"].as_u64().expect("数字") >= 1,
+        "证据要进台账"
+    );
+    assert_eq!(state["model_calls"], 0, "这一轮闭环没有调用模型");
+}
+
+#[test]
+fn the_loop_stops_early_when_there_is_nothing_left_to_do() {
+    // 没有目标时闭环立刻报结束，而不是空转满请求的轮数——空转会把审计账塞满一样的记录。
+    let mut subject = subject();
+    let payload = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 8})),
+    ));
+    let rounds = payload["rounds"].as_array().expect("数组");
+    assert_eq!(rounds.len(), 1, "一轮就该停：{rounds:?}");
+    assert_eq!(rounds[0]["outcome"]["kind"], "finished");
+}
+
+#[test]
 fn an_invalid_risk_level_is_refused() {
     let mut subject = subject();
     assert_eq!(

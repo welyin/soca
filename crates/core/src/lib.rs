@@ -42,4 +42,6 @@ pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
 pub use crate::session::{
     evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,
 };
-pub use crate::subject::{GoalSummary, ModelConsultation, PublicState, Subject};
+pub use crate::subject::{
+    AdvanceStep, GoalSummary, LoopRound, ModelConsultation, PublicState, RoundOutcome, Subject,
+};

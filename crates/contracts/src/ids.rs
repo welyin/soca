@@ -307,6 +307,23 @@ prefixed_id!(
     ["obs:", "tool-result:", "receipt:"]
 );
 
+impl EvidenceRef {
+    /// 这条证据引用编码的原始事件标识。
+    ///
+    /// 只有 `obs:` 形状的引用携带事件标识——它是 [`crate::Observation`] 的证据引用，由
+    /// `obs:{event_id}` 构成（见 `Session::observe_event`）。`tool-result:` 与 `receipt:`
+    /// 指向动作侧的事实，它们没有原始事件。
+    ///
+    /// 做成方法而不是让调用方各自 `strip_prefix`：这个关系是**契约的一部分**——§7.1 要求
+    /// 派生物指向原始事件。散在各处的字符串切分迟早会有一处写错，而那种错误的表现是
+    /// "来源链断了"，很难归因到某一行。
+    pub fn origin_event_id(&self) -> Option<EventId> {
+        self.as_str()
+            .strip_prefix("obs:")
+            .and_then(|raw| EventId::parse(raw).ok())
+    }
+}
+
 prefixed_id!(
     /// 关系边引用（来源谱系、依赖、冲突等）。
     RelationRef,

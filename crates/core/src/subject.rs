@@ -31,10 +31,12 @@
 use serde::Serialize;
 use soca_contracts::{
     ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateSet, CapabilitySlice,
-    CognitiveUnit, ContextBundle, DataClass, EgressPolicy, EvidenceSlice, ExplorationQuota,
-    GoalBudget, GoalId, GoalStack, ModelBackend, ModelBudget, ModelOutput, ModelVersion,
-    Observation, OutputSchema, PermissionScope, Provenance, Selection, SelectionPolicy, TaskId,
-    ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
+    CognitiveUnit, ContextBundle, ContractError, DataClass, DerivationKind, EgressPolicy,
+    EvidenceSlice, ExplorationQuota, GoalBudget, GoalId, GoalStack, GoalState, MemoryEntry,
+    MemoryId, MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Observation,
+    OutputSchema, PermissionScope, Provenance, Selection, SelectionOutcome, SelectionPolicy,
+    Sha256Hex, TaskId, ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE,
+    select as select_candidate,
 };
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
@@ -80,6 +82,104 @@ pub struct GoalSummary {
     pub remaining_explorations: u32,
     /// 是否已经超过截止时间。
     pub expired: bool,
+}
+
+/// 本次会话里最多记住多少条"已推进过的结论"。
+pub const MAX_HANDLED_CLAIMS: usize = 128;
+
+/// 派生出记忆条目标识的种子：命题 + 排序后的证据集合。
+///
+/// 用 `\u{1f}`（单元分隔符）而不是逗号或空串连接，是为了让 `"ab" + "c"` 与 `"a" + "bc"`
+/// 得到不同的种子。用可打印字符当分隔符的话，命题里本来就可能出现它。
+fn derivation_seed(statement: &str, evidence_refs: &[soca_contracts::EvidenceRef]) -> String {
+    let mut seed = statement.to_string();
+    let mut refs: Vec<String> = evidence_refs
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    refs.sort_unstable();
+    for reference in refs {
+        seed.push('\u{1f}');
+        seed.push_str(&reference);
+    }
+    seed
+}
+
+/// 一轮闭环的走向（§6 第 9 步）。
+///
+/// §6 第 9 步的原话是"有限预算内继续、回退、请求澄清或结束"。这些变体就是那句话的类型化
+/// 形式——把"结束"与"空转"分开，是因为它们对界面与审计的含义不同：前者说明该收工了，
+/// 后者说明这一轮什么也没发生但还可能继续。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RoundOutcome {
+    /// 按选中的候选推进了一步。
+    Advanced {
+        /// 走的是哪一步。
+        step: AdvanceStep,
+    },
+    /// 需要外部输入（§6 第 9 步的"请求澄清"）。
+    NeedsInput {
+        /// 缺什么。
+        missing: Vec<String>,
+    },
+    /// 没有可推进的候选，这一轮空转。
+    Idle,
+    /// 没有还能推进的目标了。§6 第 9 步的"结束"。
+    Finished {
+        /// 为什么结束。
+        reason: &'static str,
+    },
+}
+
+/// 一轮里实际做成了什么。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AdvanceStep {
+    /// 补了一次观测（§6 第 1 步）。
+    Observation {
+        /// 观测对象。
+        subject_ref: String,
+        /// 新产生的证据引用。
+        evidence_ref: String,
+    },
+    /// 把一条结论写成了记忆（§4.1 L5、§13.2）。
+    Claim {
+        /// 命题。
+        statement: String,
+        /// 记忆条目标识。
+        memory_id: String,
+        /// 是否真的新增了条目。`false` 表示这条结论此前已记过（幂等）。
+        recorded: bool,
+    },
+    /// 这条候选需要一条本版还没有的通路。
+    Unsupported {
+        /// 候选种类。
+        candidate_kind: String,
+        /// 为什么走不通。
+        reason: String,
+    },
+}
+
+/// 一轮闭环的报告（§6）。
+///
+/// 与 [`crate::session::RoundReport`] 不是一回事：那个是一**次动作**走完 §6 第 3–8 步的报告，
+/// 这个是**一轮认知循环**（观测 → 检验 → 选择 → 推进）的报告。一个认知轮里可以包含零个
+/// 动作，也可以在一次动作上停住等审批。
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LoopRound {
+    /// 第几轮（主体内部计数）。
+    pub round: u64,
+    /// 走向。
+    pub outcome: RoundOutcome,
+    /// 第 4–5 步的检验与选择。没有可推进的目标时为 `None`。
+    pub selection: Option<Selection>,
+    /// 选中的是第几条候选。
+    pub selected: Option<usize>,
+    /// 这一轮消耗的激活次数。
+    pub activations: u32,
+    /// 这一轮推进的目标。
+    pub goal_id: Option<GoalId>,
 }
 
 /// 供界面读取的公开状态。
@@ -134,6 +234,17 @@ pub struct Subject {
     /// 这是一个**有界的近期窗口**，不是长期记忆——长期记忆是 L5 的职责。让它无限增长的话，
     /// 一个跑了一天的进程会攒下几万条，而 §17 的长时运行验收要求"内存和日志增长符合配额"。
     observed: Vec<EvidenceSlice>,
+    /// 已经跑过的轮数（§6 的闭环计数）。
+    rounds: u64,
+    /// 本次会话里已经写进记忆的结论，键是 [`derivation_seed`]。
+    ///
+    /// 这是 §6 第 2 步那个"路由器"的雏形。那句话是"按任务、权限、来源和预算**选择少数
+    /// 单元**"，而本版只做了其中最小的一条：**同一条结论不重复推进**。
+    ///
+    /// 只过滤结论、不过滤观测请求，是因为两者的重复语义不同：重推一条已经记过的结论什么也
+    /// 不改变（它是幂等的），而**再观测一次是合理的**——世界会变，同一对象的新观测正是
+    /// "我先前判断错了"的证据来源。把观测也一并过滤掉，等于把那条路封死。
+    handled_claims: Vec<String>,
 }
 
 impl std::fmt::Debug for Subject {
@@ -182,6 +293,8 @@ impl Subject {
             remote_authorized,
             egress: EgressPolicy::Strict,
             observed: Vec::new(),
+            rounds: 0,
+            handled_claims: Vec::new(),
         })
     }
 
@@ -431,6 +544,224 @@ impl Subject {
         let reviews = review_all(&candidates, self.cluster.ledger(), &review_policy);
         let selection = select_candidate(&candidates, reviews, policy, risk)?;
         Ok((candidates, selection))
+    }
+
+    /// 跑一轮 §6 的闭环（第 3–8 步），并按第 9 步给出走向。
+    ///
+    /// 这一轮**不**执行副作用。本版还没有执行许可的签发与审批通路（§12.2），所以
+    /// `RequestTool` 与 `RequestAction` 一律记为 [`AdvanceStep::Unsupported`] 并如实说出
+    /// 原因。把它做成"静默跳过"的话，界面上会显示"跑了二十轮什么也没发生"，而真正的原因
+    /// ——缺一条通路——看不出来。
+    ///
+    /// 一轮消耗一次激活（§4.2）。额度耗尽的判定在 [`GoalStack`] 里，因此"跑到一半没额度了"
+    /// 与"一开始就没有可推进的目标"是两条可区分的路径。
+    pub fn run_round(
+        &mut self,
+        policy: &SelectionPolicy,
+        risk: ActionLevel,
+        at: WallClock,
+    ) -> Result<LoopRound, CoreError> {
+        self.rounds = self.rounds.saturating_add(1);
+        let round = self.rounds;
+
+        let Some(goal_id) = self.next_open_goal() else {
+            return Ok(LoopRound {
+                round,
+                outcome: RoundOutcome::Finished {
+                    reason: "没有还能推进的目标（全部结束，或额度已耗尽）",
+                },
+                selection: None,
+                selected: None,
+                activations: 0,
+                goal_id: None,
+            });
+        };
+
+        // 先扣额度再干活。反过来的话，一次失败的运行不会留下痕迹，而额度记账一旦漏记，
+        // 它就失去了作为"该升级预算了"触发器的意义（§4.2）。
+        self.goals.activate(&goal_id)?;
+
+        let (candidates, selection) = self.select_filtered(policy, risk, at)?;
+        let selected = selection.selected_index();
+
+        let outcome = match selection.outcome {
+            SelectionOutcome::Selected { index } => {
+                let step = self.advance(&candidates.candidates[index], at)?;
+                // 推进过的结论记下来，下一轮不再重复推它（§6 第 2 步的路由雏形）。
+                if let Candidate::Claim {
+                    statement,
+                    evidence_refs,
+                } = &candidates.candidates[index]
+                {
+                    self.remember_handled(derivation_seed(statement, evidence_refs));
+                }
+                RoundOutcome::Advanced { step }
+            }
+            SelectionOutcome::NeedsMoreInformation { ref missing } => RoundOutcome::NeedsInput {
+                missing: missing.clone(),
+            },
+            SelectionOutcome::NothingToPursue => RoundOutcome::Idle,
+        };
+
+        Ok(LoopRound {
+            round,
+            outcome,
+            selection: Some(selection),
+            selected,
+            activations: 1,
+            goal_id: Some(goal_id),
+        })
+    }
+
+    /// 把选中的一条候选推进一步。
+    fn advance(&mut self, candidate: &Candidate, at: WallClock) -> Result<AdvanceStep, CoreError> {
+        match candidate {
+            Candidate::RequestObservation { subject_ref, .. } => {
+                // 观测的数据类别取 personal：**保守的那一档**。低估类别会让本该留在本地的
+                // 内容被允许出站，而 §8 的默认是"私人数据不得出站"；高估的代价只是让本地模型
+                // 也守 strict。默认值的方向要朝安全那一侧。
+                let record = self.observe(subject_ref, DataClass::Personal, at)?;
+                Ok(AdvanceStep::Observation {
+                    subject_ref: subject_ref.clone(),
+                    evidence_ref: record.observation.evidence_ref.to_string(),
+                })
+            }
+            Candidate::Claim {
+                statement,
+                evidence_refs,
+            } => {
+                // §13.2 把学习分成三种，语义候选是其中一种。结论落进 L5。
+                //
+                // 条目标识由**命题 + 证据集合**派生，因此同一条结论**从同一批证据**重复写出
+                // 是幂等的：跑一百轮不会攒出一百条同样的记忆。
+                //
+                // 只从命题派生是不够的——那样"同一个断言、换了一批证据"会撞成同一个标识却
+                // 内容不同，于是被 §7.2 的"标识不得复用"规则拒掉。而那其实是一次**独立的
+                // 第二次推导**，它本该成为自己的一条记忆：两条各自都能追溯到自己的证据。
+                // 这个缺陷是 running_the_same_round_twice_records_the_conclusion_once 抓到的。
+                let memory_id = MemoryId::new(format!(
+                    "memory:{}",
+                    Sha256Hex::of_bytes(derivation_seed(statement, evidence_refs).as_bytes())
+                ))?;
+
+                // 幂等：已经有过就不重写。查的是 `memory_including_hidden` 而不是 `memory`
+                // ——一条被用户删除的记忆不能因为"又推出来一次"而复活。§12.3 的删除是终局，
+                // 而"重新推导"恰恰是最容易绕过它的那条路。
+                if self
+                    .store
+                    .memory_including_hidden(&memory_id)?
+                    .is_some()
+                {
+                    return Ok(AdvanceStep::Claim {
+                        statement: statement.clone(),
+                        memory_id: memory_id.to_string(),
+                        recorded: false,
+                    });
+                }
+                let entry = MemoryEntry::new(
+                    memory_id.clone(),
+                    MemoryKind::Fact,
+                    self.owner.clone(),
+                    Some(self.task.clone()),
+                    statement.clone(),
+                    evidence_refs.clone(),
+                    self.claim_provenance(evidence_refs)?,
+                    DataClass::Personal,
+                    at,
+                )?
+                .with_unit(self.cluster.unit_id().clone());
+                let recorded = self.store.record_memory(&entry)?;
+                Ok(AdvanceStep::Claim {
+                    statement: statement.clone(),
+                    memory_id: memory_id.to_string(),
+                    recorded,
+                })
+            }
+            other => Ok(AdvanceStep::Unsupported {
+                candidate_kind: other.kind().as_str().to_string(),
+                reason: "本版还没有执行许可的签发与审批通路；动作类候选无法推进（§12.2）"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// 一条结论的出处（§7.1）。
+    ///
+    /// 结论是能力簇从观测里推出来的，所以出处是 `Derived`，指向它引用的第一条可解析来源的
+    /// 原始事件。**解析不出来就失败**，而不是编一个出处——§7.1 要求派生物必须指回原始事件，
+    /// 一个指向空气的出处比没有出处更糟：它会让审计以为这条链条是完整的。
+    ///
+    /// `transform` 取 `Classification` 只是因为 [`DerivationKind`] 那一组里没有"推导"这一项，
+    /// 它是几个选项中偏离最小的一个。这一点写在这里而不是装作贴切。
+    fn claim_provenance(
+        &self,
+        evidence_refs: &[soca_contracts::EvidenceRef],
+    ) -> Result<Provenance, CoreError> {
+        for reference in evidence_refs {
+            if let Some(source_event_id) = reference.origin_event_id() {
+                return Ok(Provenance::Derived {
+                    source_event_id,
+                    model_version: ModelVersion::new("sha256:cluster-deterministic")?,
+                    transform: DerivationKind::Classification,
+                });
+            }
+        }
+        Err(CoreError::Contract(ContractError::MissingRefs {
+            field: "memory.provenance.source_event_id",
+        }))
+    }
+
+    /// 与 [`Subject::select`] 相同，但**滤掉本次会话里已经推进过的结论**。
+    ///
+    /// 公开的 `select` 不做这层过滤：它是一个查看接口，要如实展示簇当前提出了什么，
+    /// 包括那些已经记过的。而闭环用的是这一份——否则它会每一轮都选中同一条结论，
+    /// 跑满额度也什么都没变。
+    fn select_filtered(
+        &self,
+        policy: &SelectionPolicy,
+        risk: ActionLevel,
+        at: WallClock,
+    ) -> Result<(CandidateSet, Selection), CoreError> {
+        let mut candidates = self.cluster.propose(at)?;
+        candidates.candidates.retain(|candidate| match candidate {
+            Candidate::Claim {
+                statement,
+                evidence_refs,
+            } => !self
+                .handled_claims
+                .contains(&derivation_seed(statement, evidence_refs)),
+            _ => true,
+        });
+
+        let review_policy = ReviewPolicy::for_risk(risk, policy.high_risk_from, policy.max_checks);
+        let reviews = review_all(&candidates, self.cluster.ledger(), &review_policy);
+        let selection = select_candidate(&candidates, reviews, policy, risk)?;
+        Ok((candidates, selection))
+    }
+
+    /// 记下一条已经推进过的结论，并保持有界。
+    fn remember_handled(&mut self, seed: String) {
+        if self.handled_claims.contains(&seed) {
+            return;
+        }
+        self.handled_claims.push(seed);
+        // 有界：与证据池同一个理由（§17 的长时运行验收要求内存增长符合配额）。淘汰最早的
+        // 一条，意味着一条很久以前记过的结论有可能被重新推导一次——那只是重写一遍同样的
+        // 记忆，是幂等的，代价可以接受。
+        if self.handled_claims.len() > MAX_HANDLED_CLAIMS {
+            self.handled_claims.remove(0);
+        }
+    }
+
+    /// 下一个还能推进的目标。
+    ///
+    /// 只挑 `Active` 且额度未耗尽的。§6 第 9 步的"结束"主要是从这里发生的：目标全部结束、
+    /// 或全部用完额度，闭环就该停，而不是继续空转。
+    fn next_open_goal(&self) -> Option<GoalId> {
+        self.goals
+            .iter()
+            .find(|goal| goal.state == GoalState::Active && !goal.budget.is_exhausted())
+            .map(|goal| goal.goal_id.clone())
     }
 
     /// 记一次探索（§4.1 L6 的探索配额）。
