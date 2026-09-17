@@ -18,7 +18,10 @@ use soca_contracts::{
     WallClock, Workspace, WorkspaceNote, SCHEMA_VERSION,
 };
 
-use crate::leaves::{observation_of, ActionPrecondition, FileVersion, PostconditionVerify, Precondition};
+use crate::evidence::{EvidenceLedger, EvidenceRecord};
+use crate::leaves::{
+    observation_of, ActionPrecondition, FileVersion, PostconditionVerify, Precondition,
+};
 
 /// §4.3"桌面与文件"能力簇。
 ///
@@ -31,6 +34,11 @@ pub struct DesktopAndFilesCluster {
     strategy_version: StrategyVersion,
     leaves: Vec<Box<dyn CognitiveUnit>>,
     workspace: Workspace,
+    /// 本簇见过的每条证据的完整记录（观测对象、值、来源链、观测者）。
+    ///
+    /// 与黑板分工不同：黑板记"哪些证据进过这个簇"，台账记"每条证据到底说了什么"。
+    /// §4.3「来源核对」需要的是后者——没有来源链，就无法判断两条证据是不是同一次观测的两次抄写。
+    ledger: EvidenceLedger,
     /// 本簇直接摄入的观测数（不含子单元各自的变化）。
     ingested: u64,
 }
@@ -42,6 +50,7 @@ impl std::fmt::Debug for DesktopAndFilesCluster {
             .field("unit_id", &self.unit_id)
             .field("leaves", &self.leaf_ids())
             .field("workspace", &self.workspace)
+            .field("ledger", &self.ledger.len())
             .field("ingested", &self.ingested)
             .finish()
     }
@@ -68,6 +77,7 @@ impl DesktopAndFilesCluster {
                 Box::new(PostconditionVerify::new()?),
             ],
             workspace: Workspace::new(),
+            ledger: EvidenceLedger::new(),
             ingested: 0,
         })
     }
@@ -75,6 +85,14 @@ impl DesktopAndFilesCluster {
     /// L2 黑板（只读）。
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+
+    /// 证据台账（只读）。
+    ///
+    /// 只借出只读引用，簇之外没有写入入口——与黑板同一条理由：§4.1 要求
+    /// "证据不能被执行层改写"，而"缺失的写入方法"比"约定别写"更靠得住。
+    pub fn ledger(&self) -> &EvidenceLedger {
+        &self.ledger
     }
 
     /// 子单元标识。
@@ -111,15 +129,17 @@ impl CognitiveUnit for DesktopAndFilesCluster {
         // 顺序不能反。反过来的话，子单元会先拿证据下注，而黑板上还没有这条证据；随后
         // `propose` 的 L2 门会把自己的子单元整批挡下——一个自相矛盾的中间态。
         if let Some(observation) = observation_of(event) {
-            self.workspace.post(
-                observation.subject.clone(),
-                WorkspaceNote::Finding {
-                    statement: format!("{} 的版本是 {}", observation.subject, observation.value),
-                    evidence_refs: vec![observation.evidence_ref],
-                },
-                &self.unit_id,
-                at,
-            )?;
+            let note = WorkspaceNote::Finding {
+                statement: format!("{} 的版本是 {}", observation.subject, observation.value),
+                evidence_refs: vec![observation.evidence_ref.clone()],
+            };
+            // 台账与黑板一起更新，顺序在黑板上先落定之后。反过来的话，一条被黑板拒绝的
+            // 观测（超出主题数或字节上限）会留在台账里，于是核对时"手边有一份材料"而
+            // "黑板上没有这条证据"——两个事实互相矛盾，而后续的候选校验会因此时好时坏。
+            self.workspace
+                .post(observation.subject.clone(), note, &self.unit_id, at)?;
+            self.ledger
+                .record(EvidenceRecord::from_observation(&observation));
             self.ingested = self.ingested.saturating_add(1);
         }
 

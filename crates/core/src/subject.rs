@@ -30,14 +30,13 @@
 
 use serde::Serialize;
 use soca_contracts::{
-    ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateReview, CandidateSet,
-    CapabilitySlice, CognitiveUnit, ContextBundle, DataClass, EgressPolicy, EvidenceSlice,
-    ExplorationQuota, GoalBudget, GoalId, GoalStack, ModelBackend, ModelBudget, ModelOutput,
-    ModelVersion, Observation, OutputSchema, PermissionScope, Provenance, Selection,
-    SelectionPolicy, TaskId, ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE,
-    select as select_candidate,
+    ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateSet, CapabilitySlice,
+    CognitiveUnit, ContextBundle, DataClass, EgressPolicy, EvidenceSlice, ExplorationQuota,
+    GoalBudget, GoalId, GoalStack, ModelBackend, ModelBudget, ModelOutput, ModelVersion,
+    Observation, OutputSchema, PermissionScope, Provenance, Selection, SelectionPolicy, TaskId,
+    ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
-use soca_core_actors::DesktopAndFilesCluster;
+use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
 use soca_storage::Store;
 
@@ -100,6 +99,8 @@ pub struct PublicState {
     pub workspace_evidence: usize,
     /// 本主体观测到的证据数。
     pub observed_evidence: usize,
+    /// 能力簇证据台账里的条数。核对结论时手边有多少材料，看的是这个数。
+    pub ledger_records: usize,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 动作账条数。
@@ -411,23 +412,24 @@ impl Subject {
         })
     }
 
-    /// §4.1 L3、§6 第 5 步：在当前候选里选一条推进。
+    /// §4.1 L3、§6 第 4–5 步：在当前候选上做检验，然后选一条推进。
     ///
-    /// 检验档案由调用方给出。本版没有能生成它们的工具验证器——那是 §4.3"证据与风险评估"
-    /// 簇里"代码/工具验证"与"反方假设"两个槽位——所以传空档案是合法的：选择仍会按证据门槛、
-    /// 未决冲突与检验结果工作，只是少了"主动去找反例"这一步。
+    /// 两段合成一次调用是有意的：检验的**产出**就是选择的**输入**，而把两段拆成两个公开方法
+    /// 会允许调用方跳过检验直接选——那样证据门槛就只剩一个数字，没有任何东西在它前面核对
+    /// 结论。要单看检验结果，读返回的 [`Selection::reviews`] 即可。
     ///
     /// 返回候选集合一起交出去，是因为选择结果是**下标**：调用方要能自己看到被选中的是哪一条，
     /// 而不是只能相信一个数字。
     pub fn select(
         &self,
-        reports: Vec<CandidateReview>,
         policy: &SelectionPolicy,
         risk: ActionLevel,
         at: WallClock,
     ) -> Result<(CandidateSet, Selection), CoreError> {
         let candidates = self.cluster.propose(at)?;
-        let selection = select_candidate(&candidates, reports, policy, risk)?;
+        let review_policy = ReviewPolicy::for_risk(risk, policy.high_risk_from, policy.max_checks);
+        let reviews = review_all(&candidates, self.cluster.ledger(), &review_policy);
+        let selection = select_candidate(&candidates, reviews, policy, risk)?;
         Ok((candidates, selection))
     }
 
@@ -477,6 +479,7 @@ impl Subject {
             workspace_topics: workspace.topic_count(),
             workspace_evidence: workspace.evidence().len(),
             observed_evidence: self.observed.len(),
+            ledger_records: self.cluster.ledger().len(),
             memory_entries: self.store.memory_count(&self.owner)?,
             actions: self.store.action_count()?,
             model_calls: self.gateway.calls(),

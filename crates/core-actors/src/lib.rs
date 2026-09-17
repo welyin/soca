@@ -5,6 +5,8 @@
 //! | [`map`] | 知识地图：自我定位、已知/未知分辨、前沿识别与已知地图上的路径规划 | §4.3"世界模型" |
 //! | [`leaves`] | 首批叶单元：文件版本、动作前提、动作后验证 | §4.3"桌面与文件" |
 //! | [`cluster`] | 能力簇：L2 黑板装配与子单元聚合 | §4.1 L2、§4.2 |
+//! | [`evidence`] | 证据台账：观测值、来源链与独立性判定 | §4.3"来源核对"、§7.1 |
+//! | [`verifiers`] | L3 的检验器：来源核对、反例搜索、结论依据核对 | §4.3、§6 第 4 步 |
 //!
 //! **现状（如实说明）：**§4.3 那张表列了 8 簇 × 8 叶 = 64 个职责槽，目前实现的是其中
 //! "桌面与文件"一簇里的三个槽，加上"世界模型"簇里的知识地图。其余槽位、L3 候选竞争、L6
@@ -22,11 +24,18 @@
 #![warn(missing_docs)]
 
 pub mod cluster;
+pub mod evidence;
 pub mod leaves;
 pub mod map;
+pub mod verifiers;
 
 pub use crate::cluster::DesktopAndFilesCluster;
+pub use crate::evidence::{EvidenceLedger, EvidenceRecord, MAX_EVIDENCE_RECORDS};
 pub use crate::leaves::{ActionPrecondition, FileVersion, PostconditionVerify, Precondition};
 pub use crate::map::{
     Cell, KnownCell, KnowledgeMap, MapUpdate, VIEW_AGENT_COLUMN, VIEW_AGENT_ROW,
+};
+pub use crate::verifiers::{
+    check_claim_grounding, check_source_independence, review_all, review_candidate,
+    search_counter_example, ReviewPolicy,
 };

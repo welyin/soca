@@ -174,6 +174,30 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>检验与选择</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §6 第 4–5 步：先核对结论，再按证据门槛选一条。核对分三类——结论依据核对（命题断言的
+      值必须在它自己引用的证据里）、来源核对（同源的两条证据不算两个来源）、反例搜索。
+      <b>低风险不搜反例</b>：对一份纯格式的工作，反方观点不是找不到，而是根本不存在。
+    </div>
+    <div class="row">
+      <select id="select-risk">
+        <option value="a0">A0 只读</option>
+        <option value="a1" selected>A1 本地计算</option>
+        <option value="a2">A2 改动对象 → 高风险档</option>
+        <option value="a3">A3 高风险</option>
+        <option value="a4">A4 高风险</option>
+      </select>
+      <button id="run-select" class="ghost">检验并选择</button>
+    </div>
+    <div class="hint">
+      证据门槛是风险等级的函数：A0/A1 要 1 条，A2 起要 3 条。被检验否定的候选直接出局，
+      不论它有多少证据——一条被反例推翻的结论不会因为支持者多就重新成立。
+    </div>
+    <pre id="select-out" style="margin-top:14px">（尚未运行）</pre>
+  </section>
+
+  <section>
     <h2>事件</h2>
     <div id="log"><div class="empty">还没有操作</div></div>
   </section>
@@ -371,6 +395,26 @@ $("consult").onclick = async function () {
     log("咨询被拒：" + error.message, "err");
   }
   $("consult").disabled = false;
+  refresh();
+};
+
+$("run-select").onclick = async function () {
+  $("run-select").disabled = true;
+  try {
+    const result = await api("select", { risk: $("select-risk").value });
+    $("select-out").textContent = JSON.stringify(result, null, 2);
+    const checks = result.reviews.reduce(function (total, review) {
+      return total + review.outcomes.length;
+    }, 0);
+    const chosen = result.outcome.kind === "selected"
+      ? ("选中候选 #" + result.outcome.index)
+      : ("未选中：" + result.outcome.kind);
+    log(chosen + "　跑了 " + checks + " 项检验，证据门槛 " + result.required_evidence + " 条", "ok");
+  } catch (error) {
+    $("select-out").textContent = error.message;
+    log("检验失败：" + error.message, "err");
+  }
+  $("run-select").disabled = false;
   refresh();
 };
 

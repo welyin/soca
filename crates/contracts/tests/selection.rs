@@ -110,8 +110,9 @@ fn a_conflict_blocks_selection_entirely() {
 }
 
 #[test]
-fn an_unresolved_question_blocks_selection_too() {
-    let mut candidates = set(vec![claim("文件是 sha256:aaa", &["1"])]);
+fn an_unresolved_question_is_what_you_report_when_nothing_is_eligible() {
+    // 未决问题在"确实没有可推进的候选"时才成为结论。
+    let mut candidates = set(Vec::new());
     candidates.unresolved.push(Unresolved {
         question: "哪一个版本才是当前版本".to_string(),
         missing: vec!["需要一次同刻观测".to_string()],
@@ -122,8 +123,45 @@ fn an_unresolved_question_blocks_selection_too() {
         SelectionOutcome::NeedsMoreInformation { missing } => {
             assert!(missing[0].contains("同刻观测"), "实际：{missing:?}");
         }
-        other => panic!("有未决问题时不该选出任何一条，实际：{other:?}"),
+        other => panic!("应当报告缺什么，实际：{other:?}"),
     }
+}
+
+#[test]
+fn an_unresolved_question_does_not_block_a_well_supported_candidate() {
+    // 冲突与未决问题的区别不是措辞上的。冲突是"同一个对象上有两个不能同时成立的结论"；
+    // 未决问题往往只是"某件事还没查"。让后者阻塞前者，会让一个簇只要有一个槽位在等证据，
+    // 就再也选不出任何东西——而在一个真实的簇里，那是常态。
+    //
+    // 这个缺陷是主体把检验器接上之后才暴露的：`ActionPrecondition` 的未决问题把
+    // 每一条结论都挡下了，而它自己与 `select` 在那个改动之前各自都通过测试。
+    let mut candidates = set(vec![claim("文件是 sha256:aaa", &["1"])]);
+    candidates.unresolved.push(Unresolved {
+        question: "动作前提是否成立".to_string(),
+        missing: vec!["尚未观测到该前提".to_string()],
+    });
+
+    let selection = select(&candidates, Vec::new(), &policy(), ActionLevel::A0).expect("选择");
+    assert_eq!(selection.selected_index(), Some(0));
+    assert!(
+        selection.rationale.contains("未决问题"),
+        "未决问题不能被吞掉：选好了不等于什么都清楚了。实际：{}",
+        selection.rationale
+    );
+}
+
+#[test]
+fn an_observation_request_wins_over_a_claim_that_missed_the_bar() {
+    // 结论没过门槛时，正确的下一步是去观测，而不是硬选一个结论。
+    let candidates = set(vec![
+        claim("文件是 sha256:aaa", &["1"]),
+        Candidate::RequestObservation {
+            subject_ref: "file:summary.md".to_string(),
+            reason: "证据不足".to_string(),
+        },
+    ]);
+    let selection = select(&candidates, Vec::new(), &policy(), ActionLevel::A3).expect("选择");
+    assert_eq!(selection.selected_index(), Some(1));
 }
 
 // ---------------------------------------------------------------------------

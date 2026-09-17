@@ -206,9 +206,16 @@ impl SelectionPolicy {
 ///
 /// 1. 结构先过一遍（§4.1 L3 的工作对象必须是合法集合）；
 /// 2. 检验次数不超预算；
-/// 3. **未决冲突与未决问题先于一切**——只要还有，就不选，返回需要什么信息；
+/// 3. **未决冲突先于一切**——只要还有，就不选，返回缺什么；
 /// 4. 逐条淘汰：被检验否定的出局；结论类未达证据门槛的出局；
-/// 5. 在剩下的里面挑证据最多的；并列时取先出现的（确定性，§13 要求可复现）。
+/// 5. 在剩下的里面挑证据最多的；并列时取先出现的（确定性，§13 要求可复现）；
+/// 6. 一条都没剩下时，未决问题才成为结论（"需要更多信息"）。
+///
+/// 第 3 步与第 6 步的区别不是措辞上的。**冲突**是"同一个对象上有两个不能同时成立的结论"，
+/// 此时选一条就是用决定覆盖矛盾（§4.2 明令禁止）。**未决问题**往往只是"某件事还没查"——
+/// 让后者阻塞前者，会让一个簇只要有一个槽位在等证据，就再也选不出任何东西；而在一个真实
+/// 的簇里，"某个槽位在等证据"是常态，不是异常。这个区别是本模块与检验器接起来之后才暴露的：
+/// 之前两者各自都通过测试，接上之后 `ActionPrecondition` 的未决问题把每一条结论都挡下了。
 pub fn select(
     candidates: &CandidateSet,
     reviews: Vec<CandidateReview>,
@@ -228,18 +235,18 @@ pub fn select(
 
     let bar = policy.evidence_bar(risk);
 
-    // 未决的东西先说完。把它们放在选择之前，是因为"选一条了事"正是 §4.2 禁止的那种
-    // 用决定覆盖矛盾的做法。
-    let mut missing: Vec<String> = Vec::new();
-    for conflict in &candidates.conflicts {
-        missing.push(format!("冲突未消解：{}", conflict.subject_ref));
-    }
-    for unresolved in &candidates.unresolved {
-        missing.push(format!(
-            "{}（缺：{}）",
-            unresolved.question,
-            unresolved.missing.join("、")
-        ));
+    let conflicts: Vec<String> = candidates
+        .conflicts
+        .iter()
+        .map(|conflict| format!("冲突未消解：{}", conflict.subject_ref))
+        .collect();
+    if !conflicts.is_empty() {
+        return Ok(Selection {
+            outcome: SelectionOutcome::NeedsMoreInformation { missing: conflicts },
+            reviews,
+            required_evidence: bar,
+            rationale: "存在未消解的冲突；按 §4.2 不用决定覆盖矛盾。".to_string(),
+        });
     }
 
     let mut eligible: Vec<(usize, usize, usize)> = Vec::new();
@@ -260,23 +267,29 @@ pub fn select(
         eligible.push((index, evidence, independent));
     }
 
-    if !missing.is_empty() {
-        return Ok(Selection {
-            outcome: SelectionOutcome::NeedsMoreInformation { missing },
-            reviews,
-            required_evidence: bar,
-            rationale: "存在未消解的冲突或未决问题；按 §4.2 不用决定覆盖矛盾。".to_string(),
-        });
-    }
-
     if eligible.is_empty() {
+        // 一条都没剩下，这时未决问题才有资格成为结论。
+        let missing: Vec<String> = candidates
+            .unresolved
+            .iter()
+            .map(|unresolved| {
+                format!(
+                    "{}（缺：{}）",
+                    unresolved.question,
+                    unresolved.missing.join("、")
+                )
+            })
+            .collect();
+
         return Ok(Selection {
-            outcome: SelectionOutcome::NothingToPursue,
+            outcome: if missing.is_empty() {
+                SelectionOutcome::NothingToPursue
+            } else {
+                SelectionOutcome::NeedsMoreInformation { missing }
+            },
             reviews,
             required_evidence: bar,
-            rationale: format!(
-                "没有候选达到要求：证据门槛 {bar}，或全部被检验否定。"
-            ),
+            rationale: format!("没有候选达到要求：证据门槛 {bar}，或全部被检验否定。"),
         });
     }
 
@@ -291,12 +304,21 @@ pub fn select(
     });
     let (index, evidence, independent) = eligible[0];
 
+    // 未决问题不阻塞，但也不能被吞掉：选中的理由里要如实带上还有哪些问题悬着，
+    // 否则一次"选好了"看起来像"什么都清楚了"。
+    let outstanding = candidates.unresolved.len();
+    let tail = if outstanding == 0 {
+        String::new()
+    } else {
+        format!(" 另有 {outstanding} 个未决问题仍未回答。")
+    };
+
     Ok(Selection {
         outcome: SelectionOutcome::Selected { index },
         reviews,
         required_evidence: bar,
         rationale: format!(
-            "候选 #{index}：{evidence} 条证据、{independent} 次独立来源支持；门槛 {bar}。"
+            "候选 #{index}：{evidence} 条证据、{independent} 次独立来源支持；门槛 {bar}。{tail}"
         ),
     })
 }

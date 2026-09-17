@@ -582,6 +582,104 @@ fn a_malformed_goal_id_is_refused_before_anything_happens() {
 // 放弃与未知路径
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 检验与选择
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_ladder_runs_the_verifiers_and_reports_what_it_checked() {
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+
+    let response = call(
+        &mut subject,
+        "POST",
+        "/api/select",
+        &body(json!({"risk": "a1"})),
+    );
+    assert_eq!(response.status, 200);
+    let payload = json(&response);
+
+    assert_eq!(payload["risk"], "A1");
+    assert_eq!(payload["required_evidence"], 1, "A1 是低风险档");
+    assert_eq!(
+        payload["outcome"]["kind"], "selected",
+        "有一条关于版本的结论，且证据就在台账里：{payload}"
+    );
+
+    // 检验确实跑了，而且报的是它查到的东西。
+    let outcomes = payload["reviews"][0]["outcomes"]
+        .as_array()
+        .expect("有档案");
+    // 线上格式一律 snake_case，判定值与 `kind` 用同一套写法。这是接口契约的一部分，
+    // 所以在这里钉住——换一种大小写会让所有读这个接口的代码静静地匹配不上。
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome["kind"] == "tool" && outcome["verdict"] == "supported"),
+        "结论与自己引用的证据一致：{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome["kind"] == "independent_source"
+                && outcome["verdict"] == "inconclusive"),
+        "只有一个观测者，来源核对应当说无法判定：{outcomes:?}"
+    );
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| outcome["kind"] == "counter_example"),
+        "低风险档不搜反例"
+    );
+
+    assert!(
+        payload["candidates"].as_array().expect("数组").len() >= 2,
+        "簇同时提出了结论与观测请求"
+    );
+}
+
+#[test]
+fn a_high_risk_run_searches_for_counter_examples() {
+    // 门槛与反例搜索都由同一个风险等级驱动。分头设置会让"高风险"只在一半的地方生效。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+
+    let payload = json(&call(
+        &mut subject,
+        "POST",
+        "/api/select",
+        &body(json!({"risk": "a3"})),
+    ));
+    assert_eq!(payload["required_evidence"], 3, "高风险档门槛上升");
+    let outcomes = payload["reviews"][0]["outcomes"].as_array().expect("有档案");
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome["kind"] == "counter_example"),
+        "高风险档要主动找反方观点：{outcomes:?}"
+    );
+}
+
+#[test]
+fn an_invalid_risk_level_is_refused() {
+    let mut subject = subject();
+    assert_eq!(
+        call(&mut subject, "POST", "/api/select", &body(json!({"risk": "a9"}))).status,
+        400
+    );
+}
+
 #[test]
 fn abandoning_a_goal_closes_it() {
     let mut subject = subject();

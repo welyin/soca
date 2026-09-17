@@ -7,8 +7,8 @@
 use soca_contracts::{
     ActionLevel, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
     GoalBudget, GoalId, GoalState, ModelBackend, ModelBudget, ModelOutput, ModelProposal,
-    ModelSelfReport, ModelVersion, OutputSchema, PermissionScope, SubjectId, TokenUsage,
-    UserChannel, WallClock, MAX_CONTEXT_EVIDENCE,
+    ModelSelfReport, ModelVersion, OutputSchema, PermissionScope, SelectionPolicy, SubjectId,
+    TokenUsage, UserChannel, VerificationKind, Verdict, WallClock, MAX_CONTEXT_EVIDENCE,
 };
 use soca_core::{ActionBroker, SimulatedOs, Subject};
 use soca_core_actors::{DesktopAndFilesCluster, Precondition};
@@ -508,6 +508,125 @@ fn a_terminal_goal_cannot_be_consulted_about() {
 
     let result = subject.consult_model(&goal_id, OutputSchema::read_only(), at(2));
     assert!(matches!(result, Err(soca_core::CoreError::Contract(_))));
+}
+
+#[test]
+fn selecting_walks_the_cluster_candidates_through_the_verifiers() {
+    // §6 第 4–5 步接起来的端到端：观测 → 簇提出候选 → 三类检验 → 选择。
+    // 这条测试的价值在于它把两层一起跑了。检验器与选择各自都有单元测试，而它们的**接缝**
+    // 正是本文件里那个缺陷（未决问题阻塞选择）藏身的地方。
+    let mut subject = new_subject(Vec::new());
+    let goal_id = delegate_a_goal(&mut subject);
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(1))
+        .expect("观测");
+
+    let (candidates, selection) = subject
+        .select(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+        .expect("选择");
+
+    assert!(!candidates.candidates.is_empty(), "观测之后簇应当能提出结论");
+    assert_eq!(
+        selection.reviews.len(),
+        candidates.candidates.len(),
+        "每条候选都要有档案——「缺档」与「没有检验记录」在审计里含义不同"
+    );
+    assert_eq!(selection.required_evidence, 1, "A1 是低风险档");
+    assert_eq!(
+        selection.selected_index(),
+        Some(0),
+        "关于版本的结论证据最多，应当被选中：{:?}",
+        selection.outcome
+    );
+
+    // 检验确实跑了，而且它报的是它真正查到的东西。
+    let outcomes = &selection.reviews[0].outcomes;
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome.kind == VerificationKind::Tool
+                && outcome.verdict == Verdict::Supported),
+        "结论与它自己引用的证据一致，依据核对应当通过"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|outcome| outcome.kind == VerificationKind::IndependentSource
+                && outcome.verdict == Verdict::Inconclusive),
+        "只有一个观测者，来源核对应当说「无法判定」而不是「支持」：{outcomes:?}"
+    );
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| outcome.kind == VerificationKind::CounterExample),
+        "A1 是低风险档，不强行找反方观点（§6 第 4 步）"
+    );
+}
+
+#[test]
+fn an_open_question_is_reported_but_does_not_freeze_the_selection() {
+    // 动作前提这个槽位在拿到证据之前会一直挂着一个未决问题。如果它阻塞选择，这个簇就
+    // 永远选不出任何东西——而那正是接上检验器之前没被发现的行为。
+    let mut subject = new_subject(Vec::new());
+    let goal_id = delegate_a_goal(&mut subject);
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(1))
+        .expect("观测");
+
+    let (candidates, selection) = subject
+        .select(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+        .expect("选择");
+
+    assert!(
+        !candidates.unresolved.is_empty(),
+        "动作前提还没被观测到，簇里应当挂着未决问题"
+    );
+    assert!(
+        selection.selected_index().is_some(),
+        "未决问题不该把结论一起挡下"
+    );
+    assert!(
+        selection.rationale.contains("未决问题"),
+        "但它也不能被吞掉：选好了不等于什么都清楚了。实际：{}",
+        selection.rationale
+    );
+}
+
+#[test]
+fn the_verdict_pattern_does_not_depend_on_which_run_it_is() {
+    // §13：固定策略与相同动作序列的引擎可复现。
+    //
+    // 这里比的是**判定模式**，不是完整档案。证据引用是每次观测新生成的（`obs:{uuid}`），
+    // 两次运行引用不同的观测是正确行为，不是不确定性。而"同一份台账加同一个候选集合得到
+    // 同一份档案"是一条更严格的等式，由 core-actors 的纯函数测试负责——那里能真的断言它，
+    // 这里不能。
+    let pattern = || {
+        let mut subject = new_subject(Vec::new());
+        let goal_id = delegate_a_goal(&mut subject);
+        subject.accept(&goal_id, at(1)).expect("受理");
+        subject
+            .observe(WATCHED, DataClass::Personal, at(1))
+            .expect("观测");
+        let selection = subject
+            .select(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+            .expect("选择")
+            .1;
+        let verdicts: Vec<(VerificationKind, Verdict)> = selection
+            .reviews
+            .iter()
+            .flat_map(|review| {
+                review
+                    .outcomes
+                    .iter()
+                    .map(|outcome| (outcome.kind, outcome.verdict))
+            })
+            .collect();
+        (selection.outcome, selection.required_evidence, verdicts)
+    };
+
+    assert_eq!(pattern(), pattern());
 }
 
 #[test]

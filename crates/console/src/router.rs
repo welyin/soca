@@ -7,7 +7,7 @@
 use serde_json::{json, Value};
 use soca_contracts::{
     ActionLevel, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota, GoalBudget, GoalId,
-    PermissionScope, UserChannel, WallClock,
+    PermissionScope, SelectionPolicy, UserChannel, WallClock,
 };
 use soca_core::Subject;
 use soca_model_gateway::{GatewayError, ModelCredentials};
@@ -54,6 +54,7 @@ pub fn handle(
         ("GET", "/api/model") => Response::json(200, &model.summary()),
         ("POST", "/api/model") => connect_model(subject, model, request),
         ("POST", "/api/model/reset") => reset_model(subject, model),
+        ("POST", "/api/select") => select_ladder(subject, request, at),
         ("POST", "/api/chat") => chat(subject, request, at),
         ("POST", "/api/observe") => observe(subject, request, at),
         ("POST", "/api/consult") => consult(subject, request, at),
@@ -288,6 +289,66 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
             )
         }
         Err(error) => internal(error.to_string()),
+    }
+}
+
+/// §4.1 L3、§6 第 4–5 步：在当前候选上做检验，然后选一条推进。
+///
+/// 把检验与选择一起暴露成一个接口，与 [`Subject::select`] 只提供一个入口是同一个理由：
+/// 允许分开调用就等于允许跳过检验直接选，那样证据门槛只剩一个数字，没有任何东西在它前面
+/// 核对结论。检查了什么，从返回的 `reviews` 里逐条看得到。
+fn select_ladder(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let risk = match parse_risk(payload.get("risk").and_then(Value::as_str)) {
+        Ok(level) => level,
+        Err(message) => return Response::text(400, message),
+    };
+
+    let policy = SelectionPolicy::default();
+    match subject.select(&policy, risk, at) {
+        Ok((candidates, selection)) => {
+            let listed: Vec<Value> = candidates
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    json!({
+                        "index": index,
+                        "kind": candidate.kind().as_str(),
+                        "summary": summarize(candidate),
+                        "evidence_count": candidate.evidence_refs().len(),
+                    })
+                })
+                .collect();
+
+            Response::json(
+                200,
+                &json!({
+                    "risk": risk.as_str(),
+                    "required_evidence": selection.required_evidence,
+                    "rationale": selection.rationale,
+                    "outcome": selection.outcome,
+                    "candidates": listed,
+                    "reviews": selection.reviews,
+                    "unresolved": candidates.unresolved.iter().map(|item| item.question.clone()).collect::<Vec<_>>(),
+                    "conflicts": candidates.conflicts.iter().map(|item| item.subject_ref.clone()).collect::<Vec<_>>(),
+                }),
+            )
+        }
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+fn parse_risk(raw: Option<&str>) -> Result<ActionLevel, &'static str> {
+    match raw.unwrap_or("a1").to_ascii_lowercase().as_str() {
+        "a0" => Ok(ActionLevel::A0),
+        "a1" => Ok(ActionLevel::A1),
+        "a2" => Ok(ActionLevel::A2),
+        "a3" => Ok(ActionLevel::A3),
+        "a4" => Ok(ActionLevel::A4),
+        _ => Err("risk 只能是 a0/a1/a2/a3/a4"),
     }
 }
 
