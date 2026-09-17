@@ -1,0 +1,10 @@
+# 迷宫引擎的锁定依赖（实施规格 §17：Python 引擎环境单独锁定，
+# 不与仓库其他位置的解释器依赖混装）。
+#
+# 安装到仓库根的独立环境：
+#     python -m venv .venv
+#     .venv/Scripts/python -m pip install -r games/maze/requirements.txt
+#
+# 版本必须与 manifest.json 里的 pinned_version 一致；改动它等于改动规则版本。
+minigrid==3.1.0
+gymnasium==1.3.0

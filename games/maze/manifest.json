@@ -1,0 +1,50 @@
+{
+  "game": "maze",
+  "rules_version": "maze-door-key-8x8-v1",
+  "engine": {
+    "kind": "minigrid",
+    "env_id": "MiniGrid-DoorKey-8x8-v0",
+    "package": "minigrid",
+    "pinned_version": "3.1.0",
+    "runtime": "gymnasium",
+    "runtime_pinned_version": "1.3.0",
+    "licence": "Apache-2.0",
+    "source": "https://github.com/Farama-Foundation/Minigrid"
+  },
+  "public": {
+    "observation_mode": "symbolic_maze",
+    "view_size": 7,
+    "mission_max_chars": 2048,
+    "actions": ["turn_left", "turn_right", "forward", "pickup", "toggle"],
+    "action_ids": {
+      "turn_left": 0,
+      "turn_right": 1,
+      "forward": 2,
+      "pickup": 3,
+      "toggle": 5
+    },
+    "withheld": [
+      "absolute_position",
+      "full_map",
+      "seed",
+      "rng_state",
+      "info",
+      "expert_actions",
+      "drop",
+      "done"
+    ]
+  },
+  "budget": {
+    "max_steps": 640,
+    "reward_range": [0.0, 1.0],
+    "win_condition": "reach the goal after opening the door with the key"
+  },
+  "scoring": {
+    "exposed_reward": "0.0 until the episode ends, then the terminal reward",
+    "note": "进步奖励若要加入必须新开一个 manifest 版本，并检查是否泄露真值（§11.3）"
+  },
+  "recovery": {
+    "supports_snapshot": false,
+    "why": "MiniGrid 的 unwrapped 局面无法从公开观测重建。未验证可恢复的适配器必须把回合标为基础设施截断，不得 reset 后冒充继续（§13）"
+  }
+}

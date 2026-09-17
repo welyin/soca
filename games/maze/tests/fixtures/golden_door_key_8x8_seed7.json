@@ -1,0 +1,2766 @@
+{
+  "rules_version": "maze-door-key-8x8-v1",
+  "env_id": "MiniGrid-DoorKey-8x8-v0",
+  "seed": 7,
+  "actions": [
+    {
+      "op": "turn_left"
+    },
+    {
+      "op": "forward"
+    },
+    {
+      "op": "forward"
+    },
+    {
+      "op": "turn_right"
+    },
+    {
+      "op": "forward"
+    },
+    {
+      "op": "toggle"
+    },
+    {
+      "op": "pickup"
+    },
+    {
+      "op": "forward"
+    },
+    {
+      "op": "forward"
+    }
+  ],
+  "steps": [
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "door",
+              "color": "yellow",
+              "state": "locked"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 2,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "key",
+              "color": "yellow",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 2,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 2,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    },
+    {
+      "percept": {
+        "mode": "symbolic_maze",
+        "mission": "use the key to open the door and then get to the goal",
+        "direction": 3,
+        "view": [
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ],
+          [
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "unseen",
+              "color": "none",
+              "state": "none"
+            },
+            {
+              "object": "wall",
+              "color": "grey",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            },
+            {
+              "object": "empty",
+              "color": "red",
+              "state": "none"
+            }
+          ]
+        ],
+        "carrying": "none"
+      },
+      "terminated": false,
+      "truncated": false,
+      "outcome": "running",
+      "reward": 0.0
+    }
+  ]
+}
