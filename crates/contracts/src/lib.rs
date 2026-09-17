@@ -80,7 +80,11 @@ pub use crate::topology::{
     CLUSTERS_PER_COORDINATOR, HOT_ACTORS_PER_WORKER, HOT_LEAF_DIVISOR, LEAVES_PER_CLUSTER,
     LEAF_PROFILES, MAX_CLUSTERS_BEFORE_COORDINATOR, ROOT_MAX_CHILDREN,
 };
-pub use crate::unit::{Scope, UnitKind, UnitSnapshot, UnitState, UNIT_SNAPSHOT_FIELDS};
+pub use crate::unit::{
+    Candidate, CandidateSet, CognitiveUnit, Conflict, ConflictPosition, Scope, UnitKind,
+    UnitSnapshot, UnitState, Unresolved, MAX_CANDIDATES, MAX_CONFLICT_POSITIONS,
+    UNIT_SNAPSHOT_FIELDS,
+};
 
 /// 冻结的契约版本。
 ///

@@ -71,6 +71,22 @@ pub enum ContractError {
     #[error("{field} 必须至少包含一个引用")]
     MissingRefs { field: &'static str },
 
+    #[error("一轮提出的候选数 {actual} 超过上限 {limit}（§4.1 L2：黑板有界）")]
+    CandidateLimitExceeded { limit: usize, actual: usize },
+
+    #[error("冲突 {subject_ref:?} 只有 {positions} 个立场；一个立场不构成冲突（§4.2）")]
+    ConflictNeedsTwoSides { subject_ref: String, positions: usize },
+
+    #[error("冲突 {subject_ref:?} 的立场全部出自同一个单元；冲突指的是子单元之间的分歧（§4.2）")]
+    ConflictNeedsDistinctUnits { subject_ref: String },
+
+    #[error("冲突 {subject_ref:?} 的立场数 {actual} 超过上限 {limit}")]
+    ConflictTooManyPositions {
+        subject_ref: String,
+        limit: usize,
+        actual: usize,
+    },
+
     #[error("预测对象 {subject:?} 与期望作用对象 {expectation_subject:?} 不一致")]
     ExpectationSubjectMismatch {
         subject: String,
@@ -92,6 +108,9 @@ pub enum ContractError {
 
     #[error("字段 {field} 无法编码，按失败关闭处理")]
     EncodingFailed { field: &'static str },
+
+    #[error("字段 {field} 不是本版本可解析的载荷，按失败关闭处理")]
+    MalformedPayload { field: &'static str },
 
     #[error("动作参数必须是结构化 JSON 对象，实际为 {actual}")]
     ParametersNotStructured { actual: &'static str },
