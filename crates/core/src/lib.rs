@@ -30,6 +30,7 @@ pub mod lifecycle;
 pub mod os;
 pub mod replay;
 pub mod session;
+pub mod subject;
 
 pub use crate::broker::{ActionBroker, BrokerError, BrokerOutcome};
 pub use crate::error::CoreError;
@@ -41,3 +42,4 @@ pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
 pub use crate::session::{
     evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,
 };
+pub use crate::subject::{GoalSummary, ModelConsultation, PublicState, Subject};

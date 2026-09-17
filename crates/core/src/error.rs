@@ -23,6 +23,12 @@ pub enum CoreError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
+    #[error(transparent)]
+    Gateway(#[from] soca_model_gateway::GatewayError),
+
+    #[error("找不到目标 {goal_id}")]
+    GoalNotFound { goal_id: String },
+
     #[error("动作 {action_id} 未通过受理：{reason}")]
     AdmissionDenied { action_id: String, reason: String },
 

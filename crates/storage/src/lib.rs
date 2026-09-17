@@ -31,8 +31,8 @@ pub mod schema;
 pub mod units;
 
 pub use crate::actions::{
-    ActionRecord, ActionState, Admission, Decision, OutboxItem, RecoveryReport, Resolution,
-    UnknownCommit,
+    ActionRecord, ActionState, Admission, Decision, OutcomeRecord, OutboxItem, RecoveryReport,
+    Resolution, UnknownCommit,
 };
 pub use crate::audit::{AuditCategory, AuditEntry, MAX_DETAIL_LEN};
 pub use crate::error::StorageError;

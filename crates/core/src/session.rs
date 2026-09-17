@@ -158,6 +158,20 @@ impl<'a> Session<'a> {
         subject_ref: &str,
         at: WallClock,
     ) -> Result<ObservationRecord, CoreError> {
+        let (record, _envelope) = self.observe_event(subject_ref, at)?;
+        Ok(record)
+    }
+
+    /// 同上，但同时交出写下的那个信封。
+    ///
+    /// 需要它的场景是"一次观测既要进事件账、又要进 L2 黑板"：黑板收的是 §7.1 的公共信封
+    /// 本身，不是解析后的观测。让两条路共用同一份信封，是为了避免"记进账的那份"与"喂给
+    /// 单元的那份"在某个字段上悄悄分叉——那种分叉不会报错，只会让重放对不上。
+    pub fn observe_event(
+        &mut self,
+        subject_ref: &str,
+        at: WallClock,
+    ) -> Result<(ObservationRecord, Envelope), CoreError> {
         let value = self
             .broker
             .os()
@@ -205,11 +219,14 @@ impl<'a> Session<'a> {
         );
 
         let outcome: AppendOutcome = self.store.append_event(&envelope, at)?;
-        Ok(ObservationRecord {
-            sequence: outcome.sequence(),
-            event_id,
-            observation,
-        })
+        Ok((
+            ObservationRecord {
+                sequence: outcome.sequence(),
+                event_id,
+                observation,
+            },
+            envelope,
+        ))
     }
 
     /// §6.3：记录动作前预测。返回 `false` 表示同一份预测已经记录过。

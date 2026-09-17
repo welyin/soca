@@ -21,7 +21,8 @@
 
 use rusqlite::{params, OptionalExtension};
 use soca_contracts::{
-    ActionIntent, ActionReceipt, CommitStatus, ExecutionPermit, OutcomeVerified, TaskId, WallClock,
+    ActionId, ActionIntent, ActionReceipt, CommitStatus, EvidenceRef, ExecutionPermit,
+    OutcomeVerified, TaskId, ToolId, Verdict, WallClock,
 };
 
 use crate::audit::{record_in, AuditCategory};
@@ -149,6 +150,29 @@ pub struct OutboxItem {
     pub intent: ActionIntent,
     /// 写入 outbox 的时刻。
     pub created_at: WallClock,
+}
+
+/// 一条已经核对过后置条件的动作结果（§6 第 8 步、§8 的"过去动作结果"）。
+///
+/// 它比 [`ActionRecord`] 窄：动作账回答"我做过什么"，本类型回答"做过的那些事，结果如何"。
+/// 上下文编译要的是后者——一个只有动作清单、没有结果的模型会以为自己什么都还没做过。
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutcomeRecord {
+    /// 动作标识。
+    pub action_id: ActionId,
+    /// 当时用的工具。
+    pub tool_id: ToolId,
+    /// 后置条件判定。
+    pub verdict: Verdict,
+    /// 支撑判定的观测。
+    pub observation_refs: Vec<EvidenceRef>,
+    /// 判定时刻。
+    pub verified_at: WallClock,
+}
+
+/// 结果行的列：`(action_id, outcome_json, verified_at_utc)`。
+fn outcome_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
 }
 
 /// 账上的一条动作记录。
@@ -820,6 +844,75 @@ impl Store {
     }
 
     /// 动作总数。
+    /// 读取最近的动作结果，供 §8 的上下文编译使用。
+    ///
+    /// 只读**已经核对过**的条目。一个动作没有结果，说明它还没走到 §6 第 8 步；把它当成
+    /// "过去的结果"会让模型看到一个尚未成立的判定，而它接下来会拿这个判定当依据。
+    pub fn recent_outcomes(&self, limit: usize) -> Result<Vec<OutcomeRecord>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = self.connection().prepare(
+            "SELECT action_id, outcome_json, verified_at_utc FROM outcomes
+              ORDER BY verified_at_utc DESC, action_id
+              LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], outcome_row)?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let (action_id, json, verified_at) = row?;
+            records.push(self.assemble_outcome(&action_id, &json, &verified_at)?);
+        }
+        Ok(records)
+    }
+
+    /// 某个动作的已核对结果。
+    pub fn outcome_of(
+        &self,
+        action_id: &soca_contracts::ActionId,
+    ) -> Result<Option<OutcomeRecord>, StorageError> {
+        let row = self
+            .connection()
+            .query_row(
+                "SELECT action_id, outcome_json, verified_at_utc
+                   FROM outcomes WHERE action_id = ?1",
+                params![action_id.to_string()],
+                outcome_row,
+            )
+            .optional()?;
+        match row {
+            Some((id, json, verified_at)) => {
+                Ok(Some(self.assemble_outcome(&id, &json, &verified_at)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 把一行结果拼成 [`OutcomeRecord`]。
+    ///
+    /// 工具标识不在结果表里，它记在动作行上。动作一定存在——结果是在动作被受理、执行、
+    /// 回执之后才写下的，反过来不可能。所以找不到动作行意味着库被改过，而不是正常情况；
+    /// 这时报错比编一个工具名出来强。
+    fn assemble_outcome(
+        &self,
+        action_id: &str,
+        json: &str,
+        verified_at: &str,
+    ) -> Result<OutcomeRecord, StorageError> {
+        let outcome: OutcomeVerified = serde_json::from_str(json)?;
+        let action = require_action(self.connection(), action_id)?;
+        Ok(OutcomeRecord {
+            action_id: outcome.action_id,
+            tool_id: soca_contracts::ToolId::new(action.tool_id)?,
+            verdict: outcome.verdict,
+            observation_refs: outcome.observation_refs,
+            verified_at: WallClock::from_rfc3339(verified_at)?,
+        })
+    }
+
+    /// 动作账上的总条数。
     pub fn action_count(&self) -> Result<i64, StorageError> {
         let count: i64 = self
             .connection()

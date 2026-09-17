@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 soca-contracts = { path = "../contracts" }
+soca-core-actors = { path = "../core-actors" }
+soca-model-gateway = { path = "../model-gateway" }
 soca-storage = { path = "../storage" }
 serde.workspace = true
 serde_json.workspace = true

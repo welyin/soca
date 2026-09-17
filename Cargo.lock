@@ -421,6 +421,8 @@ dependencies = [
  "serde",
  "serde_json",
  "soca-contracts",
+ "soca-core-actors",
+ "soca-model-gateway",
  "soca-storage",
  "tempfile",
  "thiserror",

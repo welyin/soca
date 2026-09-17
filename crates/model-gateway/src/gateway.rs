@@ -50,6 +50,12 @@ pub trait Transport {
     fn invoke(&self, request: &ModelRequest) -> Result<ModelOutput, TransportError>;
 }
 
+impl Transport for Box<dyn Transport> {
+    fn invoke(&self, request: &ModelRequest) -> Result<ModelOutput, TransportError> {
+        (**self).invoke(request)
+    }
+}
+
 /// 通过校验的模型返回物。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedOutput {
