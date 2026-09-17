@@ -97,6 +97,35 @@ pub enum ContractError {
     #[error("证据 {evidence_ref} 不在黑板上；§6 第 4 步要求 L2 核对证据存在性")]
     EvidenceNotOnWorkspace { evidence_ref: String },
 
+    // ---- §8 上下文编译与模型返回 ----
+    #[error("证据 {evidence_ref} 不在本次上下文里；模型不能引用它没看到的东西")]
+    EvidenceNotInContext { evidence_ref: String },
+
+    #[error(
+        "预测 {prediction_ref} 不在本次上下文的已记录预测里；§6.3 的预测由单元在动作前写下，\
+         模型不能现编一个引用"
+    )]
+    PredictionNotRecorded { prediction_ref: String },
+
+    #[error(
+        "远端后端未获授权；§8 要求云端请求走单独策略批准，内存不足或本地模型不可用都不是\
+         把私人上下文发到云端的理由"
+    )]
+    RemoteNotAuthorized,
+
+    #[error("{field} 超出上限：上限 {limit}，实际 {actual}")]
+    ContextLimitExceeded {
+        field: &'static str,
+        limit: usize,
+        actual: usize,
+    },
+
+    #[error("模型返回的提案数 {actual} 超过上限 {limit}")]
+    ProposalLimitExceeded { limit: usize, actual: usize },
+
+    #[error("本次上下文不允许提出 {kind} 类候选（§8 的输出 Schema）")]
+    CandidateKindNotAllowed { kind: &'static str },
+
     #[error("预测对象 {subject:?} 与期望作用对象 {expectation_subject:?} 不一致")]
     ExpectationSubjectMismatch {
         subject: String,

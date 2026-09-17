@@ -31,6 +31,7 @@ pub mod envelope;
 pub mod error;
 pub mod game;
 pub mod ids;
+pub mod inference;
 pub mod instance;
 pub mod memory;
 pub mod policy;
@@ -65,6 +66,13 @@ pub use crate::game::{
     MazeView, MinesCell, MinesMode, MinesView, MoveAction, MoveOp, Outcome, Percept, PixelFormat,
     PixelMode, PixelView, PublicId, ReceiptCode, ReceiptStatus, RevealOp, SetFlagOp,
     TargetedAction, GAME_PROTOCOL_VERSION, MAX_COORDINATE, MAZE_VIEW_MAX, MINES_BOARD_MAX,
+};
+pub use crate::inference::{
+    ActionOutcomeSlice, BeliefSummary, CandidateKind, CapabilitySlice, ContextBundle,
+    EvidenceSlice, ModelBudget, ModelOutput, ModelProposal, OutputSchema, TokenUsage,
+    CONTEXT_SCHEMA_VERSION, MAX_CONTEXT_BELIEFS, MAX_CONTEXT_BYTES, MAX_CONTEXT_EVIDENCE,
+    MAX_CONTEXT_OUTCOMES, MAX_CONTEXT_PREDICTIONS, MAX_MODEL_ATTEMPTS, MAX_PROPOSALS,
+    MODEL_OUTPUT_SCHEMA_VERSION,
 };
 pub use crate::ids::{
     ActionId, ApprovalId, BlobRef, BootId, BudgetRef, CapabilityPolicyRef, DomainId, EventId,

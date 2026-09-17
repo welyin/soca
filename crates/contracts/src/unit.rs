@@ -16,9 +16,9 @@ use serde_json::Value;
 
 use crate::validate::assert_unique;
 use crate::{
-    ActionId, ActionIntent, BlobRef, BudgetRef, CapabilityPolicyRef, ContractError, DomainId,
-    Envelope, EvidenceRef, GoalId, ModelProfileRef, OutcomeVerified, Prediction, RelationRef,
-    StrategyVersion, TaskContractVersion, ToolId, UnitId, WallClock, SCHEMA_VERSION,
+    ActionId, ActionIntent, BlobRef, BudgetRef, CandidateKind, CapabilityPolicyRef, ContractError,
+    DomainId, Envelope, EvidenceRef, GoalId, ModelProfileRef, OutcomeVerified, Prediction,
+    RelationRef, StrategyVersion, TaskContractVersion, ToolId, UnitId, WallClock, SCHEMA_VERSION,
 };
 
 /// 单元种类。
@@ -300,6 +300,20 @@ pub enum Candidate {
 }
 
 impl Candidate {
+    /// 候选的种类。
+    ///
+    /// 用途不是分类学，而是授权：§8 的上下文携带一份 [`crate::OutputSchema`]，里面列出本次
+    /// 允许的候选种类。只读任务给出的 schema 里没有 [`CandidateKind::Action`]，因此模型即使
+    /// 想提动作也过不了校验。
+    pub fn kind(&self) -> CandidateKind {
+        match self {
+            Self::RequestObservation { .. } => CandidateKind::Observation,
+            Self::RequestAction { .. } => CandidateKind::Action,
+            Self::RequestTool { .. } => CandidateKind::Tool,
+            Self::Claim { .. } => CandidateKind::Claim,
+        }
+    }
+
     /// 这条候选是否可能推动外部副作用。
     ///
     /// 只有 [`Candidate::RequestAction`] 为真。申请观测、请求工具、提交结论都不改变世界；

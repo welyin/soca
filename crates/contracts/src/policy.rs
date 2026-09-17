@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::{CapabilityPolicyRef, ContractError};
 
 /// 数据类别，决定能否出站（§8）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// 变体顺序即敏感度顺序（`Public` < `Personal` < `Sensitive` < `Secret`），因此派生
+/// `Ord` 之后可以直接比较"哪一类更敏感"。这不是装饰：一份上下文里混了多个类别时，
+/// 出站判断必须看**最敏感的那一条**，而不是第一条或平均。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataClass {
     /// 公开内容。

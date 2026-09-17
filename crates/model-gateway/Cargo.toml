@@ -1,0 +1,16 @@
+[package]
+name = "soca-model-gateway"
+description = "SoCA 模型网关：上下文编译、预算、超时与返回物校验（架构文档 §5.1、§8、§3.1）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+soca-contracts = { path = "../contracts" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
