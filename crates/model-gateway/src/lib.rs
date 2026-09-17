@@ -8,6 +8,8 @@
 //! |---|---|
 //! | [`compiler`] | §8 的七项上下文、证据挑选、出站判断 |
 //! | [`gateway`] | 预算、总墙钟、有界重试、返回物解析与校验 |
+//! | [`credentials`] | 端点凭据。**不可序列化**，因此进不了事件账、审计与快照 |
+//! | [`remote`] | OpenAI 兼容的远端传输层（DeepSeek 是它的默认配置） |
 //! | [`deterministic`] | 离线可复现的传输层（§13：不承诺在线 API 天然确定） |
 //!
 //! 两条边界在这里各安装一次：
@@ -27,11 +29,15 @@
 #![warn(missing_docs)]
 
 pub mod compiler;
+pub mod credentials;
 pub mod deterministic;
 pub mod error;
 pub mod gateway;
+pub mod remote;
 
 pub use crate::compiler::{ContextCompiler, ContextInput};
+pub use crate::credentials::{CredentialError, ModelCredentials};
 pub use crate::deterministic::DeterministicTransport;
 pub use crate::error::{GatewayError, TransportError};
 pub use crate::gateway::{ModelGateway, ModelRequest, Transport, ValidatedOutput};
+pub use crate::remote::RemoteTransport;

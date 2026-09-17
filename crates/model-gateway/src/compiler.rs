@@ -13,8 +13,9 @@
 //! 出站判断（§8 的"私人数据不得出站"）也在这一步完成，见 [`ContextCompiler::compile`]。
 
 use soca_contracts::{
-    ActionOutcomeSlice, BeliefSummary, CapabilitySlice, ContextBundle, ContractError, EvidenceRef,
-    EvidenceSlice, ModelBackend, OutputSchema, PredictionRef, WallClock, MAX_CONTEXT_EVIDENCE,
+    ActionOutcomeSlice, BeliefSummary, CapabilitySlice, ContextBundle, ContractError, EgressPolicy,
+    EvidenceRef, EvidenceSlice, ModelBackend, OutputSchema, PredictionRef, WallClock,
+    MAX_CONTEXT_EVIDENCE,
 };
 
 use crate::error::GatewayError;
@@ -45,17 +46,29 @@ pub struct ContextInput {
 pub struct ContextCompiler {
     backend: ModelBackend,
     remote_authorized: bool,
+    egress: EgressPolicy,
     max_evidence: usize,
 }
 
 impl ContextCompiler {
     /// 按目标后端构造编译器。
+    ///
+    /// 出站策略默认是 [`EgressPolicy::Strict`]，也就是 §8 的原样。要放开个人数据必须显式调用
+    /// [`ContextCompiler::with_egress_policy`]——默认值不是一个"顺手就能省掉"的参数。
     pub fn new(backend: ModelBackend, remote_authorized: bool) -> Self {
         Self {
             backend,
             remote_authorized,
+            egress: EgressPolicy::Strict,
             max_evidence: MAX_CONTEXT_EVIDENCE,
         }
+    }
+
+    /// 指定出站策略。
+    #[must_use]
+    pub fn with_egress_policy(mut self, egress: EgressPolicy) -> Self {
+        self.egress = egress;
+        self
     }
 
     /// 收紧本次编译允许携带的证据条数。
@@ -89,7 +102,7 @@ impl ContextCompiler {
             input.output_schema,
             input.recorded_predictions,
         )?;
-        bundle.authorize_backend(self.backend, self.remote_authorized)?;
+        bundle.authorize_backend(self.backend, self.remote_authorized, self.egress)?;
         Ok(bundle)
     }
 

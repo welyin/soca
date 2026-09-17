@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use soca_contracts::{
-    ContextBundle, ModelBackend, ModelBudget, ModelOutput, ModelProfileRef, ModelVersion,
+    ContextBundle, EgressPolicy, ModelBackend, ModelBudget, ModelOutput, ModelProfileRef,
+    ModelVersion,
 };
 
 use crate::error::{GatewayError, TransportError};
@@ -75,6 +76,7 @@ pub struct ModelGateway<T> {
     transport: T,
     backend: ModelBackend,
     remote_authorized: bool,
+    egress: EgressPolicy,
     budget: ModelBudget,
     model_version: ModelVersion,
     /// 累计发起的调用次数（含重试）。只用于记账与审计。
@@ -95,10 +97,25 @@ impl<T> ModelGateway<T> {
             transport,
             backend,
             remote_authorized,
+            // 默认 §8 原样。放开个人数据出站必须显式调用 with_egress_policy，
+            // 而且那个调用点会出现在审计记录里。
+            egress: EgressPolicy::Strict,
             budget,
             model_version,
             calls: AtomicU64::new(0),
         })
+    }
+
+    /// 指定出站策略。
+    #[must_use]
+    pub fn with_egress_policy(mut self, egress: EgressPolicy) -> Self {
+        self.egress = egress;
+        self
+    }
+
+    /// 当前出站策略。
+    pub fn egress_policy(&self) -> EgressPolicy {
+        self.egress
     }
 
     /// 目标后端。
@@ -140,7 +157,7 @@ impl<T: Transport> ModelGateway<T> {
         model_profile_ref: ModelProfileRef,
     ) -> Result<ValidatedOutput, GatewayError> {
         // §8 的出站判断。放在最前面：放晚了就有人能先构造好请求再"顺便"检查。
-        context.authorize_backend(self.backend, self.remote_authorized)?;
+        context.authorize_backend(self.backend, self.remote_authorized, self.egress)?;
 
         let request = ModelRequest {
             context: context.clone(),

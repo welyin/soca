@@ -4,6 +4,7 @@
 //! |---|---|
 //! | [`http`] | 一个刚好够用的 HTTP/1.1 子集 |
 //! | [`session`] | 每会话令牌与来源检查（§8） |
+//! | [`model`] | 模型端点配置与离线桩。**凭据只活在内存里，界面只拿到指纹** |
 //! | [`router`] | 请求 → 响应。纯函数式，因此全部行为都能在测试里直接断言 |
 //! | [`page`] | 单文件页面，零外部资源 |
 //! | [`serve`] | 只绑 loopback 的服务循环 |
@@ -23,12 +24,14 @@
 #![warn(missing_docs)]
 
 pub mod http;
+pub mod model;
 pub mod page;
 pub mod router;
 pub mod serve;
 pub mod session;
 
 pub use crate::http::{parse_request, HttpError, Request, Response, MAX_BODY_BYTES};
+pub use crate::model::{offline_stub, ConsoleModel};
 pub use crate::router::handle;
 pub use crate::serve::{serve, ServerHandle, BIND_ADDR, MAX_CONNECTIONS};
 pub use crate::session::Session;

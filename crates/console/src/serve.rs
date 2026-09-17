@@ -18,6 +18,7 @@ use soca_contracts::WallClock;
 use soca_core::Subject;
 
 use crate::http::{parse_request, HttpError, Response, MAX_BODY_BYTES, MAX_HEADER_BYTES};
+use crate::model::ConsoleModel;
 use crate::router;
 use crate::session::Session;
 
@@ -54,6 +55,7 @@ impl ServerHandle {
 /// 启动服务。
 pub fn serve(
     subject: Arc<Mutex<Subject>>,
+    model: Arc<Mutex<ConsoleModel>>,
     session: Session,
     port: u16,
 ) -> std::io::Result<ServerHandle> {
@@ -79,10 +81,11 @@ pub fn serve(
             }
 
             let subject = Arc::clone(&subject);
+            let model = Arc::clone(&model);
             let session = session.clone();
             let counter = Arc::clone(&counter);
             thread::spawn(move || {
-                handle_connection(stream, &subject, &session);
+                handle_connection(stream, &subject, &model, &session);
                 counter.fetch_sub(1, Ordering::SeqCst);
             });
         }
@@ -91,17 +94,26 @@ pub fn serve(
     Ok(ServerHandle { addr, shutdown })
 }
 
-fn handle_connection(mut stream: TcpStream, subject: &Mutex<Subject>, session: &Session) {
+fn handle_connection(
+    mut stream: TcpStream,
+    subject: &Mutex<Subject>,
+    model: &Mutex<ConsoleModel>,
+    session: &Session,
+) {
     let response = match read_request(&mut stream) {
         Ok(request) => {
             // 时刻按挂钟取。控制台是活的服务，"现在"就是现在——重放与可复现由测试里的
             // 固定时刻负责，不靠服务器把时间冻住。
             let at = WallClock::now();
-            let mut guard = match subject.lock() {
+            let mut subject = match subject.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            router::handle(&mut guard, session, &request, at)
+            let mut model = match model.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            router::handle(&mut subject, &mut model, session, &request, at)
         }
         Err(HttpError::IncompleteHeaders) => Response::text(400, "请求不完整"),
         Err(HttpError::BodyTooLarge { limit, actual }) => {

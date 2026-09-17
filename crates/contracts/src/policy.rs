@@ -56,6 +56,55 @@ impl DataClass {
     }
 }
 
+/// 出站策略（§8）。
+///
+/// §8 的默认是"私人数据类别不得出站到云端"，而它的理由写得很具体：
+///
+/// > 若GPU预算不足，当前选定后端不可准入：只可使用用户已批准的降级模型配置重新规划，或保持
+/// > 控制界面并暂停推理。**不得自动将私人上下文发云。**
+///
+/// 关键在于"自动"二字。用户自己配置了一个端点、并且明确批准之后，把**自己**的数据发过去
+/// 是他对自己数据的处置——那不是系统在绕过限制，而是数据所有者在行使决定权。所以本类型把
+/// 那条路做成必须显式选择、必须按端点声明、且默认关闭的东西。
+///
+/// 三条不可逾越的边界写在这里，以免"用户批准"被理解成万能钥匙：
+///
+/// * 只对 [`DataClass::Personal`] 生效。[`DataClass::Sensitive`] 与 [`DataClass::Secret`]
+///   无论在哪种策略下都不出站——原始音视频与密钥材料不该因为一个勾选框就上路。
+/// * 只对远端后端生效。本地后端本来就不需要出站判断。
+/// * 这是**按端点**的声明。换端点等于换了一个信任边界，旧批准不继承。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressPolicy {
+    /// §8 的默认：私人数据一律不出站。
+    #[default]
+    Strict,
+    /// 用户已就当前端点明确批准个人数据出站。**不是默认值。**
+    AllowPersonal,
+}
+
+impl EgressPolicy {
+    /// 该策略下某一类数据能否出站到远端。
+    pub fn permits(self, class: DataClass) -> bool {
+        match class.cloud_egress() {
+            // §8 允许出站、但需要一次单独的策略批准。本策略类型表示的就是那次批准是否已给出。
+            EgressVerdict::RequiresPolicyApproval => true,
+            EgressVerdict::Denied => {
+                // "用户批准"只打开中间那一档，不打开全部。
+                self == Self::AllowPersonal && class == DataClass::Personal
+            }
+        }
+    }
+
+    /// 稳定名称，用于审计记录。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::AllowPersonal => "allow_personal",
+        }
+    }
+}
+
 /// 动作等级（§12.1）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ActionLevel {

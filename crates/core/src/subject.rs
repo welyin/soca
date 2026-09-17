@@ -31,9 +31,10 @@
 use serde::Serialize;
 use soca_contracts::{
     ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateSet, CapabilitySlice,
-    CognitiveUnit, ContextBundle, DataClass, EvidenceSlice, ExplorationQuota, GoalBudget, GoalId,
-    GoalStack, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Observation, OutputSchema,
-    PermissionScope, Provenance, TaskId, ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE,
+    CognitiveUnit, ContextBundle, DataClass, EgressPolicy, EvidenceSlice, ExplorationQuota,
+    GoalBudget, GoalId, GoalStack, ModelBackend, ModelBudget, ModelOutput, ModelVersion,
+    Observation, OutputSchema, PermissionScope, Provenance, TaskId, ToolId, UserChannel, WallClock,
+    MAX_CONTEXT_EVIDENCE,
 };
 use soca_core_actors::DesktopAndFilesCluster;
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
@@ -104,6 +105,10 @@ pub struct PublicState {
     pub actions: i64,
     /// 累计模型调用次数（含重试）。
     pub model_calls: u64,
+    /// 当前模型后端。
+    pub backend: &'static str,
+    /// 当前个人数据出站策略（§8）。界面要能显示它是 `strict` 还是已被用户放开。
+    pub egress_policy: &'static str,
 }
 
 /// 单主体运行时。
@@ -116,11 +121,12 @@ pub struct Subject {
     owner: soca_contracts::SubjectId,
     task: TaskId,
     boot: soca_contracts::BootId,
+    /// 当前模型后端。
+    backend: ModelBackend,
     /// 是否已获准把上下文发往远端（§8）。
-    ///
-    /// 只在构造时确定，不提供运行时开关：§8 的云端授权是一种策略，不是一个随手可以翻的
-    /// 布尔量。要改变它，得重新装配主体，而那次装配会留下记录。
     remote_authorized: bool,
+    /// 个人数据的出站策略（§8）。默认 [`EgressPolicy::Strict`]。
+    egress: EgressPolicy,
     /// 本主体实际观测到的证据。上下文编译只从这里取。
     ///
     /// 这是一个**有界的近期窗口**，不是长期记忆——长期记忆是 L5 的职责。让它无限增长的话，
@@ -170,7 +176,9 @@ impl Subject {
             owner,
             task,
             boot,
+            backend,
             remote_authorized,
+            egress: EgressPolicy::Strict,
             observed: Vec::new(),
         })
     }
@@ -380,7 +388,8 @@ impl Subject {
 
         // 证据池里可能出现等级高于目标允许范围的内容。这里不做"过滤掉那条"，而是把
         // 类别最高的那一条如实带出去，让出站判断去拒绝——过滤后模型看到的结论会缺少依据。
-        let context = ContextCompiler::new(self.gateway.backend(), self.is_remote_authorized())
+        let context = ContextCompiler::new(self.backend, self.remote_authorized)
+            .with_egress_policy(self.egress)
             .compile(input)?;
 
         let profile = soca_contracts::ModelProfileRef::new("profile:reasoning")?;
@@ -450,6 +459,8 @@ impl Subject {
             memory_entries: self.store.memory_count(&self.owner)?,
             actions: self.store.action_count()?,
             model_calls: self.gateway.calls(),
+            backend: self.backend.as_str(),
+            egress_policy: self.egress.as_str(),
         })
     }
 
@@ -483,13 +494,45 @@ impl Subject {
         }
     }
 
-    /// 是否已获准把上下文发往远端。
+    /// 当前模型后端。
+    pub fn backend(&self) -> ModelBackend {
+        self.backend
+    }
+
+    /// 当前个人数据出站策略。默认 `Strict`。
+    pub fn egress_policy(&self) -> EgressPolicy {
+        self.egress
+    }
+
+    /// 换一个模型传输层。
     ///
-    /// 网关自己知道这件事，但编译发生在调用之前，所以主体要能把它传给编译器。这条信息
-    /// 只从构造时的那一个来源读，不提供运行时开关——§8 的云端授权是一种策略，不是一个
-    /// 随手可以翻的布尔量。
-    fn is_remote_authorized(&self) -> bool {
-        self.remote_authorized
+    /// **必须一次性把新端点相关的三件事全部给出**：后端、云端授权、出站策略。分开设置会让
+    /// "换了端点但沿用旧授权"变成一个可能的中间态，而 §8 的要求恰恰是每一次云端授权都要
+    /// 对应到具体的端点。这里没有提供只改其中一项的入口。
+    ///
+    /// 出站策略默认回到 `Strict`：换端点等于换了一个信任边界，旧的批准不继承。
+    pub fn set_transport(
+        &mut self,
+        transport: Box<dyn Transport>,
+        backend: ModelBackend,
+        remote_authorized: bool,
+        model_version: ModelVersion,
+    ) -> Result<(), CoreError> {
+        let budget = self.gateway.budget();
+        self.gateway =
+            ModelGateway::new(transport, backend, remote_authorized, budget, model_version)?;
+        self.backend = backend;
+        self.remote_authorized = remote_authorized;
+        self.egress = EgressPolicy::Strict;
+        Ok(())
+    }
+
+    /// 显式放开个人数据出站。
+    ///
+    /// 单独一个方法，是因为它是一次**策略变更**而不是一个配置项：调用点应当能被审计代码
+    /// 一眼找到。任何时候都只放开 [`DataClass::Personal`] 这一档。
+    pub fn grant_personal_egress(&mut self) {
+        self.egress = EgressPolicy::AllowPersonal;
     }
 
     /// 可用动作等级的上限（供界面显示"这个主体现在最多能做到什么"）。

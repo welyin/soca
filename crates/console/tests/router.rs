@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
-use soca_console::{handle, parse_request, Request, Response, Session};
+use soca_console::{handle, parse_request, ConsoleModel, Request, Response, Session};
 use soca_contracts::{
     Candidate, ModelBackend, ModelBudget, ModelOutput, ModelProposal, ModelSelfReport,
     ModelVersion, SubjectId, TokenUsage, WallClock, MODEL_OUTPUT_SCHEMA_VERSION,
@@ -116,7 +116,37 @@ fn body(value: Value) -> String {
 }
 
 fn call(subject: &mut Subject, method: &str, path: &str, body: &str) -> Response {
-    handle(subject, &session(), &request(method, path, body), at(0))
+    let mut model = ConsoleModel::new();
+    handle(
+        subject,
+        &mut model,
+        &session(),
+        &request(method, path, body),
+        at(0),
+    )
+}
+
+/// 用一条手工构造的请求走一次路由。给认证与来源检查那几条用。
+fn call_request(subject: &mut Subject, request: &Request) -> Response {
+    let mut model = ConsoleModel::new();
+    handle(subject, &mut model, &session(), request, at(0))
+}
+
+/// 带持久模型配置的调用。换端点这类操作有状态，不能每次用一个新配置。
+fn call_with(
+    subject: &mut Subject,
+    model: &mut ConsoleModel,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Response {
+    handle(
+        subject,
+        model,
+        &session(),
+        &request(method, path, body),
+        at(0),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +167,178 @@ fn the_page_is_served_with_the_session_token_injected() {
         !response.body.contains("__SOCA_TOKEN__"),
         "占位符必须被替换掉"
     );
+    // 模型配置就在同一个页面上，不需要另开一个界面。
+    assert!(response.body.contains("id=\"model-key\""));
+    assert!(response.body.contains("id=\"model-allow-personal\""));
+    assert!(response.body.contains("api.deepseek.com"));
+}
+
+// ---------------------------------------------------------------------------
+// 模型端点配置
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_model_endpoint_reports_the_offline_stub_by_default() {
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    let response = call_with(&mut subject, &mut model, "GET", "/api/model", "");
+    assert_eq!(response.status, 200);
+    let payload = json(&response);
+    assert_eq!(payload["configured"], false);
+    assert_eq!(payload["mode"], "offline_stub");
+    assert!(
+        payload["note"].as_str().expect("有说明").contains("桩"),
+        "默认状态必须说清当前没有接模型"
+    );
+}
+
+#[test]
+fn configuring_deepseek_switches_the_backend_and_never_echoes_the_key() {
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    let secret = "sk-abcdefghijklmnop";
+    let response = call_with(
+        &mut subject,
+        &mut model,
+        "POST",
+        "/api/model",
+        &body(json!({"api_key": secret})),
+    );
+    assert_eq!(response.status, 200);
+
+    let payload = json(&response);
+    assert_eq!(payload["configured"], true);
+    assert_eq!(payload["base_url"], "https://api.deepseek.com");
+    assert_eq!(payload["model"], "deepseek-chat");
+    assert_eq!(
+        payload["endpoint"],
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(payload["api_key_fingerprint"], "sk-****mnop");
+    assert_eq!(payload["allow_private_egress"], false);
+
+    // 密钥绝不能出现在任何返回里。界面能回答"是哪把钥匙"，而这个回答不需要交出钥匙。
+    assert!(
+        !response.body.contains(secret),
+        "响应体不得包含密钥，实际：{}",
+        response.body
+    );
+
+    let state = json(&call_with(&mut subject, &mut model, "GET", "/api/state", ""));
+    assert_eq!(state["backend"], "remote");
+    assert_eq!(
+        state["egress_policy"], "strict",
+        "接上远端本身不放开个人数据"
+    );
+}
+
+#[test]
+fn an_http_endpoint_that_is_not_loopback_is_refused() {
+    // 把 Authorization 头发往非 loopback 的明文 HTTP，等于把密钥交给路径上的每一跳。
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    let response = call_with(
+        &mut subject,
+        &mut model,
+        "POST",
+        "/api/model",
+        &body(json!({"base_url": "http://api.deepseek.com", "api_key": "sk-test"})),
+    );
+    assert_eq!(response.status, 400);
+    assert_eq!(json(&response)["error"], "invalid_credentials");
+    assert!(!model.is_configured(), "被拒的配置不留下半个状态");
+}
+
+#[test]
+fn a_loopback_http_endpoint_is_accepted() {
+    // 本机推理服务（llama.cpp / vLLM）用明文 HTTP 是合理的：它不出机器。
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    let response = call_with(
+        &mut subject,
+        &mut model,
+        "POST",
+        "/api/model",
+        &body(json!({
+            "base_url": "http://127.0.0.1:8080/v1",
+            "model": "local-model",
+            "api_key": "not-needed",
+        })),
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        json(&response)["endpoint"],
+        "http://127.0.0.1:8080/v1/chat/completions"
+    );
+}
+
+#[test]
+fn an_empty_api_key_is_refused() {
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    let response = call_with(
+        &mut subject,
+        &mut model,
+        "POST",
+        "/api/model",
+        &body(json!({"api_key": "   "})),
+    );
+    assert_eq!(response.status, 400);
+    assert_eq!(json(&response)["error"], "invalid_credentials");
+}
+
+#[test]
+fn granting_personal_egress_is_visible_in_both_the_summary_and_the_state() {
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    let response = call_with(
+        &mut subject,
+        &mut model,
+        "POST",
+        "/api/model",
+        &body(json!({"api_key": "sk-test", "allow_private_egress": true})),
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(json(&response)["allow_private_egress"], true);
+
+    let state = json(&call_with(&mut subject, &mut model, "GET", "/api/state", ""));
+    assert_eq!(
+        state["egress_policy"], "allow_personal",
+        "放开之后界面必须显示出来，否则用户不知道自己现在处于什么状态"
+    );
+}
+
+#[test]
+fn disconnecting_returns_to_the_offline_stub() {
+    let mut subject = subject();
+    let mut model = ConsoleModel::new();
+    call_with(
+        &mut subject,
+        &mut model,
+        "POST",
+        "/api/model",
+        &body(json!({"api_key": "sk-test", "allow_private_egress": true})),
+    );
+    assert!(model.is_configured());
+
+    let response = call_with(&mut subject, &mut model, "POST", "/api/model/reset", "{}");
+    assert_eq!(response.status, 200);
+    assert_eq!(json(&response)["configured"], false);
+
+    let state = json(&call_with(&mut subject, &mut model, "GET", "/api/state", ""));
+    assert_eq!(state["backend"], "cpu");
+    assert_eq!(
+        state["egress_policy"], "strict",
+        "断开之后出站策略要回到默认，不能把上一次的批准留着"
+    );
+}
+
+#[test]
+fn the_model_endpoint_requires_the_same_authentication_as_everything_else() {
+    let mut subject = subject();
+    let mut bare = request("GET", "/api/model", "");
+    bare.headers.remove("x-soca-token");
+    assert_eq!(call_request(&mut subject, &bare).status, 401);
 }
 
 #[test]
@@ -145,8 +347,7 @@ fn an_api_call_without_a_token_is_refused() {
     let mut subject = subject();
     let mut bare = request("GET", "/api/state", "");
     bare.headers.remove("x-soca-token");
-    let response = handle(&mut subject, &session(), &bare, at(0));
-    assert_eq!(response.status, 401);
+    assert_eq!(call_request(&mut subject, &bare).status, 401);
 }
 
 #[test]
@@ -156,14 +357,14 @@ fn an_api_call_with_a_wrong_token_is_refused() {
     wrong
         .headers
         .insert("x-soca-token".to_string(), "wrong".to_string());
-    assert_eq!(handle(&mut subject, &session(), &wrong, at(0)).status, 401);
+    assert_eq!(call_request(&mut subject, &wrong).status, 401);
 
     // 前缀匹配也要被拒：token 比对上的任何宽容都是漏洞。
     let mut prefix = request("GET", "/api/state", "");
     prefix
         .headers
         .insert("x-soca-token".to_string(), TOKEN[..8].to_string());
-    assert_eq!(handle(&mut subject, &session(), &prefix, at(0)).status, 401);
+    assert_eq!(call_request(&mut subject, &prefix).status, 401);
 }
 
 #[test]
@@ -175,12 +376,12 @@ fn a_request_from_a_non_loopback_host_is_refused() {
     foreign
         .headers
         .insert("host".to_string(), "evil.example.com".to_string());
-    assert_eq!(handle(&mut subject, &session(), &foreign, at(0)).status, 403);
+    assert_eq!(call_request(&mut subject, &foreign).status, 403);
 
     // 没有 Host 头：HTTP/1.1 要求必须有，缺失即不可信。
     let mut hostless = request("GET", "/api/state", "");
     hostless.headers.remove("host");
-    assert_eq!(handle(&mut subject, &session(), &hostless, at(0)).status, 403);
+    assert_eq!(call_request(&mut subject, &hostless).status, 403);
 }
 
 #[test]

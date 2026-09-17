@@ -100,6 +100,29 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>模型</h2>
+    <div id="model-current" class="hint" style="margin:0 0 14px">读取中…</div>
+    <div class="row">
+      <input id="model-base" style="flex:2" placeholder="https://api.deepseek.com">
+      <input id="model-name" style="flex:1" placeholder="deepseek-chat">
+    </div>
+    <div class="row" style="margin-top:10px">
+      <input id="model-key" type="password" style="flex:2" placeholder="API 密钥（只留在本进程内存里）">
+      <button id="model-connect">连接</button>
+      <button id="model-reset" class="ghost">断开</button>
+    </div>
+    <label class="row" style="margin-top:12px; gap:8px; color:var(--dim); font-size:12.5px">
+      <input id="model-allow-personal" type="checkbox" style="width:auto">
+      允许把 <b>personal</b> 级别的观测发往该端点（默认关闭）
+    </label>
+    <div class="hint">
+      §8 的默认是"私人数据类别不得出站到云端"。勾上这一项是<b>你</b>对自己数据的处置，
+      不是系统放宽了限制：它只放开 personal 这一档，<b>sensitive 与 secret 无论怎样都不出站</b>；
+      换端点之后它会自动回到关闭。密钥不写入数据库，重启后需要重填。
+    </div>
+  </section>
+
+  <section>
     <h2>委托一个目标</h2>
     <div class="row">
       <textarea id="message" placeholder="例如：为已授权目录生成一份摘要"></textarea>
@@ -195,7 +218,10 @@ function tag(state, expired) {
 }
 
 function renderState(state) {
-  $("owner").textContent = state.owner + "　模型调用 " + state.model_calls + " 次";
+  $("owner").textContent = state.owner
+    + "　后端 " + state.backend
+    + "　出站 " + state.egress_policy
+    + "　模型调用 " + state.model_calls + " 次";
 
   const metrics = [
     ["目标", state.goals.length],
@@ -254,6 +280,60 @@ async function refresh() {
   catch (error) { log("读取状态失败：" + error.message, "err"); }
 }
 
+async function refreshModel() {
+  try {
+    const info = await api("model");
+    if (!info.configured) {
+      $("model-current").textContent = "未配置远端端点。当前应答源是确定性桩，只会复述收到的证据。";
+      $("model-base").placeholder = "https://api.deepseek.com";
+      $("model-name").placeholder = "deepseek-chat";
+      $("model-allow-personal").checked = false;
+      return;
+    }
+    $("model-current").innerHTML =
+      "已连接 <b>" + escapeHtml(info.endpoint) + "</b>　模型 " + escapeHtml(info.model) +
+      "　密钥 " + escapeHtml(info.api_key_fingerprint) +
+      (info.allow_private_egress
+        ? '　<span class="tag waiting_approval">已放开 personal 出站</span>'
+        : '　<span class="tag active">strict 出站</span>');
+    $("model-base").value = info.base_url;
+    $("model-name").value = info.model;
+    $("model-allow-personal").checked = info.allow_private_egress;
+  } catch (error) { log("读取模型配置失败：" + error.message, "err"); }
+}
+
+$("model-connect").onclick = async function () {
+  const key = $("model-key").value.trim();
+  if (!key) { log("先填 API 密钥", "err"); return; }
+  $("model-connect").disabled = true;
+  try {
+    const info = await api("model", {
+      base_url: $("model-base").value.trim() || "https://api.deepseek.com",
+      model: $("model-name").value.trim() || "deepseek-chat",
+      api_key: key,
+      allow_private_egress: $("model-allow-personal").checked,
+    });
+    // 填进去之后就清掉输入框：页面 DOM 里留着的密钥会被任何截图、录屏或扩展读走。
+    $("model-key").value = "";
+    log("已连接到 " + info.endpoint + "（密钥 " + info.api_key_fingerprint + "）", "ok");
+    if (info.allow_private_egress) {
+      log("注意：已放开 personal 数据出站。sensitive 与 secret 仍然不出站。");
+    }
+  } catch (error) { log("连接失败：" + error.message, "err"); }
+  $("model-connect").disabled = false;
+  refreshModel();
+  refresh();
+};
+
+$("model-reset").onclick = async function () {
+  try {
+    await api("model/reset", {});
+    log("已断开远端端点，回到离线桩", "ok");
+  } catch (error) { log("断开失败：" + error.message, "err"); }
+  refreshModel();
+  refresh();
+};
+
 $("send").onclick = async function () {
   const message = $("message").value.trim();
   if (!message) return;
@@ -299,6 +379,7 @@ $("message").addEventListener("keydown", function (event) {
 });
 
 refresh();
+refreshModel();
 </script>
 </body>
 </html>

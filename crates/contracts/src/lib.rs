@@ -88,7 +88,7 @@ pub use crate::ids::{
 };
 pub use crate::memory::{MemoryEntry, MemoryKind, MemoryStatus};
 pub use crate::policy::{
-    ActionLevel, ApprovalRequirement, DataClass, EgressVerdict, PermissionScope,
+    ActionLevel, ApprovalRequirement, DataClass, EgressPolicy, EgressVerdict, PermissionScope,
 };
 pub use crate::time::{Monotonic, TimeWindow, WallClock};
 pub use crate::topology::{

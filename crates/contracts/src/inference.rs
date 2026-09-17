@@ -30,8 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::validate::assert_unique;
 use crate::{
-    ActionId, Candidate, ContractError, DataClass, EgressVerdict, EvidenceRef, ModelBackend,
-    ModelSelfReport, ModelVersion, PredictionRef, ToolId, Verdict, WallClock, ActionLevel,
+    ActionId, ActionLevel, Candidate, CandidateSet, ContractError, DataClass, EgressPolicy,
+    EvidenceRef, ModelBackend, ModelSelfReport, ModelVersion, PredictionRef, ToolId, Verdict,
+    WallClock,
 };
 
 /// 上下文包的 schema 版本。字段增删必须提升它。
@@ -388,21 +389,25 @@ impl ContextBundle {
     ///
     /// 三条规则：
     /// * 本地 CPU/GPU 后端不做出站判断；
-    /// * 远端后端要求**每一条**证据都不是 `Denied`——只要有一条私人内容，整份上下文被拒，
-    ///   而不是"把那条滤掉再发"。过滤后再发会让模型看到的结论缺少依据，等于用一个更隐蔽的
-    ///   方式产生同一种错误；
+    /// * 远端后端要求**每一条**证据都通过 [`EgressPolicy::permits`]——只要有一条过不去，
+    ///   整份上下文被拒，而不是"把那条滤掉再发"。过滤后再发会让模型看到的结论缺少依据，
+    ///   等于用一个更隐蔽的方式产生同一种错误；
     /// * 远端还要求显式授权（§4.3：`remote_authorized`）。内存不足、本地模型不可用都不是
     ///   把私人上下文发到云端的理由。
+    ///
+    /// [`EgressPolicy`] 默认是 `Strict`，也就是 §8 的原样。把它换成 `AllowPersonal` 是
+    /// 数据所有者对自己数据的处置，不是系统放宽了限制——两者在审计记录里是不同的值。
     pub fn authorize_backend(
         &self,
         backend: ModelBackend,
         remote_authorized: bool,
+        egress: EgressPolicy,
     ) -> Result<(), ContractError> {
         if backend != ModelBackend::Remote {
             return Ok(());
         }
         for slice in &self.evidence {
-            if slice.data_class.cloud_egress() == EgressVerdict::Denied {
+            if !egress.permits(slice.data_class) {
                 return Err(ContractError::EgressDenied {
                     class: slice.data_class.as_str(),
                 });
@@ -416,8 +421,10 @@ impl ContextBundle {
 
     /// 校验模型返回的提案（§8"模型返回候选后先解析和校验"）。
     ///
-    /// 三条检查：
+    /// 四条检查：
     /// * 提案数不超限；
+    /// * 候选集合自身的结构规则（结论必须带证据、冲突至少两方等）——**复用**
+    ///   [`CandidateSet::validate`] 而不是在这里重写一遍，两处各写一份迟早会分叉；
     /// * 每一条被引用的证据都已经在上下文里；
     /// * 动作提案引用的预测**已经记录在案**——模型不能现编一个预测引用；
     /// * 候选种类在本次允许的范围内。
@@ -428,6 +435,19 @@ impl ContextBundle {
                 actual: proposals.len(),
             });
         }
+
+        // 结构与证据非空这两条要在这里就拦住。少这一道的话，"模型提了一条不带证据的结论"
+        // 会一路走到候选集合那一层才被拒——而那一层的错误信息离模型很远，排查起来像是
+        // 别的地方出了问题。
+        let structural = CandidateSet {
+            candidates: proposals
+                .iter()
+                .map(|proposal| proposal.candidate.clone())
+                .collect(),
+            conflicts: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        structural.validate()?;
 
         for proposal in proposals {
             let kind = proposal.candidate.kind();

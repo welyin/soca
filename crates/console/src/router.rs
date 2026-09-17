@@ -10,9 +10,10 @@ use soca_contracts::{
     PermissionScope, UserChannel, WallClock,
 };
 use soca_core::Subject;
-use soca_model_gateway::GatewayError;
+use soca_model_gateway::{GatewayError, ModelCredentials};
 
 use crate::http::{Request, Response};
+use crate::model::ConsoleModel;
 use crate::page;
 use crate::session::Session;
 
@@ -28,6 +29,7 @@ const CHAT_EXPLORATIONS: u32 = 4;
 /// 处理一条请求。
 pub fn handle(
     subject: &mut Subject,
+    model: &mut ConsoleModel,
     session: &Session,
     request: &Request,
     at: WallClock,
@@ -49,12 +51,75 @@ pub fn handle(
             Ok(state) => Response::json(200, &json!(state)),
             Err(error) => internal(error.to_string()),
         },
+        ("GET", "/api/model") => Response::json(200, &model.summary()),
+        ("POST", "/api/model") => connect_model(subject, model, request),
+        ("POST", "/api/model/reset") => reset_model(subject, model),
         ("POST", "/api/chat") => chat(subject, request, at),
         ("POST", "/api/observe") => observe(subject, request, at),
         ("POST", "/api/consult") => consult(subject, request, at),
         ("POST", "/api/abandon") => abandon(subject, request, at),
         ("GET", _) | ("POST", _) => Response::text(404, "没有这个接口"),
         _ => Response::text(405, "只接受 GET 与 POST"),
+    }
+}
+
+/// 配置远端模型端点。
+///
+/// 这个接口**收**密钥但**不回**密钥：返回的是 [`ConsoleModel::summary`]，只有指纹。
+fn connect_model(subject: &mut Subject, model: &mut ConsoleModel, request: &Request) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+
+    // 缺省值指向 DeepSeek：用户只需要填密钥。换一家兼容端点填 base_url 即可。
+    let base_url = payload
+        .get("base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(ModelCredentials::DEEPSEEK_BASE_URL);
+    let model_name = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(ModelCredentials::DEEPSEEK_MODEL);
+    let api_key = payload
+        .get("api_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let allow_personal = payload
+        .get("allow_private_egress")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let credentials = match ModelCredentials::new(base_url, model_name, api_key) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            // 凭据构造的错误信息里只有端点与类别名，没有密钥内容。
+            return Response::json(
+                400,
+                &json!({"error": "invalid_credentials", "detail": error.to_string()}),
+            );
+        }
+    };
+
+    match model.apply(subject, credentials, allow_personal) {
+        Ok(()) => Response::json(200, &model.summary()),
+        Err(error) => Response::json(
+            500,
+            &json!({"error": "apply_failed", "detail": error.to_string()}),
+        ),
+    }
+}
+
+fn reset_model(subject: &mut Subject, model: &mut ConsoleModel) -> Response {
+    match model.reset(subject) {
+        Ok(()) => Response::json(200, &model.summary()),
+        Err(error) => Response::json(
+            500,
+            &json!({"error": "reset_failed", "detail": error.to_string()}),
+        ),
     }
 }
 

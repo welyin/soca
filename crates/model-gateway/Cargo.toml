@@ -10,6 +10,7 @@ publish.workspace = true
 soca-contracts = { path = "../contracts" }
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "2", features = ["json"] }
 thiserror.workspace = true
 
 [lints]

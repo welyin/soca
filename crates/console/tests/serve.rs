@@ -60,6 +60,16 @@ fn subject() -> Subject {
     .expect("装配主体")
 }
 
+fn start(session: &Session) -> soca_console::ServerHandle {
+    serve(
+        Arc::new(Mutex::new(subject())),
+        Arc::new(Mutex::new(soca_console::ConsoleModel::new())),
+        session.clone(),
+        0,
+    )
+    .expect("启动")
+}
+
 fn raw_get(addr: SocketAddr, path: &str, token: Option<&str>, host: &str) -> String {
     let mut stream = TcpStream::connect(addr).expect("连接");
     stream
@@ -82,13 +92,9 @@ fn raw_get(addr: SocketAddr, path: &str, token: Option<&str>, host: &str) -> Str
 fn the_server_binds_loopback_only_and_answers_over_a_real_socket() {
     assert_eq!(BIND_ADDR.to_string(), "127.0.0.1");
 
+    // 端口 0：让系统分配，避免测试之间抢端口
     let session = Session::generate();
-    let handle = serve(
-        Arc::new(Mutex::new(subject())),
-        session.clone(),
-        0, // 端口 0：让系统分配，避免测试之间抢端口
-    )
-    .expect("启动");
+    let handle = start(&session);
 
     let addr = handle.local_addr();
     assert!(addr.ip().is_loopback(), "只绑 loopback（§8）");
@@ -116,7 +122,7 @@ fn the_server_binds_loopback_only_and_answers_over_a_real_socket() {
 fn a_foreign_host_header_is_refused_over_a_real_socket() {
     // 浏览器被诱导访问一个解析到本机的域名时，Host 会是那个域名。这条测试模拟的就是它。
     let session = Session::generate();
-    let handle = serve(Arc::new(Mutex::new(subject())), session.clone(), 0).expect("启动");
+    let handle = start(&session);
     let addr = handle.local_addr();
 
     let response = raw_get(addr, "/api/state", Some(session.token()), "evil.example.com");
@@ -133,7 +139,7 @@ fn a_post_with_a_body_survives_the_read_loop() {
     // 请求体要穿过"先读头、再按 Content-Length 读体"这条路径。这条路径最容易出的问题是
     // 只读了头就交给解析器，于是 body 永远是空的。
     let session = Session::generate();
-    let handle = serve(Arc::new(Mutex::new(subject())), session.clone(), 0).expect("启动");
+    let handle = start(&session);
     let addr = handle.local_addr();
 
     let payload = r#"{"message":"为已授权目录生成摘要"}"#;

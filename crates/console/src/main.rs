@@ -15,14 +15,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use soca_console::{serve, Session};
-use soca_contracts::{
-    BootId, Candidate, ModelBackend, ModelBudget, ModelOutput, ModelProposal, ModelSelfReport,
-    ModelVersion, SubjectId, TokenUsage, WallClock, MODEL_OUTPUT_SCHEMA_VERSION,
-};
+use soca_console::{offline_stub, serve, ConsoleModel, Session};
+use soca_contracts::{BootId, ModelBackend, ModelBudget, ModelVersion, SubjectId, WallClock};
 use soca_core::{ActionBroker, SimulatedOs, Subject};
 use soca_core_actors::{DesktopAndFilesCluster, Precondition};
-use soca_model_gateway::DeterministicTransport;
 use soca_storage::Store;
 
 /// 启动时播进模拟环境的对象。让界面上的"读取一次"立刻有东西可读。
@@ -30,9 +26,6 @@ const SEEDED_FILE: &str = "file:D:\\资料\\摘要\\summary.md";
 
 /// 默认端口。
 const DEFAULT_PORT: u16 = 4319;
-
-/// 确定性桩的模型版本标识。
-const STUB_MODEL: &str = "sha256:deterministic-stub";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut db: Option<PathBuf> = None;
@@ -84,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cluster,
         owner,
         boot,
-        Box::new(stub_transport()),
+        Box::new(offline_stub()),
         ModelBackend::Cpu,
         // §8：远端未获授权。桩跑在本地，所以这不影响它。
         false,
@@ -93,14 +86,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_wall_millis: 30_000,
             max_attempts: 1,
         },
-        ModelVersion::new(STUB_MODEL)?,
+        ModelVersion::new(soca_console::model::STUB_MODEL)?,
     )?;
 
     // 上次运行留下的目标要恢复回来。§13.3：目标属于主体，而"属于"意味着它能跨重启存在。
     let restored = subject.restore_goals()?;
 
     let session = Session::generate();
-    let handle = serve(Arc::new(Mutex::new(subject)), session.clone(), port)?;
+    let handle = serve(
+        Arc::new(Mutex::new(subject)),
+        Arc::new(Mutex::new(ConsoleModel::new())),
+        session.clone(),
+        port,
+    )?;
 
     println!("SoCA 控制台已启动");
     println!("  地址  {}", handle.url());
@@ -118,52 +116,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  只绑定 127.0.0.1。同机其他用户可以读到这个令牌——");
     println!("  控制台是单用户本机工具，不是多租户服务。");
     println!();
-    println!("  模型：未接入。应答源是确定性桩，只会复述它收到的证据。");
+    println!("  模型：未接入。打开页面里的「模型」一节填端点与密钥即可接上。");
+    println!("        密钥只保存在本进程内存中，不落盘；重启后需要重填。");
     println!("按 Ctrl+C 退出。");
 
     loop {
         std::thread::park();
     }
-}
-
-/// 未接入真实模型时使用的应答源。
-///
-/// 它做的事只有一件：把上下文里的每一条证据复述成一条带证据的结论。这不是"假装有推理"，
-/// 恰恰相反——它**不可能**引用它没看到的东西，因此 §8 那条边界在它身上永远不会被触发，
-/// 而整条通路（编译 → 网关 → 预算 → 校验 → 候选）是真的在跑。
-fn stub_transport() -> DeterministicTransport {
-    DeterministicTransport::from_fn(|request| {
-        let proposals = request
-            .context
-            .evidence
-            .iter()
-            .map(|slice| ModelProposal {
-                candidate: Candidate::Claim {
-                    statement: format!("{} 的值是 {}", slice.subject_ref, slice.observed_value),
-                    evidence_refs: vec![slice.evidence_ref.clone()],
-                },
-                self_report: ModelSelfReport {
-                    // §3.2：自报数值不是概率。0.5 在这里只是"我没有任何把握"的占位，
-                    // 它没有任何校准来源，也不会变成 CalibratedProbability。
-                    reported_value: 0.5,
-                    model_version: ModelVersion::new(STUB_MODEL).expect("固定模型版本"),
-                    rationale: "确定性桩：不是判断，只是复述".to_string(),
-                },
-                rationale: "未接入真实模型；本桩把收到的证据原样复述，用来证明通路可用"
-                    .to_string(),
-            })
-            .collect();
-
-        Ok(ModelOutput {
-            schema_version: MODEL_OUTPUT_SCHEMA_VERSION,
-            model_version: ModelVersion::new(STUB_MODEL).expect("固定模型版本"),
-            proposals,
-            // 桩不消耗 token，记 0 而不是编一个数。编一个数会让成本对照失去意义。
-            usage: TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-            },
-            claims_finished: false,
-        })
-    })
 }

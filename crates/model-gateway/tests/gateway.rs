@@ -8,9 +8,9 @@
 use serde_json::json;
 use soca_contracts::{
     ActionId, ActionIntent, ActionLevel, BeliefSummary, Candidate, CandidateKind, CapabilitySlice,
-    ContextBundle, ContractError, DataClass, EvidenceRef, EvidenceSlice, ModelBackend, ModelBudget,
-    ModelOutput, ModelProposal, ModelSelfReport, ModelVersion, OutputSchema, PredictionRef,
-    ResourceCost, ResourceScope, TokenUsage, ToolId, UnitId, WallClock,
+    ContextBundle, ContractError, DataClass, EgressPolicy, EvidenceRef, EvidenceSlice, ModelBackend,
+    ModelBudget, ModelOutput, ModelProposal, ModelSelfReport, ModelVersion, OutputSchema,
+    PredictionRef, ResourceCost, ResourceScope, TokenUsage, ToolId, UnitId, WallClock,
 };
 use soca_model_gateway::{
     ContextCompiler, ContextInput, DeterministicTransport, GatewayError, ModelGateway,
@@ -317,6 +317,57 @@ fn remote_without_authorization_is_refused_even_for_public_evidence() {
     assert!(matches!(
         result,
         Err(GatewayError::Contract(ContractError::RemoteNotAuthorized))
+    ));
+}
+
+#[test]
+fn a_user_grant_opens_personal_but_never_sensitive_or_secret() {
+    // 这是那次放开能走多远的完整边界。写在测试里，因为它是整个特性里最容易被后续改动
+    // 悄悄放宽的一处：把 `class == DataClass::Personal` 那一行去掉，它就会变成万能钥匙。
+    assert!(EgressPolicy::Strict.permits(DataClass::Public));
+    assert!(!EgressPolicy::Strict.permits(DataClass::Personal));
+    assert!(!EgressPolicy::Strict.permits(DataClass::Sensitive));
+    assert!(!EgressPolicy::Strict.permits(DataClass::Secret));
+
+    assert!(EgressPolicy::AllowPersonal.permits(DataClass::Public));
+    assert!(EgressPolicy::AllowPersonal.permits(DataClass::Personal));
+    assert!(
+        !EgressPolicy::AllowPersonal.permits(DataClass::Sensitive),
+        "敏感内容（原始音视频、可识别的隐私字段）不因一次勾选就上路"
+    );
+    assert!(
+        !EgressPolicy::AllowPersonal.permits(DataClass::Secret),
+        "密钥材料与审批令牌同理"
+    );
+}
+
+#[test]
+fn the_grant_is_what_makes_personal_evidence_compilable_for_remote() {
+    // 端到端：同一份带个人数据的上下文，在 Strict 下编译不出来，在 AllowPersonal 下可以。
+    let personal = vec![slice("1", "file:summary.md", "sha256:aaa", DataClass::Personal)];
+    let beliefs = Vec::new();
+
+    let strict = ContextCompiler::new(ModelBackend::Remote, true);
+    assert!(matches!(
+        strict.compile(input(personal.clone(), beliefs.clone())),
+        Err(GatewayError::Contract(ContractError::EgressDenied { .. }))
+    ));
+
+    let granted = ContextCompiler::new(ModelBackend::Remote, true)
+        .with_egress_policy(EgressPolicy::AllowPersonal);
+    assert!(granted.compile(input(personal, beliefs)).is_ok());
+}
+
+#[test]
+fn the_grant_does_not_open_sensitive_evidence() {
+    let sensitive = vec![slice("1", "audio:mic", "raw", DataClass::Sensitive)];
+    let granted = ContextCompiler::new(ModelBackend::Remote, true)
+        .with_egress_policy(EgressPolicy::AllowPersonal);
+    assert!(matches!(
+        granted.compile(input(sensitive, Vec::new())),
+        Err(GatewayError::Contract(ContractError::EgressDenied {
+            class: "sensitive"
+        }))
     ));
 }
 
