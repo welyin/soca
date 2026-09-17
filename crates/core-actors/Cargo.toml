@@ -1,0 +1,22 @@
+[package]
+name = "soca-core-actors"
+description = "SoCA 单主体认知单元运行时：知识地图、八个职责叶单元与能力簇（实施规格 §3.3、工单 ENG-06）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+soca-contracts = { path = "../contracts" }
+soca-core-topology = { path = "../core-topology" }
+soca-game-host = { path = "../game-host" }
+soca-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

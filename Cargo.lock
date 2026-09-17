@@ -427,6 +427,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "soca-core-actors"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soca-contracts",
+ "soca-core-topology",
+ "soca-game-host",
+ "soca-storage",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "soca-core-topology"
 version = "0.1.0"
 dependencies = [
