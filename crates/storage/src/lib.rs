@@ -22,6 +22,7 @@ pub mod actions;
 pub mod audit;
 pub mod error;
 pub mod events;
+pub mod predictions;
 pub mod schema;
 
 pub use crate::actions::{
@@ -31,6 +32,7 @@ pub use crate::actions::{
 pub use crate::audit::{AuditCategory, AuditEntry, MAX_DETAIL_LEN};
 pub use crate::error::StorageError;
 pub use crate::events::{AppendOutcome, StoredEvent};
+pub use crate::predictions::PredictionRecord;
 pub use crate::schema::LATEST_SCHEMA_VERSION;
 
 use std::path::{Path, PathBuf};

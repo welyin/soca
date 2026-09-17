@@ -74,6 +74,11 @@ pub enum StorageError {
         actual: String,
     },
 
+    #[error(
+        "预测 {prediction_ref} 已经记录过不同内容；预测是当时写下的判断，事后修改等于伪造证据"
+    )]
+    PredictionAlreadyRecorded { prediction_ref: String },
+
     #[error("事件 {event_id} 未通过契约校验：{source}")]
     EventRejected {
         event_id: String,

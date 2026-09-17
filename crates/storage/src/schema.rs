@@ -11,10 +11,16 @@ use soca_contracts::WallClock;
 use crate::error::StorageError;
 
 /// 本程序支持的最新 schema 版本。
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 /// 迁移 1：初始表结构。
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
+
+/// 迁移 2：动作前预测独立落库。
+const MIGRATION_0002: &str = include_str!("../migrations/0002_predictions.sql");
+
+/// 迁移清单。按版本升序，只增不改：已发布的迁移一旦被编辑，旧库就会与新代码不一致。
+const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_0001), (2, MIGRATION_0002)];
 
 /// 打开连接后、迁移前必须设置的连接级参数。
 ///
@@ -62,16 +68,27 @@ pub(crate) fn migrate(conn: &mut Connection, applied_at: WallClock) -> Result<u3
             supported: LATEST_SCHEMA_VERSION,
         });
     }
-    if found == 0 {
-        let tx = conn.transaction()?;
-        tx.execute_batch(MIGRATION_0001)?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, applied_at_utc) VALUES (?1, ?2)",
-            rusqlite::params![1i64, applied_at.to_string()],
-        )?;
-        tx.commit()?;
+    let tx = conn.transaction()?;
+    for (version, sql) in MIGRATIONS {
+        if *version > found {
+            tx.execute_batch(sql)?;
+            record_version(&tx, *version, applied_at)?;
+        }
     }
+    tx.commit()?;
     Ok(LATEST_SCHEMA_VERSION)
+}
+
+fn record_version(
+    tx: &rusqlite::Transaction<'_>,
+    version: u32,
+    applied_at: WallClock,
+) -> Result<(), StorageError> {
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at_utc) VALUES (?1, ?2)",
+        rusqlite::params![i64::from(version), applied_at.to_string()],
+    )?;
+    Ok(())
 }
 
 /// 执行一次 WAL 检查点。

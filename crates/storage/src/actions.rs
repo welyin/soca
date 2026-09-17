@@ -26,6 +26,7 @@ use soca_contracts::{
 
 use crate::audit::{record_in, AuditCategory};
 use crate::error::StorageError;
+use crate::predictions::load_prediction;
 use crate::Store;
 
 /// 动作在账上的状态（§7.3）。
@@ -268,9 +269,26 @@ impl Store {
 
         let uses_so_far = permit_uses(&tx, permit.permit_id.as_str())?;
 
-        // 许可校验。失败不放行，但**必须留痕**（§6.8：否决保留在最小审计账中）。
-        if let Err(reason) = permit.authorizes(intent, at, uses_so_far) {
-            let detail = reason.to_string();
+        // 放行的两个必要条件，缺一不可：
+        //   1. 许可确实授权这次具体动作（§12.2）；
+        //   2. 动作前预测已经落库，且属于同一任务（§6.3，以及 §17 验收的"预测先于动作"）。
+        // 任一不满足都走同一条拒绝路径，都留痕（§6.8：否决保留在最小审计账中）。
+        let denial = match permit.authorizes(intent, at, uses_so_far) {
+            Err(reason) => Some(reason.to_string()),
+            Ok(()) => {
+                let reference = intent.prediction_ref.to_string();
+                match load_prediction(&tx, &reference)? {
+                    None => Some(format!("动作前预测 {reference} 未落库，拒绝受理")),
+                    Some(record) if record.task_id != task_id.to_string() => Some(format!(
+                        "预测 {reference} 属于任务 {}，与本次受理的任务 {task_id} 不一致",
+                        record.task_id
+                    )),
+                    Some(_) => None,
+                }
+            }
+        };
+
+        if let Some(detail) = denial {
             tx.execute(
                 "INSERT INTO actions (
                      action_id, task_id, unit_id, tool_id, object_scope, parameters_digest,

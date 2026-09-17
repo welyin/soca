@@ -103,6 +103,39 @@ fn new_permit(intent: &ActionIntent, permit: &str, max_uses: u8) -> ExecutionPer
     .expect("合法执行许可")
 }
 
+/// 与给定意图配套的预测。§6.3 要求动作前必须有可检查的预测。
+fn prediction_for(intent: &ActionIntent) -> Prediction {
+    Prediction::new(
+        intent.prediction_ref.clone(),
+        "授权目录中的目标文件内容".to_string(),
+        "写入后文件版本变为新内容的哈希".to_string(),
+        TimeWindow::new(at(0), at(60)).expect("合法时间窗"),
+        vec!["哈希不一致".to_string(), "文件不存在".to_string()],
+        Uncertainty {
+            probability: None,
+            notes: vec!["本地确定性写入，不需要概率字段".to_string()],
+        },
+    )
+    .expect("合法预测")
+}
+
+/// 记录预测后受理动作。
+fn admit(store: &mut Store, intent: &ActionIntent, permit: &ExecutionPermit) -> Admission {
+    try_admit(store, intent, permit).expect("受理流程本身不报错")
+}
+
+/// 同上，但保留错误分支供拒绝类测试使用。
+fn try_admit(
+    store: &mut Store,
+    intent: &ActionIntent,
+    permit: &ExecutionPermit,
+) -> Result<Admission, StorageError> {
+    store
+        .record_prediction(&unit(), &task(), &prediction_for(intent), at(0))
+        .expect("记录动作前预测");
+    store.admit_action(&task(), intent, permit, at(1))
+}
+
 fn new_receipt(action: &str, permit: &str, status: CommitStatus) -> ActionReceipt {
     ActionReceipt {
         action_id: ActionId::new(action).expect("固定动作"),
@@ -265,9 +298,7 @@ fn an_allowed_action_lands_in_the_ledger_and_the_outbox_together() {
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
 
-    let admission = store
-        .admit_action(&task(), &intent, &permit, at(1))
-        .expect("受理");
+    let admission = admit(&mut store, &intent, &permit);
 
     assert!(admission.is_dispatchable());
     assert!(!admission.replayed);
@@ -290,9 +321,7 @@ fn a_denied_action_never_enters_the_outbox_but_is_still_recorded() {
     let other = new_intent("action:1", 4096, ActionLevel::A1);
     let permit = new_permit(&other, "permit:1", 1);
 
-    let admission = store
-        .admit_action(&task(), &intent, &permit, at(1))
-        .expect("受理流程本身不报错");
+    let admission = admit(&mut store, &intent, &permit);
 
     assert_eq!(admission.decision, Decision::Denied);
     assert_eq!(admission.state, ActionState::Denied);
@@ -325,8 +354,8 @@ fn duplicate_admission_is_idempotent() {
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
 
-    let first = store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
-    let second = store.admit_action(&task(), &intent, &permit, at(2)).unwrap();
+    let first = admit(&mut store, &intent, &permit);
+    let second = admit(&mut store, &intent, &permit);
 
     assert!(!first.replayed);
     assert!(second.replayed, "重复受理必须是幂等的");
@@ -339,13 +368,11 @@ fn an_action_id_cannot_be_rebound_to_different_parameters() {
     let mut store = in_memory();
     let original = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&original, "permit:1", 1);
-    store
-        .admit_action(&task(), &original, &permit, at(1))
-        .expect("首次受理");
+    admit(&mut store, &original, &permit);
 
     // 同一个动作 ID，参数被换掉。动作 ID 是去重的唯一依据，绝不允许复用。
     let tampered = new_intent("action:1", 999_999, ActionLevel::A1);
-    let result = store.admit_action(&task(), &tampered, &permit, at(2));
+    let result = try_admit(&mut store, &tampered, &permit);
     assert!(matches!(result, Err(StorageError::ActionIdReused { .. })));
 }
 
@@ -355,14 +382,14 @@ fn permit_max_uses_is_enforced_across_actions() {
     let first = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&first, "permit:1", 2);
 
-    store.admit_action(&task(), &first, &permit, at(1)).unwrap();
+    admit(&mut store, &first, &permit);
     // 同一份参数、新的动作 ID：许可允许第二次。
     let second = new_intent("action:2", 2048, ActionLevel::A1);
-    store.admit_action(&task(), &second, &permit, at(2)).unwrap();
+    admit(&mut store, &second, &permit);
 
     // 第三次超限。
     let third = new_intent("action:3", 2048, ActionLevel::A1);
-    let admission = store.admit_action(&task(), &third, &permit, at(3)).unwrap();
+    let admission = admit(&mut store, &third, &permit);
     assert_eq!(admission.decision, Decision::Denied);
     assert!(
         admission
@@ -384,7 +411,7 @@ fn dispatch_is_the_water_shed_between_resendable_and_unknown() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
 
     assert_eq!(store.pending_outbox(10).unwrap().len(), 1);
     store.mark_dispatched("action:1", at(2)).expect("标记投递");
@@ -404,7 +431,7 @@ fn a_receipt_does_not_settle_the_postcondition() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
     store.mark_dispatched("action:1", at(2)).unwrap();
 
     store
@@ -431,7 +458,7 @@ fn a_receipt_without_dispatch_is_rejected() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
 
     // 动作还没投递，不可能有回执。
     let result = store.settle_receipt(
@@ -449,7 +476,7 @@ fn a_receipt_cannot_be_overwritten_with_a_different_status() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
     store.mark_dispatched("action:1", at(2)).unwrap();
 
     let completed = new_receipt("action:1", "permit:1", CommitStatus::Completed);
@@ -472,7 +499,7 @@ fn a_receipt_must_reference_the_permit_bound_to_the_action() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
     store.mark_dispatched("action:1", at(2)).unwrap();
 
     let result = store.settle_receipt(
@@ -490,7 +517,7 @@ fn a_postcondition_verdict_requires_a_receipt() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
     store.mark_dispatched("action:1", at(2)).unwrap();
 
     let outcome = OutcomeVerified::new(
@@ -519,7 +546,7 @@ fn a_crash_after_dispatch_never_resends_the_side_effect() {
         let mut store = Store::open(&path, at(0)).expect("打开磁盘存储");
         let intent = new_intent("action:1", 2048, ActionLevel::A1);
         let permit = new_permit(&intent, "permit:1", 1);
-        store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+        admit(&mut store, &intent, &permit);
         store.mark_dispatched("action:1", at(2)).unwrap();
         // 执行代理已经产生了副作用，但进程在写入回执之前崩溃。
     }
@@ -557,7 +584,7 @@ fn a_crash_before_dispatch_is_safely_resendable() {
         let mut store = Store::open(&path, at(0)).expect("打开磁盘存储");
         let intent = new_intent("action:1", 2048, ActionLevel::A1);
         let permit = new_permit(&intent, "permit:1", 1);
-        store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+        admit(&mut store, &intent, &permit);
         // 在 mark_dispatched 之前崩溃：副作用一定没有发生。
     }
 
@@ -581,7 +608,7 @@ fn pending_actions_block_nothing_but_must_be_resolved_explicitly() {
     let mut store = Store::open(&path, at(0)).expect("打开磁盘存储");
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
     store.mark_dispatched("action:1", at(2)).unwrap();
 
     let report = store.recover(at(3)).unwrap();
@@ -605,7 +632,7 @@ fn resolving_a_commit_that_is_not_unknown_is_rejected() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
 
     assert!(matches!(
         store.resolve_unknown_commit("action:1", Resolution::ConfirmedCompleted, at(2)),
@@ -626,7 +653,7 @@ fn recovery_audit_trail_is_complete() {
         let mut store = Store::open(&path, at(0)).unwrap();
         let intent = new_intent("action:1", 2048, ActionLevel::A1);
         let permit = new_permit(&intent, "permit:1", 1);
-        store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+        admit(&mut store, &intent, &permit);
         store.mark_dispatched("action:1", at(2)).unwrap();
     }
 
@@ -661,7 +688,7 @@ fn audit_details_are_truncated_instead_of_storing_whole_contexts() {
     let other = new_intent("action:1", 4096, ActionLevel::A1);
     let permit = new_permit(&other, "permit:1", 1);
 
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
 
     let entries = store.audit_entries(10).unwrap();
     let denied = entries
@@ -679,11 +706,163 @@ fn audit_retention_is_explicit_and_reversible_in_effect() {
     let mut store = in_memory();
     let intent = new_intent("action:1", 2048, ActionLevel::A1);
     let permit = new_permit(&intent, "permit:1", 1);
-    store.admit_action(&task(), &intent, &permit, at(1)).unwrap();
+    admit(&mut store, &intent, &permit);
     assert_eq!(store.audit_entries(10).unwrap().len(), 1);
 
     // 裁剪是显式动作，不由后台悄悄执行。
     let removed = store.prune_audit_before(at(10)).unwrap();
     assert_eq!(removed, 1);
     assert!(store.audit_entries(10).unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// 预测先于动作（§6.3、§17）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_action_without_a_recorded_prediction_is_denied() {
+    let mut store = in_memory();
+    let intent = new_intent("action:1", 2048, ActionLevel::A1);
+    let permit = new_permit(&intent, "permit:1", 1);
+
+    // 故意不记录预测，直接受理。
+    let admission = store
+        .admit_action(&task(), &intent, &permit, at(1))
+        .expect("受理流程本身不报错");
+
+    assert_eq!(admission.decision, Decision::Denied);
+    assert!(
+        admission
+            .denial_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("预测")),
+        "拒绝原因必须点明缺少动作前预测"
+    );
+    assert_eq!(store.outbox_count().unwrap(), 0);
+    assert_eq!(store.action_count().unwrap(), 1, "拒绝也要留痕");
+}
+
+#[test]
+fn a_prediction_belonging_to_another_task_is_denied() {
+    let mut store = in_memory();
+    let intent = new_intent("action:1", 2048, ActionLevel::A1);
+    let permit = new_permit(&intent, "permit:1", 1);
+    let other_task = TaskId::new("task:99").expect("固定任务");
+
+    store
+        .record_prediction(&unit(), &other_task, &prediction_for(&intent), at(0))
+        .expect("记录预测");
+
+    let admission = store
+        .admit_action(&task(), &intent, &permit, at(1))
+        .expect("受理流程本身不报错");
+
+    assert_eq!(admission.decision, Decision::Denied);
+    assert!(
+        admission
+            .denial_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("task:99")),
+        "拒绝原因必须写明预测属于哪个任务"
+    );
+}
+
+#[test]
+fn recording_the_same_prediction_twice_is_idempotent() {
+    let mut store = in_memory();
+    let intent = new_intent("action:1", 2048, ActionLevel::A1);
+    let prediction = prediction_for(&intent);
+
+    assert!(
+        store
+            .record_prediction(&unit(), &task(), &prediction, at(0))
+            .expect("首次记录")
+    );
+    assert!(
+        !store
+            .record_prediction(&unit(), &task(), &prediction, at(1))
+            .expect("重复记录"),
+        "内容相同的重复记录不应再写一行"
+    );
+    assert_eq!(store.predictions_for_task(&task()).unwrap().len(), 1);
+}
+
+#[test]
+fn a_prediction_cannot_be_rewritten_after_the_fact() {
+    let mut store = in_memory();
+    let intent = new_intent("action:1", 2048, ActionLevel::A1);
+    store
+        .record_prediction(&unit(), &task(), &prediction_for(&intent), at(0))
+        .expect("记录预测");
+
+    // 事后把"预计变化"改成另一套说法，以便让后验检查好看。
+    let mut rewritten = prediction_for(&intent);
+    rewritten.expected_change = "文件内容保持完全不变".to_string();
+
+    let result = store.record_prediction(&unit(), &task(), &rewritten, at(1));
+    assert!(matches!(
+        result,
+        Err(StorageError::PredictionAlreadyRecorded { .. })
+    ));
+    assert_eq!(
+        store.prediction("prediction:pred-7").unwrap().unwrap().prediction,
+        prediction_for(&intent),
+        "库里必须还是当初写下的那一份"
+    );
+}
+
+#[test]
+fn an_uncalibrated_probability_is_refused_on_the_way_into_the_store() {
+    let mut store = in_memory();
+    let intent = new_intent("action:1", 2048, ActionLevel::A1);
+
+    // 绕过 Prediction::new 直接拼一个结构体，模拟"别的代码路径"塞进来的自评分数。
+    let forged = Prediction {
+        prediction_ref: prediction_ref(),
+        subject: "授权目录中的目标文件内容".to_string(),
+        expected_change: "写入后文件版本变为新内容的哈希".to_string(),
+        window: TimeWindow::new(at(0), at(60)).unwrap(),
+        failure_conditions: vec!["哈希不一致".to_string()],
+        uncertainty: Uncertainty {
+            probability: Some(CalibratedProbability {
+                subject: "授权目录中的目标文件内容".to_string(),
+                horizon: TimeWindow::new(at(0), at(60)).unwrap(),
+                model_version: ModelVersion::new("sha256:llm-weights").expect("固定模型版本"),
+                calibration: CalibrationSource::Uncalibrated,
+                value: Some(0.97),
+            }),
+            notes: Vec::new(),
+        },
+    };
+
+    let result = store.record_prediction(&unit(), &task(), &forged, at(0));
+    assert!(matches!(result, Err(StorageError::Contract(_))));
+    assert!(store.predictions_for_task(&task()).unwrap().is_empty());
+    let _ = intent;
+}
+
+#[test]
+fn schema_version_is_reported_and_migrations_are_recorded() {
+    let store = in_memory();
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    assert_eq!(LATEST_SCHEMA_VERSION, 2);
+}
+
+#[test]
+fn reopening_an_existing_database_does_not_rerun_migrations() {
+    let dir = TempDir::new().expect("临时目录");
+    let path = dir.path().join("soca.db");
+
+    let first = Store::open(&path, at(0)).expect("首次打开");
+    assert_eq!(first.schema_version().unwrap(), 2);
+    drop(first);
+
+    let mut second = Store::open(&path, at(3600)).expect("再次打开");
+    assert_eq!(second.schema_version().unwrap(), 2);
+
+    // 数据仍然可用：迁移没有把表重建掉。
+    let intent = new_intent("action:1", 2048, ActionLevel::A1);
+    let permit = new_permit(&intent, "permit:1", 1);
+    admit(&mut second, &intent, &permit);
+    assert_eq!(second.action_count().unwrap(), 1);
 }
