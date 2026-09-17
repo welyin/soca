@@ -92,6 +92,12 @@ pub enum StorageError {
     #[error("数据库内容损坏：{field}")]
     CorruptRow { field: &'static str },
 
+    #[error("登记进目录的单元必须处于 COLD 状态，实际为 {state}（§9.2）")]
+    UnitMustBeColdAtRegistration { state: &'static str },
+
+    #[error("找不到单元 {unit_id}")]
+    UnitNotFound { unit_id: String },
+
     #[error("单写者约束：写操作必须串行，同一时刻只允许一个写入者")]
     WriterBusy,
 }

@@ -24,6 +24,7 @@ pub mod error;
 pub mod events;
 pub mod predictions;
 pub mod schema;
+pub mod units;
 
 pub use crate::actions::{
     ActionRecord, ActionState, Admission, Decision, OutboxItem, RecoveryReport, Resolution,

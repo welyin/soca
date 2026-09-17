@@ -47,4 +47,14 @@ pub enum CoreError {
         prediction_ref: String,
         observed: String,
     },
+
+    #[error("单元 {unit_id} 不在热表中，无法执行该操作")]
+    UnitNotHot { unit_id: String },
+
+    #[error("单元 {unit_id} 的游标不能回退：当前 {current}，试图改为 {attempted}")]
+    CursorWentBackwards {
+        unit_id: String,
+        current: u64,
+        attempted: u64,
+    },
 }

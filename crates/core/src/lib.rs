@@ -26,12 +26,18 @@
 
 pub mod broker;
 pub mod error;
+pub mod lifecycle;
 pub mod os;
 pub mod replay;
 pub mod session;
 
 pub use crate::broker::{ActionBroker, BrokerError, BrokerOutcome};
 pub use crate::error::CoreError;
+pub use crate::lifecycle::{
+    CheckpointOutcome, UnitRegistry, WakeOutcome, WakePolicy, WAKE_CATCH_UP_LIMIT,
+};
 pub use crate::os::{Attempt, AttemptOutcome, FaultPlan, ObjectState, SimulatedOs};
 pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
-pub use crate::session::{evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE};
+pub use crate::session::{
+    evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,
+};
