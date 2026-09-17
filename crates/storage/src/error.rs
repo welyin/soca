@@ -98,6 +98,35 @@ pub enum StorageError {
     #[error("找不到单元 {unit_id}")]
     UnitNotFound { unit_id: String },
 
+    #[error("单元 {unit_id} 尚未登记，不能写入快照；§9.2 的冷态就是注册表本身")]
+    UnitNotRegistered { unit_id: String },
+
+    #[error("单元 {unit_id} 的快照与注册信息不一致：{reason}")]
+    InstanceInconsistent { unit_id: String, reason: &'static str },
+
+    #[error("主体 {subject_id} 的世代 CAS 失败：期望 {expected}，实际 {actual}")]
+    EpochMismatch {
+        subject_id: String,
+        expected: u64,
+        actual: u64,
+    },
+
+    #[error("找不到主体路由：{subject_id}")]
+    RouteNotFound { subject_id: String },
+
+    #[error("找不到迁移事务：{transaction_id}")]
+    TransactionNotFound { transaction_id: String },
+
+    #[error("主体 {subject_id} 的世代 {new_epoch} 已经有一个迁移事务")]
+    TransactionAlreadyExists { subject_id: String, new_epoch: u64 },
+
+    #[error("迁移事务 {transaction_id} 不能从 {from} 迁移到 {to}")]
+    IllegalTransactionTransition {
+        transaction_id: String,
+        from: &'static str,
+        to: &'static str,
+    },
+
     #[error("单写者约束：写操作必须串行，同一时刻只允许一个写入者")]
     WriterBusy,
 }

@@ -80,6 +80,9 @@ pub enum ContractError {
     #[error("游戏协议语义校验失败：{0}")]
     GameProtocol(String),
 
+    #[error("拓扑世代不合法：{0}")]
+    InvalidEpoch(&'static str),
+
     #[error("同一证据同时出现在支持与反对两侧，矛盾未解决：{sample}")]
     ContradictoryEvidence { sample: String },
 

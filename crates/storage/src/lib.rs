@@ -22,6 +22,7 @@ pub mod actions;
 pub mod audit;
 pub mod error;
 pub mod events;
+pub mod instances;
 pub mod predictions;
 pub mod schema;
 pub mod units;

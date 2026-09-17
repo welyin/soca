@@ -856,7 +856,7 @@ fn an_uncalibrated_probability_is_refused_on_the_way_into_the_store() {
 fn schema_version_is_reported_and_migrations_are_recorded() {
     let store = in_memory();
     assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-    assert_eq!(LATEST_SCHEMA_VERSION, 2);
+    assert_eq!(LATEST_SCHEMA_VERSION, 3);
 }
 
 #[test]
@@ -865,11 +865,11 @@ fn reopening_an_existing_database_does_not_rerun_migrations() {
     let path = dir.path().join("soca.db");
 
     let first = Store::open(&path, at(0)).expect("首次打开");
-    assert_eq!(first.schema_version().unwrap(), 2);
+    assert_eq!(first.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     drop(first);
 
     let mut second = Store::open(&path, at(3600)).expect("再次打开");
-    assert_eq!(second.schema_version().unwrap(), 2);
+    assert_eq!(second.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
     // 数据仍然可用：迁移没有把表重建掉。
     let intent = new_intent("action:1", 2048, ActionLevel::A1);

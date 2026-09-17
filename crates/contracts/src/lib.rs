@@ -31,6 +31,7 @@ pub mod envelope;
 pub mod error;
 pub mod game;
 pub mod ids;
+pub mod instance;
 pub mod policy;
 pub mod time;
 pub mod topology;
@@ -51,19 +52,23 @@ pub use crate::envelope::{
     MAX_SMALL_MESSAGE_ENVELOPE_BYTES,
 };
 pub use crate::error::ContractError;
+pub use crate::instance::{
+    PartitionKey, ScaleTransaction, ScaleTransactionState, SubjectRoute, TemplateId,
+    TopologyEpoch, UnitInstance,
+};
 pub use crate::game::{
     ActionDomain, ActionRequest, ActionRequestTag, Carrying, FlagAction, GameAction,
     GameActionReceipt, GameKind, GameObservation, GameObservationTag, GameProtocolError,
-    GameReceiptTag, MazeCell, MazeCellState, MazeColor, MazeMode, MazeObject, MazeView, MinesCell,
-    MinesMode, MinesView, MoveAction, MoveOp, Outcome, Percept, PixelFormat, PixelMode, PixelView,
-    PublicId, ReceiptCode, ReceiptStatus, RevealOp, SetFlagOp, TargetedAction,
-    GAME_PROTOCOL_VERSION, MAX_COORDINATE, MAZE_VIEW_MAX, MINES_BOARD_MAX,
+    GameLedgerStatus, GameReceiptTag, MazeCell, MazeCellState, MazeColor, MazeMode, MazeObject,
+    MazeView, MinesCell, MinesMode, MinesView, MoveAction, MoveOp, Outcome, Percept, PixelFormat,
+    PixelMode, PixelView, PublicId, ReceiptCode, ReceiptStatus, RevealOp, SetFlagOp,
+    TargetedAction, GAME_PROTOCOL_VERSION, MAX_COORDINATE, MAZE_VIEW_MAX, MINES_BOARD_MAX,
 };
 pub use crate::ids::{
     ActionId, ApprovalId, BlobRef, BootId, BudgetRef, CapabilityPolicyRef, DomainId, EventId,
     EvidenceRef, GoalId, IdempotencyKey, MediaType, ModelProfileRef, ModelVersion, PermitId,
-    PolicyVersion, PredictionRef, RelationRef, ResourceScope, Sha256Hex, SourceId, StrategyVersion,
-    SubjectId, TaskContractVersion, TaskId, ToolId, UnitId,
+    PolicyVersion, PredictionRef, RelationRef, ReservationId, ResourceScope, Sha256Hex, SourceId,
+    StrategyVersion, SubjectId, TaskContractVersion, TaskId, ToolId, TransactionId, UnitId,
 };
 pub use crate::policy::{
     ActionLevel, ApprovalRequirement, DataClass, EgressVerdict, PermissionScope,

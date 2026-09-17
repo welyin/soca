@@ -685,6 +685,54 @@ impl ReceiptCode {
     }
 }
 
+/// 游戏动作账的状态（§11.2、§13）。
+///
+/// 与 [`ReceiptStatus`] 的区别在于多了 `Pending`：动作账必须在**执行 step 之前**先登记
+/// 请求哈希与期望观测，否则"执行后、回执前崩溃"这一窗口就无从判定。崩溃留下的 `Pending`
+/// 正是恢复流程需要处理的 `unknown_commit`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameLedgerStatus {
+    /// 已登记，step 尚无结论。
+    Pending,
+    /// 已应用。
+    Applied,
+    /// 合法但没有改变局面。
+    NoChange,
+    /// 已拒绝，世界未推进。
+    Rejected,
+    /// 结局未知。
+    UnknownCommit,
+}
+
+impl GameLedgerStatus {
+    /// 由回执状态推导。`Pending` 不在其中：它只能由登记产生。
+    pub fn from_receipt(status: ReceiptStatus) -> Self {
+        match status {
+            ReceiptStatus::Applied => Self::Applied,
+            ReceiptStatus::NoChange => Self::NoChange,
+            ReceiptStatus::Rejected => Self::Rejected,
+            ReceiptStatus::UnknownCommit => Self::UnknownCommit,
+        }
+    }
+
+    /// 稳定名称。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applied => "applied",
+            Self::NoChange => "no_change",
+            Self::Rejected => "rejected",
+            Self::UnknownCommit => "unknown_commit",
+        }
+    }
+
+    /// 是否已有结论。
+    pub fn is_settled(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
 /// 动作回执的类型标签。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameReceiptTag {

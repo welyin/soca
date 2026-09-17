@@ -11,7 +11,7 @@ use soca_contracts::WallClock;
 use crate::error::StorageError;
 
 /// 本程序支持的最新 schema 版本。
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 /// 迁移 1：初始表结构。
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -19,8 +19,15 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 /// 迁移 2：动作前预测独立落库。
 const MIGRATION_0002: &str = include_str!("../migrations/0002_predictions.sql");
 
+/// 迁移 3：单元实例注册、拓扑世代与游戏动作账。
+const MIGRATION_0003: &str = include_str!("../migrations/0003_instances_and_epoch.sql");
+
 /// 迁移清单。按版本升序，只增不改：已发布的迁移一旦被编辑，旧库就会与新代码不一致。
-const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_0001), (2, MIGRATION_0002)];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, MIGRATION_0001),
+    (2, MIGRATION_0002),
+    (3, MIGRATION_0003),
+];
 
 /// 打开连接后、迁移前必须设置的连接级参数。
 ///

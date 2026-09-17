@@ -65,6 +65,30 @@ fn policy() -> WakePolicy {
     WakePolicy::allowing([CAP], [PROFILE])
 }
 
+fn subject() -> SubjectId {
+    SubjectId::new("subject:main").expect("固定主体")
+}
+
+/// 单元注册信息。运行快照回答"它知道什么"，注册信息回答"这个槽是谁的"。
+fn instance_for(unit: &UnitId, cursor: u64) -> UnitInstance {
+    let mut instance = UnitInstance::new(
+        unit.clone(),
+        subject(),
+        None,
+        TemplateId::new("template:file-summary").expect("固定模板"),
+        PartitionKey::new("document-summary").expect("固定分片"),
+    );
+    instance.consumed_sequence = cursor;
+    instance
+}
+
+/// 登记一个冷实例：注册信息与初始快照一起写。
+fn register(store: &mut Store, unit: &UnitId, cursor: u64, at: WallClock) -> bool {
+    store
+        .register_instance(&cold_snapshot(unit, cursor), &instance_for(unit, cursor), at)
+        .expect("登记")
+}
+
 fn temp_store() -> (TempDir, Store) {
     let dir = TempDir::new().expect("临时目录");
     let store = Store::open(dir.path().join("soca.db"), at(0)).expect("打开存储");
@@ -108,11 +132,7 @@ fn observation(sequence: u64) -> Envelope {
 fn a_registered_unit_wakes_with_the_events_it_missed() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    assert!(
-        store
-            .register_unit(&cold_snapshot(&unit, 0), at(0))
-            .expect("登记")
-    );
+    assert!(register(&mut store, &unit, 0, at(0)));
 
     // 单元冷着的时候，世界里发生了三件事。
     for sequence in 1..=3 {
@@ -150,7 +170,7 @@ fn a_registered_unit_wakes_with_the_events_it_missed() {
 fn waking_an_already_hot_unit_changes_nothing() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+    register(&mut store, &unit, 0, at(0));
     store.append_event(&observation(1), at(1)).unwrap();
 
     let mut registry = UnitRegistry::new(2);
@@ -171,7 +191,7 @@ fn waking_an_already_hot_unit_changes_nothing() {
 fn a_unit_whose_capability_was_revoked_cannot_be_woken() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+    register(&mut store, &unit, 0, at(0));
 
     let mut registry = UnitRegistry::new(2);
     // 能力策略已被撤回（§12.2：撤回立即生效）。
@@ -192,7 +212,7 @@ fn a_unit_whose_capability_was_revoked_cannot_be_woken() {
 fn a_unit_whose_model_profile_is_gone_cannot_be_woken() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+    register(&mut store, &unit, 0, at(0));
 
     let mut registry = UnitRegistry::new(2);
     let no_models = WakePolicy::allowing([CAP], Vec::<String>::new());
@@ -209,7 +229,7 @@ fn a_unit_whose_model_profile_is_gone_cannot_be_woken() {
 fn the_default_wake_policy_refuses_everything() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+    register(&mut store, &unit, 0, at(0));
 
     let mut registry = UnitRegistry::new(2);
     // 忘记配置的后果必须是拒绝唤醒，而不是悄悄放行（§12.2 失败关闭）。
@@ -225,10 +245,11 @@ fn a_unit_left_hot_by_a_crash_cannot_be_woken_over() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
 
-    // 模拟上一次运行：目录里留着 RUNNING，进程却已经没了。
+    // 模拟上一次运行：正常登记过，随后进入 RUNNING 就没再降温，进程却已经没了。
+    register(&mut store, &unit, 0, at(0));
     let mut stranded = cold_snapshot(&unit, 0);
     stranded.state = UnitState::Running;
-    store.save_unit(&stranded, at(0)).unwrap();
+    store.save_unit(&stranded, at(1)).unwrap();
 
     let mut registry = UnitRegistry::new(2);
     let outcome = registry.wake(&mut store, &unit, &policy(), at(10)).unwrap();
@@ -239,23 +260,61 @@ fn a_unit_left_hot_by_a_crash_cannot_be_woken_over() {
 }
 
 #[test]
-fn a_unit_must_be_cold_to_enter_the_catalogue() {
+fn a_unit_must_be_cold_and_fully_owned_to_enter_the_catalogue() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
 
+    // 非冷态不能登记：§9.2 的冷态就是注册表本身。
     let mut running = cold_snapshot(&unit, 0);
     running.state = UnitState::Running;
-    let rejected = store.register_unit(&running, at(0));
+    let rejected = store.register_instance(&running, &instance_for(&unit, 0), at(0));
     assert!(matches!(
         rejected,
         Err(soca_storage::StorageError::UnitMustBeColdAtRegistration { .. })
     ));
     assert_eq!(store.unit_count().unwrap(), 0);
 
-    assert!(store.register_unit(&cold_snapshot(&unit, 0), at(1)).unwrap());
+    // 快照游标与注册信息游标不一致，说明调用方在拼两套状态。
+    let rejected = store.register_instance(
+        &cold_snapshot(&unit, 0),
+        &instance_for(&unit, 7),
+        at(0),
+    );
+    assert!(matches!(
+        rejected,
+        Err(soca_storage::StorageError::InstanceInconsistent { .. })
+    ));
+    assert_eq!(store.unit_count().unwrap(), 0);
+
+    assert!(register(&mut store, &unit, 0, at(1)));
     // 重复登记不是错误，只是没有新增（幂等）。
-    assert!(!store.register_unit(&cold_snapshot(&unit, 0), at(2)).unwrap());
+    assert!(!register(&mut store, &unit, 0, at(2)));
     assert_eq!(store.unit_count().unwrap(), 1);
+
+    // 登记之后，所有权信息必须完整可读，否则这个槽无法被迁移。
+    let instance = store.instance(&unit).unwrap().expect("登记后必定可读");
+    assert_eq!(instance.subject_id, subject());
+    assert_eq!(instance.template_id.as_str(), "template:file-summary");
+    assert_eq!(instance.partition_key.as_str(), "document-summary");
+    assert_eq!(instance.topology_epoch, TopologyEpoch::INITIAL);
+    assert_eq!(instance.lifecycle, UnitState::Cold);
+    assert!(instance.parent_id.is_none());
+    assert_eq!(instance.state_revision, 0);
+}
+
+#[test]
+fn an_unregistered_unit_cannot_have_its_snapshot_written() {
+    let (_dir, mut store) = temp_store();
+    let unit = unit_id("unit:file-summary:07");
+
+    // 没有登记就没有身份，写快照应当被拒绝，而不是凭空造出一个无人拥有的槽。
+    let rejected = store.save_unit(&cold_snapshot(&unit, 0), at(0));
+    assert!(matches!(
+        rejected,
+        Err(soca_storage::StorageError::UnitNotRegistered { .. })
+    ));
+    assert_eq!(store.unit_count().unwrap(), 0);
+    assert_eq!(store.instance(&unit).unwrap(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +357,7 @@ fn wake_requests_are_merged_and_kept_within_budget() {
 fn checkpoint_hands_pending_actions_over_and_goes_cold() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+    register(&mut store, &unit, 0, at(0));
 
     let mut registry = UnitRegistry::new(2);
     registry.wake(&mut store, &unit, &policy(), at(10)).unwrap();
@@ -356,7 +415,7 @@ fn cold_state_and_cursor_survive_a_restart() {
 
     {
         let mut store = Store::open(&path, at(0)).expect("打开存储");
-        store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+        register(&mut store, &unit, 0, at(0));
         for sequence in 1..=3 {
             store.append_event(&observation(sequence), at(sequence as i64)).unwrap();
         }
@@ -408,7 +467,7 @@ fn cold_state_and_cursor_survive_a_restart() {
 fn the_cursor_cannot_go_backwards() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 5), at(0)).unwrap();
+    register(&mut store, &unit, 5, at(0));
 
     let mut registry = UnitRegistry::new(2);
     registry.wake(&mut store, &unit, &policy(), at(10)).unwrap();
@@ -437,7 +496,7 @@ fn the_cursor_cannot_go_backwards() {
 fn state_transitions_outside_the_documented_graph_are_rejected() {
     let (_dir, mut store) = temp_store();
     let unit = unit_id("unit:file-summary:07");
-    store.register_unit(&cold_snapshot(&unit, 0), at(0)).unwrap();
+    register(&mut store, &unit, 0, at(0));
 
     let mut registry = UnitRegistry::new(2);
     registry.wake(&mut store, &unit, &policy(), at(10)).unwrap();
