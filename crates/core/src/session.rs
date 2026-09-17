@@ -378,5 +378,12 @@ pub fn evaluate(expectation: &Expectation, observation: &Observation) -> Verdict
                 Verdict::Refuted
             }
         }
+        Expectation::Present { .. } => {
+            if observation.value == ABSENT_VALUE {
+                Verdict::Refuted
+            } else {
+                Verdict::Supported
+            }
+        }
     }
 }

@@ -87,6 +87,16 @@ pub enum ContractError {
         actual: usize,
     },
 
+    // ---- L2 工作空间（§4.1、§6 第 4 步）----
+    #[error("黑板主题数 {actual} 超过上限 {limit}（§4.1 L2：各组合边界有小空间，不无限复制）")]
+    WorkspaceTopicLimitExceeded { limit: usize, actual: usize },
+
+    #[error("黑板占用 {actual} 字节超过上限 {limit} 字节（§4.1 L2：黑板有界）")]
+    WorkspaceByteLimitExceeded { limit: usize, actual: usize },
+
+    #[error("证据 {evidence_ref} 不在黑板上；§6 第 4 步要求 L2 核对证据存在性")]
+    EvidenceNotOnWorkspace { evidence_ref: String },
+
     #[error("预测对象 {subject:?} 与期望作用对象 {expectation_subject:?} 不一致")]
     ExpectationSubjectMismatch {
         subject: String,

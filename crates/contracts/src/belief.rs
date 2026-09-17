@@ -201,13 +201,27 @@ pub enum Expectation {
         /// 对象引用。
         subject_ref: String,
     },
+    /// 指定对象在动作后应存在（即能观测到一个值）。
+    ///
+    /// 这是"申请新观测"这类候选唯一能下的注：单元还不知道会看到什么值，但它可以押注
+    /// "这个对象确实存在"。押错了（观测到 `ABSENT_VALUE` 一类的缺席表示）同样是
+    /// 有用信息——它说明找错了对象，而不是"什么都没发生"。
+    ///
+    /// 没有这一项时，"申请观测"这类候选无法写成可检查的预测，于是要么被迫编一个版本号，
+    /// 要么整条候选无法通过 §6.3 的前置要求。两者都是在规避开环检查。
+    Present {
+        /// 对象引用。
+        subject_ref: String,
+    },
 }
 
 impl Expectation {
     /// 期望指向的对象引用。
     pub fn subject_ref(&self) -> &str {
         match self {
-            Self::VersionEquals { subject_ref, .. } | Self::Absent { subject_ref } => subject_ref,
+            Self::VersionEquals { subject_ref, .. }
+            | Self::Absent { subject_ref }
+            | Self::Present { subject_ref } => subject_ref,
         }
     }
 }

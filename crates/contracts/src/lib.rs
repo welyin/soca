@@ -37,6 +37,7 @@ pub mod time;
 pub mod topology;
 pub mod unit;
 pub mod validate;
+pub mod workspace;
 
 pub use crate::action::{
     ActionIntent, ActionReceipt, CommitStatus, ExecutionPermit, OutcomeVerified, ResourceCost,
@@ -84,6 +85,9 @@ pub use crate::unit::{
     Candidate, CandidateSet, CognitiveUnit, Conflict, ConflictPosition, Scope, UnitKind,
     UnitSnapshot, UnitState, Unresolved, MAX_CANDIDATES, MAX_CONFLICT_POSITIONS,
     UNIT_SNAPSHOT_FIELDS,
+};
+pub use crate::workspace::{
+    Workspace, WorkspaceEntry, WorkspaceNote, MAX_WORKSPACE_BYTES, MAX_WORKSPACE_TOPICS,
 };
 
 /// 冻结的契约版本。
