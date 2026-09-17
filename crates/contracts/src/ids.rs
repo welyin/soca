@@ -73,6 +73,8 @@ macro_rules! opaque_string {
     };
 }
 
+pub(crate) use opaque_string;
+
 /// 带固定前缀的引用。前缀不符即在解析期失败。
 macro_rules! prefixed_id {
     ($(#[$meta:meta])* $name:ident, $kind:literal, [$($prefix:literal),+ $(,)?]) => {

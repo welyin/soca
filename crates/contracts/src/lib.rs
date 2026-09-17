@@ -29,9 +29,11 @@ pub mod belief;
 pub mod data_state;
 pub mod envelope;
 pub mod error;
+pub mod game;
 pub mod ids;
 pub mod policy;
 pub mod time;
+pub mod topology;
 pub mod unit;
 pub mod validate;
 
@@ -49,6 +51,14 @@ pub use crate::envelope::{
     MAX_SMALL_MESSAGE_ENVELOPE_BYTES,
 };
 pub use crate::error::ContractError;
+pub use crate::game::{
+    ActionDomain, ActionRequest, ActionRequestTag, Carrying, FlagAction, GameAction,
+    GameActionReceipt, GameKind, GameObservation, GameObservationTag, GameProtocolError,
+    GameReceiptTag, MazeCell, MazeCellState, MazeColor, MazeMode, MazeObject, MazeView, MinesCell,
+    MinesMode, MinesView, MoveAction, MoveOp, Outcome, Percept, PixelFormat, PixelMode, PixelView,
+    PublicId, ReceiptCode, ReceiptStatus, RevealOp, SetFlagOp, TargetedAction,
+    GAME_PROTOCOL_VERSION, MAX_COORDINATE, MAZE_VIEW_MAX, MINES_BOARD_MAX,
+};
 pub use crate::ids::{
     ActionId, ApprovalId, BlobRef, BootId, BudgetRef, CapabilityPolicyRef, DomainId, EventId,
     EvidenceRef, GoalId, IdempotencyKey, MediaType, ModelProfileRef, ModelVersion, PermitId,
@@ -59,6 +69,12 @@ pub use crate::policy::{
     ActionLevel, ApprovalRequirement, DataClass, EgressVerdict, PermissionScope,
 };
 pub use crate::time::{Monotonic, TimeWindow, WallClock};
+pub use crate::topology::{
+    ModelBackend, ModelReservation, PlanReason, PlanState, PlannerPolicy, ResourceEnvelope,
+    ScaleAction, ScaleDecision, ScaleReason, TopologyError, TopologyPlan,
+    CLUSTERS_PER_COORDINATOR, HOT_ACTORS_PER_WORKER, HOT_LEAF_DIVISOR, LEAVES_PER_CLUSTER,
+    LEAF_PROFILES, MAX_CLUSTERS_BEFORE_COORDINATOR, ROOT_MAX_CHILDREN,
+};
 pub use crate::unit::{Scope, UnitKind, UnitSnapshot, UnitState, UNIT_SNAPSHOT_FIELDS};
 
 /// 冻结的契约版本。

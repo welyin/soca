@@ -1,0 +1,683 @@
+{
+  "protocol_version": 1,
+  "note": "SoCA 游戏公开协议 v1 正反测试向量（工单 ENG-01）。同一份文件应被 Rust、TS 与 JSON Schema 校验共同消费，避免三套实现各自漂移。negative 条目里 expect_error_contains 必须出现在实际错误信息中。",
+  "positive": [
+    {
+      "name": "maze_symbolic_observation",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 0,
+          "view": [
+            [
+              { "object": "unseen", "color": "none", "state": "none" },
+              { "object": "unseen", "color": "none", "state": "none" },
+              { "object": "unseen", "color": "none", "state": "none" }
+            ],
+            [
+              { "object": "unseen", "color": "none", "state": "none" },
+              { "object": "wall", "color": "grey", "state": "none" },
+              { "object": "wall", "color": "grey", "state": "none" }
+            ],
+            [
+              { "object": "unseen", "color": "none", "state": "none" },
+              { "object": "agent", "color": "red", "state": "none" },
+              { "object": "goal", "color": "green", "state": "none" }
+            ]
+          ],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "mines_symbolic_observation",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [
+            [0, 1, "covered"],
+            [0, 1, "flagged"],
+            [0, 1, "covered"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "mines_observation_after_defeat",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-31",
+        "step_index": 15,
+        "game": "minesweeper",
+        "terminated": true,
+        "truncated": false,
+        "outcome": "lost",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [
+            [0, 1, "detonated"],
+            [0, 1, "flagged"],
+            [0, 1, "covered"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "pixel_observation_has_no_symbolic_board",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "pixels",
+          "frame_artifact_id": "frame-public-9",
+          "width": 448,
+          "height": 448,
+          "pixel_format": "RGB8"
+        }
+      }
+    },
+    {
+      "name": "maze_move_action_request",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:maze:explorer-1",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-87",
+        "action": { "op": "turn_left" }
+      }
+    },
+    {
+      "name": "mines_reveal_action_request",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-88",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:mines:frontier-2",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-88",
+        "action": { "op": "reveal", "row": 0, "column": 2 }
+      }
+    },
+    {
+      "name": "mines_set_flag_action_request",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-89",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:mines:frontier-2",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-89",
+        "action": { "op": "set_flag", "row": 1, "column": 2, "flagged": true }
+      }
+    },
+    {
+      "name": "receipt_applied_carries_new_observation",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "status": "applied",
+        "code": "OK",
+        "observation_id": "obs-public-28"
+      }
+    },
+    {
+      "name": "receipt_no_change_still_carries_new_observation",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-90",
+        "episode_id": "episode-public-104",
+        "status": "no_change",
+        "code": "NO_CHANGE",
+        "observation_id": "obs-public-29"
+      }
+    },
+    {
+      "name": "receipt_rejected_advances_nothing",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "status": "rejected",
+        "code": "STALE_OBSERVATION",
+        "observation_id": null
+      }
+    },
+    {
+      "name": "receipt_unknown_commit_advances_nothing",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "status": "unknown_commit",
+        "code": "ENGINE_UNAVAILABLE",
+        "observation_id": null
+      }
+    }
+  ],
+  "negative": [
+    {
+      "name": "observation_rejects_smuggled_info",
+      "reason": "§11.1：Gymnasium 的 info 可能含隐藏雷位，一律不得转发；多一个字段就是一次夹带尝试",
+      "expect_error_contains": "unknown field",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "info": { "mine_positions": [[0, 0]] },
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [[0, 1, "covered"], [0, 1, "covered"], [0, 1, "covered"]]
+        }
+      }
+    },
+    {
+      "name": "observation_rejects_smuggled_seed",
+      "reason": "§13：seed 只存在于私有 manifest，公开 ID 不得编码种子",
+      "expect_error_contains": "unknown field",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "seed": 42,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 0,
+          "view": [[{ "object": "agent", "color": "red", "state": "none" }]],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "pixel_percept_rejects_symbolic_board",
+      "reason": "§12：像素赛道不得附带符号 board，否则视觉单元可以直接读答案",
+      "expect_error_contains": "unknown field",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "pixels",
+          "frame_artifact_id": "frame-public-9",
+          "width": 448,
+          "height": 448,
+          "pixel_format": "RGB8",
+          "board": [[0, 1, "covered"], [0, 1, "covered"], [0, 1, "covered"]]
+        }
+      }
+    },
+    {
+      "name": "action_request_rejects_smuggled_solution",
+      "reason": "私有解法不得随动作请求夹带",
+      "expect_error_contains": "unknown field",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:maze:explorer-1",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-87",
+        "solution": ["forward", "turn_right"],
+        "action": { "op": "forward" }
+      }
+    },
+    {
+      "name": "action_request_rejects_engine_only_operations",
+      "reason": "§10.1：done/drop 这类引擎自带但任务不需要的通道不得成为绕过任务的出口",
+      "expect_error_contains": "did not match any variant",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-91",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:maze:explorer-1",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-91",
+        "action": { "op": "done" }
+      }
+    },
+    {
+      "name": "action_request_rejects_extra_field_beside_op",
+      "reason": "迷宫类动作只允许 op 一个字段，夹带坐标即拒绝",
+      "expect_error_contains": "did not match any variant",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-92",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:maze:explorer-1",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-92",
+        "action": { "op": "forward", "row": 1 }
+      }
+    },
+    {
+      "name": "action_request_rejects_out_of_range_coordinate",
+      "reason": "§11.4：坐标必须落在公开范围内",
+      "expect_error_contains": "超出协议上限",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-93",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:mines:frontier-2",
+        "topology_epoch": 9,
+        "permit_id": "permit-game-93",
+        "action": { "op": "reveal", "row": 64, "column": 0 }
+      }
+    },
+    {
+      "name": "action_request_rejects_zero_topology_epoch",
+      "reason": "§11.2：拓扑世代从 1 起，0 无法与未迁移状态区分",
+      "expect_error_contains": "至少为 1",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_request",
+        "request_id": "action-94",
+        "episode_id": "episode-public-104",
+        "expected_observation_id": "obs-public-27",
+        "actor_id": "unit:maze:explorer-1",
+        "topology_epoch": 0,
+        "permit_id": "permit-game-94",
+        "action": { "op": "forward" }
+      }
+    },
+    {
+      "name": "unknown_protocol_version_is_rejected",
+      "reason": "§11.4：未知主版本拒绝，不静默猜字段",
+      "expect_error_contains": "不受支持",
+      "message": {
+        "protocol_version": 2,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 0,
+          "view": [[{ "object": "agent", "color": "red", "state": "none" }]],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "running_outcome_rejects_terminated_flag",
+      "reason": "§11.3：outcome 必须与 terminated/truncated 一致",
+      "expect_error_contains": "要求 terminated",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": true,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 0,
+          "view": [[{ "object": "agent", "color": "red", "state": "none" }]],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "won_outcome_requires_terminated_flag",
+      "reason": "§11.3：自然终局必须置 terminated",
+      "expect_error_contains": "要求 terminated",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-30",
+        "step_index": 20,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "won",
+        "reward": 1.0,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 0,
+          "view": [[{ "object": "goal", "color": "green", "state": "none" }]],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "game_and_percept_domain_must_match",
+      "reason": "§11.4：game 与感知模式必须一致",
+      "expect_error_contains": "不匹配",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [[0, 1, "covered"], [0, 1, "covered"], [0, 1, "covered"]]
+        }
+      }
+    },
+    {
+      "name": "maze_view_must_be_rectangular",
+      "reason": "§11.4：非矩形视图意味着遮蔽规则被破坏",
+      "expect_error_contains": "不是矩形",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 0,
+          "view": [
+            [{ "object": "agent", "color": "red", "state": "none" }],
+            [
+              { "object": "unseen", "color": "none", "state": "none" },
+              { "object": "wall", "color": "grey", "state": "none" }
+            ]
+          ],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "maze_view_rejects_invalid_direction",
+      "reason": "§11.4：朝向必须在 0..=3 内",
+      "expect_error_contains": "maze.direction",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "maze",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_maze",
+          "mission": "get to the green goal square",
+          "direction": 4,
+          "view": [[{ "object": "agent", "color": "red", "state": "none" }]],
+          "carrying": "none"
+        }
+      }
+    },
+    {
+      "name": "mines_board_dimensions_must_match_declaration",
+      "reason": "§11.4：数组维数必须等于 width 与 height",
+      "expect_error_contains": "与声明的",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [[0, 1, "covered"], [0, 1, "covered"]]
+        }
+      }
+    },
+    {
+      "name": "mines_board_rejects_detonated_while_running",
+      "reason": "§11.1：detonated 只能出现在已公开的踩雷终局",
+      "expect_error_contains": "detonated",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [
+            [0, 1, "detonated"],
+            [0, 1, "covered"],
+            [0, 1, "covered"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "mines_board_rejects_more_mines_than_cells",
+      "reason": "§11.4：雷数必须小于总格数",
+      "expect_error_contains": "不小于总格数",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 9,
+          "board": [
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7, "covered"]
+          ]
+        }
+      }
+    },
+    {
+      "name": "mines_cell_count_cannot_exceed_eight",
+      "reason": "§11.3：邻雷数最多 8",
+      "expect_error_contains": "超出 0..=8",
+      "message": {
+        "protocol_version": 1,
+        "type": "observation",
+        "session_id": "session-public-8",
+        "episode_id": "episode-public-104",
+        "observation_id": "obs-public-27",
+        "step_index": 12,
+        "game": "minesweeper",
+        "terminated": false,
+        "truncated": false,
+        "outcome": "running",
+        "reward": 0.0,
+        "percept": {
+          "mode": "symbolic_mines",
+          "width": 3,
+          "height": 3,
+          "total_mines": 1,
+          "board": [
+            [0, 1, 9],
+            [0, 1, 2],
+            [0, 1, 2]
+          ]
+        }
+      }
+    },
+    {
+      "name": "receipt_status_and_code_must_pair",
+      "reason": "§11.3：回执状态与代码必须互相对应",
+      "expect_error_contains": "不允许状态",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "status": "applied",
+        "code": "STALE_OBSERVATION",
+        "observation_id": "obs-public-28"
+      }
+    },
+    {
+      "name": "rejected_receipt_must_not_carry_observation",
+      "reason": "§11.2：协议非法请求不推进世界，因此没有新观测",
+      "expect_error_contains": "不得携带",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "status": "rejected",
+        "code": "PERMISSION_DENIED",
+        "observation_id": "obs-public-28"
+      }
+    },
+    {
+      "name": "applied_receipt_must_carry_observation",
+      "reason": "§11.3：每个成功 step 都返回新的 observation_id",
+      "expect_error_contains": "必须携带",
+      "message": {
+        "protocol_version": 1,
+        "type": "action_receipt",
+        "request_id": "action-87",
+        "episode_id": "episode-public-104",
+        "status": "applied",
+        "code": "OK",
+        "observation_id": null
+      }
+    }
+  ]
+}
