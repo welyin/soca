@@ -135,4 +135,22 @@ pub enum StorageError {
 
     #[error("单写者约束：写操作必须串行，同一时刻只允许一个写入者")]
     WriterBusy,
+
+    #[error("失败关闭：{0}")]
+    FailClosed(&'static str),
+
+    #[error("找不到记忆条目 {memory_id}")]
+    MemoryNotFound { memory_id: String },
+
+    #[error(
+        "记忆标识 {memory_id} 已被另一份内容占用；记忆标识一旦使用不得复用\
+         （它是追溯依据的锚点）"
+    )]
+    MemoryAlreadyRecorded { memory_id: String },
+
+    #[error("记忆 {memory_id} 已被取代过，不能再次取代")]
+    MemoryAlreadySuperseded { memory_id: String },
+
+    #[error("记忆 {memory_id} 已被删除；删除不是标记旧版本，不能被取代复活（§12.3）")]
+    MemoryAlreadyDeleted { memory_id: String },
 }

@@ -24,6 +24,7 @@ pub mod error;
 pub mod events;
 pub mod game_ledger;
 pub mod instances;
+pub mod memory;
 pub mod predictions;
 pub mod schema;
 pub mod units;

@@ -32,6 +32,7 @@ pub mod error;
 pub mod game;
 pub mod ids;
 pub mod instance;
+pub mod memory;
 pub mod policy;
 pub mod time;
 pub mod topology;
@@ -67,10 +68,12 @@ pub use crate::game::{
 };
 pub use crate::ids::{
     ActionId, ApprovalId, BlobRef, BootId, BudgetRef, CapabilityPolicyRef, DomainId, EventId,
-    EvidenceRef, GoalId, IdempotencyKey, MediaType, ModelProfileRef, ModelVersion, PermitId,
-    PolicyVersion, PredictionRef, RelationRef, ReservationId, ResourceScope, Sha256Hex, SourceId,
-    StrategyVersion, SubjectId, TaskContractVersion, TaskId, ToolId, TransactionId, UnitId,
+    EvidenceRef, GoalId, IdempotencyKey, MediaType, MemoryId, ModelProfileRef, ModelVersion,
+    PermitId, PolicyVersion, PredictionRef, RelationRef, ReservationId, ResourceScope, Sha256Hex,
+    SourceId, StrategyVersion, SubjectId, TaskContractVersion, TaskId, ToolId, TransactionId,
+    UnitId,
 };
+pub use crate::memory::{MemoryEntry, MemoryKind, MemoryStatus};
 pub use crate::policy::{
     ActionLevel, ApprovalRequirement, DataClass, EgressVerdict, PermissionScope,
 };

@@ -329,6 +329,13 @@ prefixed_id!(
 );
 
 prefixed_id!(
+    /// 记忆条目标识（§2：事实、事件、技能、关系或摘要，带来源与有效期）。
+    MemoryId,
+    "memory_id",
+    ["memory:"]
+);
+
+prefixed_id!(
     /// 能力策略引用，例如 `cap:read-selected-folder`。
     CapabilityPolicyRef,
     "capability_policy_ref",
