@@ -1,0 +1,18 @@
+[package]
+name = "soca-contracts"
+description = "SoCA 契约层：消息信封、数据状态、权限等级与单元快照的冻结类型（架构文档 §3.2 / §7 / §9.2 / §12.1）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

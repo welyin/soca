@@ -1,0 +1,15 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Python（仅用于隔离的研究/模型 worker，见架构文档 §5）
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 本地运行时产物（冷单元快照、内容仓、审计库不进入版本库）
+/runtime/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

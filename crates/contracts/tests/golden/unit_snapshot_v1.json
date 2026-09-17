@@ -1,0 +1,28 @@
+{
+  "unit_id": "unit:file-summary:07",
+  "kind": "leaf",
+  "schema_version": 1,
+  "scope": {
+    "domain": "document-summary",
+    "task_contract": "summary-v1"
+  },
+  "goal_refs": [
+    "goal:42"
+  ],
+  "belief_revision": 18,
+  "belief_snapshot_ref": "blob:belief-18",
+  "evidence_refs": [
+    "obs:193",
+    "tool-result:64"
+  ],
+  "relation_refs": [
+    "relation:source-lineage-8"
+  ],
+  "strategy_version": "summary-policy-v1",
+  "model_profile_ref": "profile:reasoning-local",
+  "capability_policy_ref": "cap:read-selected-folder",
+  "budget_ref": "budget:task-42",
+  "pending_action_ids": [],
+  "last_applied_sequence": 827,
+  "state": "COLD"
+}
