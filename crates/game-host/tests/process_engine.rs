@@ -33,20 +33,24 @@ fn interpreter() -> PathBuf {
     }
     panic!(
         "找不到仓库根的 .venv 解释器。请先执行：python -m venv .venv，然后 \
-         .venv/Scripts/python -m pip install -r games/maze/requirements.txt"
+         .venv/Scripts/python -m pip install -r games/adapters/minigrid/requirements.txt"
     );
 }
 
 /// 缺少 Python 环境时跳过。设 `SOCA_REQUIRE_GAME_PROCESS=1` 则强制失败。
 fn require_game_process() -> Option<PathBuf> {
     let root = repository_root();
-    let entry = root.join("games").join("maze").join("game.py");
+    let entry = root
+        .join("games")
+        .join("adapters")
+        .join("minigrid")
+        .join("driver.py");
     let has_venv = root.join(".venv").exists();
     if has_venv && entry.exists() {
         return Some(root);
     }
     let message = format!(
-        "SKIP：缺少 .venv（{has_venv}）或 games/maze/game.py（{}）。\
+        "SKIP：缺少 .venv（{has_venv}）或 games/adapters/minigrid/driver.py（{}）。\
          这条集成测试需要独立锁定的 Python 引擎环境。",
         entry.exists()
     );
@@ -57,14 +61,24 @@ fn require_game_process() -> Option<PathBuf> {
     None
 }
 
+/// 指向**同一份驱动与同一份清单**，只换 `GameKind`。
+///
+/// 这是刻意的：`a_handshake_against_the_wrong_game_is_refused` 那条要的正是
+/// "用迷宫进程冒充扫雷"——所以两边的可执行文件必须**相同**，差别只在配置里声明的种类。
 fn config(root: &Path, game: GameKind) -> ProcessEngineConfig {
+    let driver = root
+        .join("games")
+        .join("adapters")
+        .join("minigrid")
+        .join("driver.py");
+    let manifest = root.join("games").join("door-key").join("manifest.json");
     let mut config = ProcessEngineConfig::new(
         interpreter(),
-        root.join("games").join("maze").join("game.py")
-            .to_str()
-            .expect("路径必须是 UTF-8"),
+        driver.to_str().expect("路径必须是 UTF-8"),
         game,
     );
+    config.args.push("--manifest".to_string());
+    config.args.push(manifest.display().to_string());
     config.working_directory = Some(root.to_path_buf());
     config
 }
@@ -87,7 +101,8 @@ fn a_real_maze_process_completes_the_handshake() {
     let engine = ProcessEngine::spawn(config(&root, GameKind::Maze)).expect("启动迷宫进程");
 
     assert_eq!(engine.game(), GameKind::Maze);
-    assert_eq!(engine.rules_version(), Some("maze-door-key-8x8-v1"));
+    // 规则版本是**游戏**的（清单里那一条），而它是区分"哪一套规则跑出来的这一局"的依据。
+    assert_eq!(engine.rules_version(), Some("door-key-8x8-v1"));
     assert!(engine.is_usable());
     // manifest 声明该适配器不可确定性恢复，引擎接口必须如实反映这一点。
     assert!(!engine.supports_snapshot());

@@ -3,7 +3,7 @@
 #
 # 安装到仓库根的独立环境：
 #     python -m venv .venv
-#     .venv/Scripts/python -m pip install -r games/maze/requirements.txt
+#     .venv/Scripts/python -m pip install -r games/adapters/minigrid/requirements.txt
 #
 # 版本必须与 manifest.json 里的 pinned_version 一致；改动它等于改动规则版本。
 minigrid==3.1.0

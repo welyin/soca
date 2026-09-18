@@ -65,7 +65,7 @@ impl Default for EngineTimeouts {
 pub struct ProcessEngineConfig {
     /// 解释器或可执行文件。
     pub program: PathBuf,
-    /// 参数，例如 `["games/maze/game.py"]`。
+    /// 参数，例如 `["games/adapters/minigrid/driver.py", "--manifest", "…"]`。
     pub args: Vec<String>,
     /// 该进程承载的游戏。宿主据此校验动作域。
     pub game: GameKind,

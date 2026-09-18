@@ -329,15 +329,24 @@ fn a_real_minigrid_engine_steps_through_the_same_door() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
-        .expect("仓库根")
+        .expect("仓库根");
+    // 驱动是**引擎**的（一份），游戏是**清单**（每游戏一份）。所以这里两样都要给：
+    // 驱动在哪、跑哪个游戏的哪一份清单。少了后者，驱动会拒绝启动——
+    // 它不认识任何一个游戏名，那是刻意的。
+    let driver = root
         .join("games")
-        .join("maze")
-        .join("game.py");
-    let factory = ProcessFactory::new(ProcessEngineConfig::new(
+        .join("adapters")
+        .join("minigrid")
+        .join("driver.py");
+    let manifest = root.join("games").join("door-key").join("manifest.json");
+    let mut config = ProcessEngineConfig::new(
         program,
-        &root.display().to_string(),
+        &driver.display().to_string(),
         GameKind::Maze,
-    ));
+    );
+    config.args.push("--manifest".to_string());
+    config.args.push(manifest.display().to_string());
+    let factory = ProcessFactory::new(config);
 
     let mut game = GameOs::start(&factory, GameKind::Maze, EPISODE, 7).expect("起真局");
     assert!(matches!(

@@ -1,4 +1,14 @@
-"""迷宫规则引擎：MiniGrid DoorKey 的公开面适配器（§10.1、ENG-07）。
+"""MiniGrid 引擎驱动：把 MiniGrid 的 env 投成公开面（§10.1、ENG-07）。
+
+**它服侍的是引擎，不是某个游戏。** 门钥匙房间与传统迷宫是两个游戏
+（`games/door-key/`、`games/classic-maze/`，各有各的清单与规则集），
+而它们共用这一份驱动——因为**规则由 MiniGrid 执行**，两边都不是我们写的。
+调用方把**游戏清单**的路径给它（`--manifest`），环境、胜负条件、规则版本、
+步数上限全部从那份清单来；驱动自己不认识任何一个游戏名。
+
+把驱动按游戏复制一份会怎样：两个文件除了清单里那一个 `env_id` 之外逐字相同，
+而改动（比如这条注释里说的投影修正）要在两处各做一次、且没有任何东西会提醒你漏了一处。
+那才是 §10.1 那句"**不手写第二套看似相同的规则**"要防的事。
 
 本进程是**规则引擎**，不是宿主。§8 把职责切成两半：引擎执行规则，宿主负责幂等账与
 下一公开观测。所以这里的输出只有"已投影的公开感知"——隐藏真值（完整地图、绝对坐标、
@@ -9,7 +19,8 @@ RNG 状态、`info` 字典、专家动作）在构造感知时就被丢掉，宿
 帧 = 4 字节小端长度 + UTF-8 JSON，与 `crates/game-host/src/process.rs` 的 `write_frame`
 一一对应。四类请求：
 
-    {"type": "facts"}                  → {"type": "facts_result", "game": "maze", "rules_version": "..."}
+    {"type": "facts"}                  → {"type": "facts_result", "game": "maze", "game_id": "...",
+                                          "rules_version": "..."}
     {"type": "reset", "seed": N}       → {"type": "reset_result", "step": {...}}
     {"type": "step",  "action": {...}} → {"type": "step_result",  "step": {...}}
     {"type": "close"}                  → {"type": "close_result"}
@@ -20,7 +31,8 @@ RNG 状态、`info` 字典、专家动作）在构造感知时就被丢掉，宿
 ## 为什么用 MiniGrid 而不是自己写一个迷宫
 
 §10.1 的原话是"**不手写第二套看似相同的规则**"。移动、朝向、门钥匙、可见域与碰撞全部
-复用已有引擎；本文件做的是**投影**——把 `env` 的观测翻译成公开面，此外一行规则都不加。
+复用已有引擎；这个文件做的是**投影**——把 `env` 的观测翻译成公开面，此外一行规则都不加。
+加一个游戏（换一个 `env_id`、换一套胜负条件）不需要碰这一行代码，只需要一份新清单。
 
 ## 投影的三条约定
 
@@ -28,41 +40,38 @@ RNG 状态、`info` 字典、专家动作）在构造感知时就被丢掉，宿
    "该不该扣留"，绝不进响应。
 2. **`info` 整个丢掉。** Gymnasium 明说它可以携带隐藏变量（见规格 §19 的引用）。
 3. **`direction` 保留。** 它在 MiniGrid 的观测里本来就是公开的，而视图随朝向旋转，
-   认知单元靠它做无漂移里程计（见 `manifest.json` 的 `view_convention`）。
+   认知单元靠它做无漂移里程计（见清单里的 `view_convention`）。
 """
 
 import json
 import pathlib
-import struct
 import sys
 
 import gymnasium as gym
 import minigrid  # noqa: F401  —— 导入即注册环境
 import numpy as np
 
+from protocol import ProtocolError, read_message, stdio_streams, write_message
+
+#: 这一层自报的**域**名，与 `GameKind::as_str()` 一致（宿主用 `check_game` 核对）。
+#:
+#: 它**不是游戏名**。门钥匙房间与传统迷宫是两个游戏（两份清单、两套规则），
+#: 而它们是同一个感知/动作域：宿主那边都是 `GameKind::Maze`，动作域都是
+#: `ActionDomain::Maze`，感知都是 `Percept::Maze`。把游戏名报在这里，
+#: 等于拿一个"域"去比一个"游戏"——那在只有一个游戏时看不出问题，
+#: 在加第二个游戏的那一天就对不上了。
 GAME = "maze"
 
-#: 清单。**环境、规则版本、步数上限都从这里读，不在这份文件里再抄一遍。**
-#:
-#: 抄一遍的代价不是"多写几个字"，而是**两处会分叉**：清单说 640 步而代码跑 256 步时，
-#: 两边都"有据可依"，而没有任何东西会报错。清单是这一层的规格，代码是它的实现——
-#: 实现去读规格，而不是各写一份。
-MANIFEST_PATH = pathlib.Path(__file__).with_name("manifest.json")
 
+def load_manifest(path):
+    """读一份游戏清单。
 
-def load_manifest():
-    with MANIFEST_PATH.open(encoding="utf-8") as handle:
+    **路径由调用方给**，不再从 `__file__` 旁边找。这一份驱动服侍若干游戏，
+    而"是哪一局"完全由清单决定；自己去找的话，驱动就得知道游戏目录在哪、
+    有几个游戏、哪个是默认——那些都不是它该知道的事。
+    """
+    with pathlib.Path(path).open(encoding="utf-8") as handle:
         return json.load(handle)
-
-
-MANIFEST = load_manifest()
-
-#: 动作编号由 manifest.json 钉死。4（drop）与 6（done）**故意不在表里**：
-#: §10.1 要求禁用它们，而"表里没有"比"表里有但别用"更难绕过。
-ACTION_IDS = dict(MANIFEST["public"]["action_ids"])
-
-#: 视图约定也来自清单——它是**规则事实**，不是这一层可以自己定的东西。
-VIEW_SIZE = MANIFEST["public"]["view_size"]
 
 # MiniGrid 的三条编码表（`minigrid.core.constants`）。这里手抄而不是 `import`，是为了让
 # "我们往外说了什么"在这一屏里读得完；对不上的风险由 `tests/test_rules.py` 的往返测试守。
@@ -131,20 +140,24 @@ def project_cell(cell):
     return {"object": obj, "color": color, "state": state}
 
 
-def variant_of(name):
-    """按名字取一份变体配置。名字为空时取默认那一份。
+def level_of(manifest, name):
+    """按名字取一份等级配置。名字为空时取默认那一份。
+
+    **等级属于游戏**：游戏的规则集（`levels` 里每一条都有自己的 `rules_version`），
+    而"游戏"是清单这一层的事——传统迷宫的"墙与缺口"与"四房间"是同一个游戏的两关，
+    门钥匙房间则是另一个游戏。
 
     **名字不认识就报错**，而不是悄悄退回默认：退回默认的表现是"我选了四房间，
-    跑出来的却是门钥匙"——而那不是故障，是有人以为自己在看另一局。
+    跑出来的却是墙与缺口"——而那不是故障，是有人以为自己在看另一局。
     """
-    variants = MANIFEST["variants"]
-    key = name or MANIFEST["default_variant"]
-    if key not in variants:
+    levels = manifest["levels"]
+    key = name or manifest["default_level"]
+    if key not in levels:
         raise Refused(
             "protocol",
-            f"未知的迷宫变体 {key!r}；清单里有 {sorted(variants)}",
+            f"未知的等级 {key!r}；这份清单里有 {sorted(levels)}",
         )
-    entry = variants[key]
+    entry = levels[key]
     return {
         "name": key,
         "env_id": entry["env_id"],
@@ -218,19 +231,29 @@ def step_payload(env, observation, reward, terminated, truncated):
 
 
 class Maze:
-    """一局迷宫。一个进程一局（宿主每个回合起一个进程，见 `ProcessFactory`）。
+    """一个游戏的一局。一个进程一局（宿主每个回合起一个进程，见 `ProcessFactory`）。
 
-    **哪一局由变体决定**（清单里的 `variants`）：门钥匙房间、墙与缺口、四房间……
-    它们共用同一套公开面（同样的动作、同样的视图约定、同样的扣留清单），
-    差的是规则本身。所以变体不是"另一个游戏"，而是同一个游戏的不同关卡。
+    **哪一局由两份东西决定，而它们是两件事：**
+
+    * **游戏清单**——规则集：环境、胜负条件、规则版本。那是这个游戏的**身份**，
+      门钥匙房间与传统迷宫因此是两个游戏（各有各的清单）。
+    * **等级**——同一个规则集下的不同关卡（传统迷宫的"墙与缺口"与"四房间"）。
+
+    进程自己**不认识任何一个游戏名**：它只认识交给它的那份清单。这样加一个游戏
+    不需要改这一行代码，而"这一份驱动服侍哪些游戏"这个问题在代码里根本没有答案——
+    它只在 `games/` 的目录结构里。
     """
 
-    def __init__(self, variant=None):
-        self.variant = variant_of(variant)
-        self.env = gym.make(self.variant["env_id"])
+    def __init__(self, manifest_path, level=None):
+        self.manifest = load_manifest(manifest_path)
+        self.level = level_of(self.manifest, level)
+        # 动作编号由清单钉死。4（drop）与 6（done）**故意不在表里**：
+        # §10.1 要求禁用它们，而"表里没有"比"表里有但别用"更难绕过。
+        self.action_ids = dict(self.manifest["public"]["action_ids"])
+        self.env = gym.make(self.level["env_id"])
         # 步数上限按清单来。MiniGrid 自己按网格尺寸算出的那个通常更小
         # （DoorKey-8x8 是 256），所以显式对齐一次——而"该是多少"由清单说，不由这里说。
-        self.env.unwrapped.max_steps = self.variant["max_steps"]
+        self.env.unwrapped.max_steps = self.level["max_steps"]
         self.reset_done = False
 
     def reset(self, seed):
@@ -263,7 +286,7 @@ class Maze:
             raise Refused(
                 "domain",
                 f"这是另一个游戏的动作（{sorted(action.keys())}），迷宫不接受；"
-                f"只允许 op ∈ {sorted(ACTION_IDS)}",
+                f"只允许 op ∈ {sorted(self.action_ids)}",
             )
 
         # 二、只允许 `op` 一个字段：多写的字段是**协议违规**，不是可以忽略的注释。
@@ -273,17 +296,17 @@ class Maze:
                 f"迷宫动作只允许 op 一个字段，收到 {sorted(action.keys())}",
             )
         op = action["op"]
-        if op not in ACTION_IDS:
+        if op not in self.action_ids:
             raise Refused(
                 "domain",
-                f"未知的迷宫动作 {op!r}；只允许 {sorted(ACTION_IDS)}",
+                f"未知的迷宫动作 {op!r}；只允许 {sorted(self.action_ids)}",
             )
-        observation, reward, terminated, truncated, _info = self.env.step(ACTION_IDS[op])
+        observation, reward, terminated, truncated, _info = self.env.step(self.action_ids[op])
         # `_info` 整个丢掉：Gymnasium 明说它可以携带隐藏变量（规格 §19）。
         return step_payload(self.env, observation, reward, terminated, truncated)
 
 
-def truth(seed, variant=None):
+def truth(manifest_path, seed, level=None):
     """整座迷宫的真值。**私有控制面，不是引擎协议里的一条。**
 
     §15.2 那句"迷宫不泄露全图/绝对真值"约束的是**认知单元**：模型只收到公开观测。
@@ -299,7 +322,7 @@ def truth(seed, variant=None):
     出发点为原点的**（公开面里没有绝对坐标，它只能这么记），而这里是世界坐标。
     两者之间差的就是这一个平移。
     """
-    maze = Maze(variant)
+    maze = Maze(manifest_path, level)
     observation, _info = maze.env.reset(seed=int(seed))
     start = (int(maze.env.unwrapped.agent_pos[0]), int(maze.env.unwrapped.agent_pos[1]))
     grid = maze.env.unwrapped.grid
@@ -335,29 +358,6 @@ def truth(seed, variant=None):
     }
 
 
-def read_frame(stream):
-    """读一帧。返回 `None` 表示对端正常关闭。"""
-    header = stream.read(4)
-    if len(header) == 0:
-        return None
-    if len(header) != 4:
-        raise Refused("protocol", "帧头不完整")
-    (declared,) = struct.unpack("<I", header)
-    if declared > 256 * 1024:
-        raise Refused("protocol", f"帧长度 {declared} 超过上限")
-    payload = stream.read(declared)
-    if len(payload) != declared:
-        raise Refused("protocol", "帧体不完整")
-    return json.loads(payload.decode("utf-8"))
-
-
-def write_frame(stream, message):
-    payload = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    stream.write(struct.pack("<I", len(payload)))
-    stream.write(payload)
-    stream.flush()
-
-
 def handle(maze, request):
     """一条请求 → 一条响应。返回 `None` 表示该收工了。"""
     if not isinstance(request, dict):
@@ -367,14 +367,16 @@ def handle(maze, request):
         return {
             "type": "facts_result",
             "game": GAME,
-            # 规则版本是**变体的**：宿主与账本用它区分"哪一套规则跑出来的这一局"。
-            # 报一个共用的版本号，会让门钥匙那一局与墙与缺口那一局在账上长得一样。
-            "rules_version": maze.variant["rules_version"],
+            # **游戏与等级分开报，因为它们是两件事。** 宿主与账本用 `rules_version`
+            # 区分"哪一套规则跑出来的这一局"——门钥匙房间与传统迷宫各有各的版本号，
+            # 共用的话它们会在账上长得一样。
+            "game_id": maze.manifest["game"],
+            "rules_version": maze.level["rules_version"],
             # 供人读：宿主不用它做判定。
             "engine": {
-                "kind": "minigrid",
-                "env_id": maze.variant["env_id"],
-                "variant": maze.variant["name"],
+                "kind": maze.manifest["engine"]["kind"],
+                "env_id": maze.level["env_id"],
+                "level": maze.level["name"],
             },
             "supports_snapshot": False,
         }
@@ -388,28 +390,47 @@ def handle(maze, request):
 
 
 def arguments(argv):
-    """解析这一层的两个开关：`--variant` 与 `--truth`。
+    """解析这一层的开关：`--manifest`、`--level`、`--truth`。
 
-    用手写而不是 argparse：这两个开关只有两个取值位，而 argparse 会顺手接受
-    `--variant=x` 这种写法与应用户一段它没有的语法。
+    **`--manifest` 是必给的**：这一份驱动不认识任何一个游戏，它只认识交给它的清单。
+    不给就报错，而不是去猜一个默认路径——猜的表现是"我起了传统迷宫，跑的却是门钥匙"。
+
+    用手写而不是 argparse：三个开关只有三个取值位，而 argparse 会顺手接受
+    `--level=x` 这种写法与应用户一段它没有的语法。
     """
-    variant = None
+    manifest = None
+    level = None
     truth_seed = None
     index = 1
     while index < len(argv):
-        if argv[index] == "--variant" and index + 1 < len(argv):
-            variant = argv[index + 1]
+        if argv[index] == "--manifest" and index + 1 < len(argv):
+            manifest = argv[index + 1]
+            index += 2
+        elif argv[index] == "--level" and index + 1 < len(argv):
+            level = argv[index + 1]
             index += 2
         elif argv[index] == "--truth" and index + 1 < len(argv):
             truth_seed = argv[index + 1]
             index += 2
         else:
             raise Refused("protocol", f"看不懂的参数 {argv[index]!r}")
-    return variant, truth_seed
+    if manifest is None:
+        raise Refused("protocol", "必须给 --manifest：这一份驱动不认识任何一个游戏")
+    return manifest, level, truth_seed
 
 
 def main(argv):
-    variant, truth_seed = arguments(argv)
+    try:
+        manifest, level, truth_seed = arguments(argv)
+    except Refused as refused:
+        # 参数不对时还没有会话，而宿主在等一条 `facts_result`——它同样接受一条 `error`。
+        # 不回这一条的话，进程带着一段 traceback 退出，而 **stderr 被宿主丢弃**：
+        # 表现是"引擎起不来"，真因是"参数给错了"，而两者在界面上分不开。
+        write_message(
+            sys.stdout.buffer,
+            {"type": "error", "kind": refused.kind, "reason": refused.reason},
+        )
+        return 1
 
     # 私有控制面：`--truth <seed>` 打一份真值就退出，不进入协议循环。
     if truth_seed is not None:
@@ -417,37 +438,42 @@ def main(argv):
         # 在 Windows 上它默认是 UTF-16 或 GBK，而调用方按 UTF-8 解——
         # 表现是"真值不是合法 JSON"，而真因是打它的时候用了哪个编码。
         # 协议那条路一直是这么做的（`sys.stdout.buffer`），这条路先前漏了。
-        payload = json.dumps(truth(int(truth_seed), variant), ensure_ascii=False)
+        payload = json.dumps(truth(manifest, int(truth_seed), level), ensure_ascii=False)
         sys.stdout.buffer.write(payload.encode("utf-8"))
         sys.stdout.buffer.flush()
         return 0
 
-    stdin = sys.stdin.buffer
-    stdout = sys.stdout.buffer
+    stdin, stdout = stdio_streams()
 
     try:
-        maze = Maze(variant)
+        maze = Maze(manifest, level)
     except Refused as refused:
         # 起不来的原因要能传出去。宿主在等一条 `facts_result`，而它同样接受一条 `error`——
-        # 让它去等一个永远不会回话的进程，表现是"引擎超时"，而真因是"变体名写错了"。
-        write_frame(stdout, {"type": "error", "kind": refused.kind, "reason": refused.reason})
+        # 让它去等一个永远不会回话的进程，表现是"引擎超时"，而真因是"等级名写错了"。
+        write_message(stdout, {"type": "error", "kind": refused.kind, "reason": refused.reason})
         return 1
 
     while True:
         try:
-            request = read_frame(stdin)
-        except Refused as refused:
-            write_frame(stdout, {"type": "error", "kind": refused.kind, "reason": refused.reason})
-            continue
+            request = read_message(stdin)
+        except ProtocolError as error:
+            # **框架错误之后不再继续。** 长度前缀的流一旦超限或截断就**无法重新对齐**：
+            # 继续读只会把剩下的字节当成长度头，然后对着垃圾报一串看不懂的错。
+            # 这一点先前是错的（报一条错误帧然后 `continue`），
+            # 由 `tests/test_boundary.py` 那条超限测试逼出来。
+            write_message(stdout, {"type": "error", "kind": "protocol", "reason": str(error)})
+            return 1
         if request is None:
             return 0
         try:
             response = handle(maze, request)
         except Refused as refused:
-            write_frame(stdout, {"type": "error", "kind": refused.kind, "reason": refused.reason})
+            write_message(
+                stdout, {"type": "error", "kind": refused.kind, "reason": refused.reason}
+            )
             continue
         except Exception as error:  # noqa: BLE001 —— stderr 被丢弃，异常只能是错误帧
-            write_frame(stdout, {
+            write_message(stdout, {
                 "type": "error",
                 "kind": "engine",
                 "reason": f"{type(error).__name__}: {error}",
@@ -455,7 +481,7 @@ def main(argv):
             continue
         if response is None:
             return 0
-        write_frame(stdout, response)
+        write_message(stdout, response)
         if response["type"] == "close_result":
             maze.env.close()
             return 0

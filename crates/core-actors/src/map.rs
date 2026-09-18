@@ -8,7 +8,7 @@
 //! 2. **区分"已知"与"未知"**。`unseen` 只是"我没看见过"，绝不等于"那里是空的"。
 //!    把两者混起来，agent 会一头撞进没见过的墙，而且看上去像是"学会了"。
 //!
-//! 坐标约定（与 `games/maze/manifest.json` 的 `view_convention` 一致）：
+//! 坐标约定（与游戏清单里的 `view_convention` 一致，见 `games/door-key/manifest.json`）：
 //!
 //! * 视图里 agent 自己在 `(row = 3, col = 6)`；
 //! * 前进一格 → 列号减 1，因此 `forward 偏移 = 6 - col`；

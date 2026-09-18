@@ -1,0 +1,68 @@
+{
+  "game": "door-key",
+  "kind": "maze",
+  "title": "门钥匙房间",
+  "adapter": "games/adapters/minigrid/driver.py",
+  "default_level": "door-key",
+  "engine": {
+    "kind": "minigrid",
+    "package": "minigrid",
+    "pinned_version": "3.1.0",
+    "runtime": "gymnasium",
+    "runtime_pinned_version": "1.3.0",
+    "licence": "Apache-2.0",
+    "source": "https://github.com/Farama-Foundation/Minigrid"
+  },
+  "public": {
+    "observation_mode": "symbolic_maze",
+    "view_size": 7,
+    "mission_max_chars": 2048,
+    "actions": ["turn_left", "turn_right", "forward", "pickup", "toggle"],
+    "action_ids": {
+      "turn_left": 0,
+      "turn_right": 1,
+      "forward": 2,
+      "pickup": 3,
+      "toggle": 5
+    },
+    "withheld": [
+      "absolute_position",
+      "full_map",
+      "seed",
+      "rng_state",
+      "info",
+      "expert_actions",
+      "drop",
+      "done"
+    ],
+    "view_convention": {
+      "kind": "agent_centric_rotating",
+      "agent_row": 3,
+      "agent_column": 6,
+      "forward_column_delta": -1,
+      "left_row_delta": -1,
+      "note": "视图随 agent 朝向旋转，因此前方在视图里恒定。列的增减对应前后、行的增减对应左右；这条约定是规则事实，不含隐藏状态，认知单元靠它做无漂移里程计。由 games/adapters/minigrid/tests/test_conformance.py 的位移测试守住。"
+    }
+  },
+  "levels": {
+    "door-key": {
+      "title": "8×8 一间屋",
+      "env_id": "MiniGrid-DoorKey-8x8-v0",
+      "rules_version": "door-key-8x8-v1",
+      "budget": {
+        "max_steps": 640,
+        "reward_range": [0.0, 1.0],
+        "win_condition": "reach the goal after opening the door with the key"
+      },
+      "note": "要的不止是走路：先找到钥匙，再开那扇锁着的门。"
+    }
+  },
+  "scoring": {
+    "exposed_reward": "0.0 until the episode ends, then the terminal reward",
+    "note": "进步奖励若要加入必须新开一个 manifest 版本，并检查是否泄露真值（§11.3）"
+  },
+  "recovery": {
+    "supports_snapshot": false,
+    "why": "MiniGrid 的 unwrapped 局面无法从公开观测重建。未验证可恢复的适配器必须把回合标为基础设施截断，不得 reset 后冒充继续（§13）"
+  }
+}

@@ -4,7 +4,7 @@
 //! 回起点，自我定位必须精确回到原点、朝向必须回到 0。视图约定、前后轴与左右轴只要有一处
 //! 写反，这个断言就会失败——它比任何"常量等于常量"的检查都有力。
 //!
-//! 测试需要仓库根的 `.venv` 与 `games/maze`。缺失时默认跳过并打印原因；
+//! 测试需要仓库根的 `.venv` 与 `games/adapters/minigrid`。缺失时默认跳过并打印原因；
 //! 设 `SOCA_REQUIRE_GAME_PROCESS=1` 改为强制失败。
 
 use std::path::{Path, PathBuf};
@@ -25,13 +25,17 @@ fn repository_root() -> PathBuf {
 
 fn require_game_process() -> Option<PathBuf> {
     let root = repository_root();
-    let entry = root.join("games").join("maze").join("game.py");
+    let entry = root
+        .join("games")
+        .join("adapters")
+        .join("minigrid")
+        .join("driver.py");
     let venv = root.join(".venv");
     if venv.exists() && entry.exists() {
         return Some(root);
     }
     let message = format!(
-        "SKIP：缺少 .venv（{}）或 games/maze/game.py（{}）",
+        "SKIP：缺少 .venv（{}）或 games/adapters/minigrid/driver.py（{}）",
         venv.exists(),
         entry.exists()
     );
@@ -51,15 +55,20 @@ fn engine(root: &Path) -> ProcessEngine {
     .find(|candidate| candidate.exists())
     .expect("必须存在虚拟环境解释器");
 
+    // 驱动是引擎的（一份），游戏是清单（每游戏一份）——两样都要给。
+    let driver = root
+        .join("games")
+        .join("adapters")
+        .join("minigrid")
+        .join("driver.py");
+    let manifest = root.join("games").join("door-key").join("manifest.json");
     let mut config = ProcessEngineConfig::new(
         interpreter,
-        root.join("games")
-            .join("maze")
-            .join("game.py")
-            .to_str()
-            .expect("路径必须是 UTF-8"),
+        driver.to_str().expect("路径必须是 UTF-8"),
         GameKind::Maze,
     );
+    config.args.push("--manifest".to_string());
+    config.args.push(manifest.display().to_string());
     config.working_directory = Some(root.to_path_buf());
     ProcessEngine::spawn(config).expect("启动迷宫进程")
 }

@@ -5,7 +5,7 @@
 //! > 迷宫**局部视野**、扫雷公开 board、**无 seed/真值泄露**、**终局/截断区分**、**幂等 step**；
 //! > 结构化与像素成绩分开。
 //!
-//! 前四样由 `games/maze/game.py`（投影）与 `soca-game-host`（幂等账、终局与截断）负责。
+//! 前四样由 `games/adapters/minigrid/driver.py`（投影）与 `soca-game-host`（幂等账、终局与截断）负责。
 //! 本模块补的是**中间那一段**：谁来走、怎么决定下一步、以及那些决定怎么被看见。
 //!
 //! ## 探索器不是"一个会玩迷宫的模型"
@@ -19,7 +19,8 @@
 //! ## 地图是靠约定的里程计拼出来的
 //!
 //! 视图随朝向旋转，agent 恒在 `(3, 6)`，前方是**列号变小**——这条约定是规则事实，
-//! 由 `games/maze/tests/test_rules.py` 的位移测试守着。本模块按它把每一格投到世界坐标上。
+//! 由 `games/adapters/minigrid/tests/test_conformance.py` 的位移测试守着
+//! （那一份对**每个游戏**各跑一遍）。本模块按它把每一格投到世界坐标上。
 //!
 //! 转置或左右搞反**不会报错**：地图会整体镜像，而它每一步都"看起来对"。所以这里做了一件
 //! 额外的事：**每次吸收视图时对照已知道的格子**，一旦同一个世界格子出现两种不同的内容，
@@ -71,18 +72,76 @@ const AGENT_ROW: i32 = 3;
 /// 同上。
 const AGENT_COLUMN: i32 = 6;
 
-/// 适配器脚本。
+/// 仓库根。
 ///
 /// 从 `CARGO_MANIFEST_DIR` 推，而不是写一个相对路径：相对路径要看进程的工作目录，
 /// 而那个东西在 `cargo test`、控制台、以及将来某个打包好的可执行文件里各不相同。
-/// 用编译期常量把"仓库里那个文件"钉死，出问题就只可能是文件真的不在。
-fn adapter_path() -> String {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    root.join("games").join("maze").join("game.py").display().to_string()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// 要跑哪一局：**游戏**（规则集）与**等级**（同一规则集下的哪一关）。
+///
+/// 两者分开，因为它们回答的是两个问题。游戏决定"哪些规则在用、赢了算什么"
+/// （门钥匙房间与传统迷宫是两个游戏）；等级决定"这个规则集下的哪一张图"
+/// （传统迷宫的"墙与缺口"与"四房间"是同一个游戏的两种大小）。
+///
+/// 名字都是清单里的字符串，这一层**不认识任何一个具体的游戏**：
+/// 它只知道"把这份清单和这个等级交给驱动"。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    /// 游戏目录名（`games/<game>/manifest.json`）。
+    pub game: String,
+    /// 等级名（清单 `levels` 里的键）。空串表示用清单的默认等级。
+    pub level: String,
+}
+
+impl Choice {
+    /// 构造。`level` 给空串表示用清单的默认等级。
+    pub fn new(game: &str, level: &str) -> Self {
+        Self {
+            game: game.to_string(),
+            level: level.to_string(),
+        }
+    }
+
+    /// 这个游戏的清单在哪。
+    fn manifest_path(&self) -> Result<std::path::PathBuf, CoreError> {
+        let path = repo_root()
+            .join("games")
+            .join(&self.game)
+            .join("manifest.json");
+        if !path.exists() {
+            return Err(CoreError::UnknownGame {
+                game: self.game.clone(),
+            });
+        }
+        Ok(path)
+    }
+
+    /// 谁来驱动这个游戏。**路径写在清单里**，不写在这里：
+    /// 写在这里等于把"哪个游戏用哪个驱动"抄进 Rust，而那份抄本迟早与 `games/` 分叉。
+    fn adapter_path(&self) -> Result<String, CoreError> {
+        let manifest = self.manifest_path()?;
+        let raw = std::fs::read_to_string(&manifest).map_err(|error| CoreError::UnknownGame {
+            game: format!("{}（读不了清单：{error}）", self.game),
+        })?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| CoreError::UnknownGame {
+                game: format!("{}（清单不是合法 JSON：{error}）", self.game),
+            })?;
+        let adapter = parsed
+            .get("adapter")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CoreError::UnknownGame {
+                game: format!("{}（清单里没有 adapter）", self.game),
+            })?;
+        Ok(repo_root().join(adapter).display().to_string())
+    }
 }
 
 /// 一次探索里的一步。给页面逐步回放用。
@@ -245,16 +304,22 @@ pub struct TrueMap {
     pub cells: Vec<TrueCell>,
 }
 
-/// 建一个绑定某个变体的引擎工厂。
+/// 建一个绑定某个游戏的引擎工厂。
 ///
-/// 变体名交给适配器，由它去 `manifest.json` 里查环境与规则版本——**这一层不认识
-/// `MiniGrid-*` 这些环境标识**，也不该认识：认识它们就等于把"这个引擎有哪些关卡"
-/// 抄进了 Rust 里，而那份抄本迟早与清单分叉。
-fn factory_for(variant: &str) -> ProcessFactory {
-    let mut config = ProcessEngineConfig::new(engine_program(), &adapter_path(), GameKind::Maze);
-    config.args.push("--variant".to_string());
-    config.args.push(variant.to_string());
-    ProcessFactory::new(config)
+/// 游戏与等级都交给驱动，由它去那份清单里查环境与规则版本——**这一层不认识
+/// `MiniGrid-*` 这些环境标识**，也不该认识：认识它们就等于把"这个引擎有哪些游戏"
+/// 抄进了 Rust 里，而那份抄本迟早与 `games/` 分叉。
+fn factory_for(choice: &Choice) -> Result<ProcessFactory, CoreError> {
+    let adapter = choice.adapter_path()?;
+    let manifest = choice.manifest_path()?;
+    let mut config = ProcessEngineConfig::new(engine_program(), &adapter, GameKind::Maze);
+    config.args.push("--manifest".to_string());
+    config.args.push(manifest.display().to_string());
+    if !choice.level.is_empty() {
+        config.args.push("--level".to_string());
+        config.args.push(choice.level.clone());
+    }
+    Ok(ProcessFactory::new(config))
 }
 
 /// 一局是**谁**在走的。
@@ -276,11 +341,13 @@ pub enum RunPath {
 pub struct MazeRun {
     /// 这一局是谁在走的。
     pub path: RunPath,
-    /// 走的哪一个变体（清单里的名字）。
+    /// 走的哪一个**游戏**（规则集）。
     ///
-    /// 它要出现在这里，而不能靠调用方自己记着：同一个 seed 在不同变体下是**不同的迷宫**，
+    /// 它要出现在这里，而不能靠调用方自己记着：同一个 seed 在不同游戏下是**不同的迷宫**，
     /// 而"这是哪一局"必须从返回值里读得出来——否则截图与回放都没法说清自己在看什么。
-    pub variant: String,
+    pub game: String,
+    /// 这个游戏里的哪一关。
+    pub level: String,
     /// 回合标识。
     pub episode_id: String,
     /// 用的种子。**它属于私有控制面**——回放要靠它，而公开面上没有它。
@@ -868,10 +935,10 @@ pub fn run_episode(
     store: &mut Store,
     seed: u64,
     max_steps: u32,
-    variant: &str,
+    choice: &Choice,
     at: WallClock,
 ) -> Result<MazeRun, CoreError> {
-    let factory = factory_for(variant);
+    let factory = factory_for(choice)?;
 
     let session_id = PublicId::new("session:maze")?;
     let episode_id = PublicId::new(format!("episode:maze:{seed}"))?;
@@ -962,7 +1029,8 @@ pub fn run_episode(
 
     Ok(MazeRun {
         path: RunPath::Evaluator,
-        variant: variant.to_string(),
+        game: choice.game.clone(),
+        level: choice.level.clone(),
         episode_id: episode_id.to_string(),
         seed,
         outcome: observation.outcome.as_str().to_string(),
@@ -975,7 +1043,7 @@ pub fn run_episode(
         stopped: None,
         // 真值两条路都要：它是**操作员的参照物**，与这一局走的是哪条路无关。
         // 取不到就算了（`None`），而不是让整个请求失败——它是参照物，不是这一局的一部分。
-        truth: true_map(seed, variant).ok(),
+        truth: true_map(choice, seed).ok(),
         contradictions: explorer.contradictions,
         mission,
     })
@@ -1006,10 +1074,10 @@ pub fn play_through_actions(
     subject: &mut Subject,
     seed: u64,
     max_steps: u32,
-    variant: &str,
+    choice: &Choice,
     at: WallClock,
 ) -> Result<MazeRun, CoreError> {
-    let factory = factory_for(variant);
+    let factory = factory_for(choice)?;
 
     // 起新的一局之前，先把之前那几局**收干净**。
     //
@@ -1264,7 +1332,8 @@ pub fn play_through_actions(
 
     Ok(MazeRun {
         path: RunPath::Agent,
-        variant: variant.to_string(),
+        game: choice.game.clone(),
+        level: choice.level.clone(),
         episode_id: episode,
         seed,
         outcome,
@@ -1274,7 +1343,7 @@ pub fn play_through_actions(
         initial_cells,
         memories: remembered,
         stopped,
-        truth: true_map(seed, variant).ok(),
+        truth: true_map(choice, seed).ok(),
         contradictions: explorer.contradictions,
         mission,
     })
@@ -1287,16 +1356,19 @@ pub fn play_through_actions(
 /// 而"在同一局上问"需要给引擎加一条协议，那条协议一旦存在，任何拿到引擎的代码都能顺手
 /// 问一句"真值是什么"——它不会立刻出问题，而是以"某个单元突然很会走迷宫"的形式在很久
 /// 以后暴露出来。另一个进程问，则要求调用方显式地做这个动作，而那个动作在代码里看得见。
-pub fn true_map(seed: u64, variant: &str) -> Result<TrueMap, CoreError> {
-    let adapter = adapter_path();
+pub fn true_map(choice: &Choice, seed: u64) -> Result<TrueMap, CoreError> {
+    let adapter = choice.adapter_path()?;
+    let manifest = choice.manifest_path()?;
     let output = std::process::Command::new(engine_program())
         .args([
             "-B",
             "-X",
             "utf8",
             &adapter,
-            "--variant",
-            variant,
+            "--manifest",
+            &manifest.display().to_string(),
+            "--level",
+            &choice.level,
             "--truth",
             &seed.to_string(),
         ])

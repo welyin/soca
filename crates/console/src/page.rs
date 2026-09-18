@@ -194,18 +194,22 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
     <h2>游戏演示</h2>
     <div class="hint" style="margin:0 0 12px" data-full>
       每个演示是一个<b>单独的页面</b>——一页只看一局，不和控制台别的区块挤在一起。
-      链接里的种子与关卡都写明了，所以<b>发给别人看到的是同一局</b>（同一 seed 是确定性的）。
+      链接里的种子、游戏与等级都写明了，所以<b>发给别人看到的是同一局</b>（同一 seed 是确定性的）。
+      <br><b>游戏是规则集</b>（门钥匙房间要钥匙开门、传统迷宫只是绕墙到终点），
+      <b>等级是同一个规则集里的哪一关</b>（传统迷宫的"墙与缺口"与"四房间"）。
+      两者都由 <code>games/&lt;游戏&gt;/manifest.json</code> 定义，页面不写死任何名字。
     </div>
     <div id="maze-links" class="demo-links" data-full>（正在取演示清单……）</div>
 
     <div data-demo>
     <div class="hint" style="margin:0 0 12px">
       <a href="/">← 回控制台</a>　真规则引擎：<code>MiniGrid-*</code>，一个回合一个 Python 子进程，
-      走 <code>games/maze/game.py</code> 的投影。公开面上只有 <b>7×7 局部视图</b>、
+      走 <code>games/adapters/minigrid/driver.py</code> 的投影。公开面上只有 <b>7×7 局部视图</b>、
       任务文本、朝向和携带物——<b>绝对坐标、完整地图、seed、info 一样都不出那道门</b>。
     </div>
     <div class="row">
-      <select id="maze-variant" style="width:auto" title="哪一关（清单里的变体）"></select>
+      <select id="maze-game" style="width:auto" title="哪个游戏（规则集）"></select>
+      <select id="maze-level" style="width:auto" title="这个游戏里的哪一关"></select>
       <select id="maze-path" style="width:auto">
         <option value="agent">认知通路：动作是一条候选，要排队、要许可</option>
         <option value="evaluator">评估器通路：动作直接交给宿主</option>
@@ -890,6 +894,8 @@ let mazeAt = 0;
 let mazeTimer = null;
 /// `?at=N` 让链接停在某一步上——截图与"给他看那一步"都要它。
 let mazeAtOnLoad = null;
+/// 清单里的游戏（`/api/games`）。下拉框与链接列表都从它来。
+let mazeGames = [];
 
 function mazeGlyph(cell) {
   if (cell.object === "agent") { return "你"; }
@@ -1109,7 +1115,8 @@ $("maze-run").onclick = async function () {
       seed: parseInt($("maze-seed").value, 10) || 7,
       max_steps: 400,
       path: $("maze-path").value,
-      variant: $("maze-variant").value,
+      game: $("maze-game").value,
+      level: $("maze-level").value,
     });
     mazeRun = result.run;
     mazeAt = mazeAtOnLoad === null
@@ -1124,7 +1131,8 @@ $("maze-run").onclick = async function () {
       (mazeRun.stopped
         ? "<br><b>停下了</b>：" + escapeHtml(mazeRun.stopped)
         : "") +
-      "<br>关卡 <b>" + escapeHtml(mazeRun.variant || "—") + "</b>　" +
+      "<br>游戏 <b>" + escapeHtml(mazeRun.game || "—") + "</b>　" +
+      "等级 <b>" + escapeHtml(mazeRun.level || "—") + "</b>　" +
       "开局一眼看见 " + (mazeRun.initial_cells || 0) + " 格　" +
       "记进 L1 " + (mazeRun.memories || 0) + " 条　" +
       "走的是<b>" + (mazeRun.path === "agent" ? "认知通路" : "评估器通路") + "</b>　" +
@@ -1518,26 +1526,20 @@ $("message").addEventListener("keydown", function (event) {
 
 refresh();
 refreshModel();
-loadMazeVariants();
+loadMazeGames();
 
 // 关卡名单走一趟清单，而不是在这里写死一份：写死的那份会在加关卡时忘记跟着改，
 // 而表现是"新关卡明明加了，下拉框里没有它"。
-async function loadMazeVariants() {
+async function loadMazeGames() {
   try {
     // **不传第二个参数**：`api` 的约定是"不给 body 就是 GET"。
     // 传一个 `{}` 会让它变成 POST，而那个路径只注册了 GET——于是报回来的是
     // "没有这个接口"，看起来像路由没写，真因是方法不对。查了半天的就是这一行。
-    const result = await api("maze/variants");
-    const variants = result.variants || [];
-    $("maze-variant").innerHTML = variants
-      .map(function (item) {
-        return "<option value=\"" + escapeHtml(item.name) + "\"" +
-          (item.default ? " selected" : "") + ">" +
-          escapeHtml(item.name + "　" + item.title) + "</option>";
-      })
-      .join("");
+    const result = await api("games");
+    mazeGames = result.games || [];
+    fillMazeGames();
 
-    // 控制台首页只列链接。**链接里把种子与通路都写全**——点过去看到的是哪一局，
+    // 控制台首页只列链接。**链接里把种子、游戏、等级与通路都写全**——点过去看到的是哪一局，
     // 从 URL 上读得出来；靠页面自己"记住上次选的"则做不到这件事，
     // 而且那种链接发出去之后，别人看到的是他自己的默认值。
     const paths = [
@@ -1545,25 +1547,51 @@ async function loadMazeVariants() {
       { name: "evaluator", title: "评估器通路" },
     ];
     const links = [];
-    variants.forEach(function (item) {
+    mazeGames.forEach(function (game) {
       paths.forEach(function (path) {
-        const href = "/maze?variant=" + encodeURIComponent(item.name) +
+        const href = "/maze?game=" + encodeURIComponent(game.game) +
+          "&level=" + encodeURIComponent(game.default_level) +
           "&path=" + path.name + "&seed=7";
         links.push(
           "<a class=\"demo-link\" href=\"" + escapeHtml(href) + "\">" +
-          "<div class=\"t\">" + escapeHtml(item.title) + "　" + path.title + "</div>" +
-          "<div class=\"s\">" + escapeHtml(item.name + "　" + path.name + "　seed 7") + "</div>" +
-          "</a>"
+          "<div class=\"t\">" + escapeHtml(game.title) + "　" + path.title + "</div>" +
+          "<div class=\"s\">" + escapeHtml(game.game + "　" + game.default_level + "　seed 7") +
+          "</div></a>"
         );
       });
     });
-    $("maze-links").innerHTML = links.length
-      ? links.join("")
-      : "（清单里一关都没有）";
+    $("maze-links").innerHTML = links.length ? links.join("") : "（一个游戏都没有）";
   } catch (error) {
-    $("maze-links").textContent = "取演示清单失败：" + error.message;
-    log("取关卡名单失败：" + error.message, "err");
+    $("maze-links").textContent = "取游戏清单失败：" + error.message;
+    log("取游戏清单失败：" + error.message, "err");
   }
+}
+
+// 游戏下拉：文字用清单里的**标题**，值用游戏名（它是目录名，也是 `--manifest` 的由头）。
+function fillMazeGames() {
+  $("maze-game").innerHTML = mazeGames
+    .map(function (game) {
+      return "<option value=\"" + escapeHtml(game.game) + "\">" +
+        escapeHtml(game.title + "（" + game.game + "）") + "</option>";
+    })
+    .join("");
+  fillMazeLevels();
+  $("maze-game").onchange = fillMazeLevels;
+}
+
+// 等级下拉随游戏变。**等级属于游戏**：换一个游戏，"四房间"这个等级就不存在了。
+function fillMazeLevels() {
+  const game = mazeGames.filter(function (item) {
+    return item.game === $("maze-game").value;
+  })[0];
+  const levels = (game && game.levels) || [];
+  $("maze-level").innerHTML = levels
+    .map(function (level) {
+      return "<option value=\"" + escapeHtml(level.name) + "\"" +
+        (level.default ? " selected" : "") + ">" +
+        escapeHtml(level.title + "（" + level.name + "）") + "</option>";
+    })
+    .join("");
 }
 
 // 演示页与首页是**同一个页面**，只是藏起了别的区块。
@@ -1584,10 +1612,15 @@ async function loadMazeVariants() {
     }
     if (params.has("path")) { $("maze-path").value = params.get("path"); }
     if (params.has("at")) { mazeAtOnLoad = parseInt(params.get("at"), 10) || 0; }
-    // 变体要等清单取回来才设得上，所以排在它后面。
-    const wanted = params.get("variant");
+    // 游戏与等级要等清单取回来才设得上，所以排在它后面（而且游戏一变，等级列表要重填）。
+    const wantedGame = params.get("game");
+    const wantedLevel = params.get("level");
     window.setTimeout(function () {
-      if (wanted) { $("maze-variant").value = wanted; }
+      if (wantedGame) {
+        $("maze-game").value = wantedGame;
+        fillMazeLevels();
+      }
+      if (wantedLevel) { $("maze-level").value = wantedLevel; }
       $("maze-run").click();
     }, 0);
   }

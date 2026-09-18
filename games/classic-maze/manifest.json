@@ -1,6 +1,9 @@
 {
-  "game": "maze",
-  "default_variant": "door-key",
+  "game": "classic-maze",
+  "kind": "maze",
+  "title": "传统迷宫",
+  "adapter": "games/adapters/minigrid/driver.py",
+  "default_level": "walls",
   "engine": {
     "kind": "minigrid",
     "package": "minigrid",
@@ -38,42 +41,31 @@
       "agent_column": 6,
       "forward_column_delta": -1,
       "left_row_delta": -1,
-      "note": "视图随 agent 朝向旋转，因此前方在视图里恒定。列的增减对应前后、行的增减对应左右；这条约定是规则事实，不含隐藏状态，认知单元靠它做无漂移里程计。由 games/maze/tests/test_rules.py 的位移测试守住。"
+      "note": "视图随 agent 朝向旋转，因此前方在视图里恒定。列的增减对应前后、行的增减对应左右；这条约定是规则事实，不含隐藏状态，认知单元靠它做无漂移里程计。由 games/adapters/minigrid/tests/test_conformance.py 的位移测试守住。"
     }
   },
-  "variants": {
-    "door-key": {
-      "title": "门钥匙房间",
-      "env_id": "MiniGrid-DoorKey-8x8-v0",
-      "rules_version": "maze-door-key-8x8-v1",
-      "budget": {
-        "max_steps": 640,
-        "reward_range": [0.0, 1.0],
-        "win_condition": "reach the goal after opening the door with the key"
-      },
-      "note": "原先那一版。多一把钥匙与一扇门，于是要做的事不止是走路。"
-    },
-    "crossing": {
-      "title": "墙与缺口（起点 → 终点）",
+  "levels": {
+    "walls": {
+      "title": "墙与缺口（9×9）",
       "env_id": "MiniGrid-SimpleCrossingS9N1-v0",
-      "rules_version": "maze-crossing-s9-v1",
+      "rules_version": "classic-maze-walls-s9-v1",
       "budget": {
         "max_steps": 324,
         "reward_range": [0.0, 1.0],
         "win_condition": "find the opening in the wall and reach the goal"
       },
-      "note": "传统的那一种：一道墙把格子分成两半，墙上有几个缺口，从起点绕到终点。没有钥匙、没有门——世界里只有墙、空地和目标。"
+      "note": "传统的那一种：一道墙把格子分成两半，墙上有缺口，从起点绕到终点。世界里只有墙、空地和目标——没有钥匙，没有门。"
     },
     "four-rooms": {
-      "title": "四房间",
+      "title": "四房间（19×19）",
       "env_id": "MiniGrid-FourRooms-v0",
-      "rules_version": "maze-four-rooms-v1",
+      "rules_version": "classic-maze-four-rooms-v1",
       "budget": {
         "max_steps": 400,
         "reward_range": [0.0, 1.0],
         "win_condition": "reach the goal"
       },
-      "note": "四个房间各开一个口，19×19。同样的规则集，地方大得多——用它看探索器在更长的路上会不会兜圈子。"
+      "note": "同样的规则，四个房间各开一个口。地方大得多——一份目标的激活额度大概率不够走到终点，恰好用来看§4.2那个升级触发器。"
     }
   },
   "scoring": {

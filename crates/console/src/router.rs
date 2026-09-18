@@ -75,7 +75,7 @@ pub fn handle(
         ("POST", "/api/scale") => scale_topology(subject, request, at),
         // §17 的"认知游戏"：真引擎、真投影、逐步回放。
         ("POST", "/api/maze/run") => run_maze(subject, request, at),
-        ("GET", "/api/maze/variants") => maze_variants(),
+        ("GET", "/api/games") => games_index(),
         ("POST", "/api/unit/sleep") => sleep_unit(subject, request, at),
         ("POST", "/api/unit/wake") => wake_unit(subject, request, at),
         ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
@@ -1050,48 +1050,73 @@ fn wake_unit(subject: &mut Subject, _request: &Request, at: WallClock) -> Respon
     }
 }
 
-/// 清单里有哪些迷宫变体（§10.1：`manifest.json` 是这一层的规格）。
+/// 有哪些**游戏**，以及每个游戏里有哪些等级。
 ///
-/// 走一趟清单，而不是在页面里写死一份名单：写死的那份会在加关卡时忘记跟着改，
-/// 而表现是"新关卡明明加了，下拉框里没有它"——那种失败没有任何东西会报出来。
-fn maze_variants() -> Response {
+/// 走一趟 `games/*/manifest.json`，而不是在页面里写死一份名单：写死的那份会在加游戏时
+/// 忘记跟着改，而表现是"新游戏明明加了，页面上没有它"——那种失败没有任何东西会报出来。
+fn games_index() -> Response {
     let Some(root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
     else {
         return Response::text(500, "找不到仓库根");
     };
-    let path = root.join("games").join("maze").join("manifest.json");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Response::text(500, format!("读不了清单：{}", path.display()));
+    let Ok(entries) = std::fs::read_dir(root.join("games")) else {
+        return Response::text(500, "读不了 games 目录");
     };
-    let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
-        return Response::text(500, "清单不是合法 JSON");
-    };
-    let default = manifest
-        .get("default_variant")
-        .and_then(Value::as_str)
-        .unwrap_or("door-key")
-        .to_string();
-    let variants: Vec<Value> = manifest
-        .get("variants")
-        .and_then(Value::as_object)
-        .map(|entries| {
-            entries
-                .iter()
-                .map(|(name, entry)| {
-                    json!({
-                        "name": name,
-                        // 标题给界面用；清单是登记处，不是只有代码读的东西。
-                        "title": entry.get("title").and_then(Value::as_str).unwrap_or(name),
-                        "env_id": entry.get("env_id").and_then(Value::as_str),
-                        "default": *name == default,
+
+    let mut games: Vec<Value> = Vec::new();
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("manifest.json");
+        if !manifest_path.is_file() {
+            // 适配器目录（`games/adapters/`）里没有清单，所以不会被当成游戏。
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(id) = manifest.get("game").and_then(Value::as_str) else {
+            continue;
+        };
+        let default_level = manifest
+            .get("default_level")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let levels: Vec<Value> = manifest
+            .get("levels")
+            .and_then(Value::as_object)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .map(|(name, level)| {
+                        json!({
+                            "name": name,
+                            // 标题给界面用；清单是登记处，不是只有代码读的东西。
+                            "title": level.get("title").and_then(Value::as_str).unwrap_or(name),
+                            "env_id": level.get("env_id").and_then(Value::as_str),
+                            "default": name == default_level,
+                        })
                     })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Response::json(200, &json!({ "variants": variants, "default": default }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        games.push(json!({
+            "game": id,
+            "title": manifest.get("title").and_then(Value::as_str).unwrap_or(id),
+            "kind": manifest.get("kind").and_then(Value::as_str).unwrap_or("maze"),
+            "default_level": default_level,
+            "levels": levels,
+        }));
+    }
+    games.sort_by(|a, b| {
+        a.get("game")
+            .and_then(Value::as_str)
+            .cmp(&b.get("game").and_then(Value::as_str))
+    });
+    Response::json(200, &json!({ "games": games }))
 }
 
 /// 跑一局迷宫，把**每一步**都带回来（§17 的"认知游戏"那一行）。
@@ -1123,17 +1148,20 @@ fn run_maze(subject: &mut Subject, request: &Request, at: WallClock) -> Response
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("agent");
-    // 哪一关。名字由清单定义，这里**不校验**——校验在适配器那一层，
+    // 哪个游戏、哪一关。名字由清单定义，这里**不校验**——校验在适配器那一层，
     // 而它报出来的错比这里能编的更准（它还知道清单里有哪些名字）。
-    let variant = payload
-        .get("variant")
-        .and_then(Value::as_str)
-        .unwrap_or("door-key");
+    let choice = soca_core::maze::Choice::new(
+        payload
+            .get("game")
+            .and_then(Value::as_str)
+            .unwrap_or("door-key"),
+        payload.get("level").and_then(Value::as_str).unwrap_or(""),
+    );
 
     let run = if path == "evaluator" {
-        soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, variant, at)
+        soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, &choice, at)
     } else {
-        soca_core::maze::play_through_actions(subject, seed, max_steps, variant, at)
+        soca_core::maze::play_through_actions(subject, seed, max_steps, &choice, at)
     };
 
     match run {
