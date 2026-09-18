@@ -69,4 +69,10 @@ pub enum CoreError {
          （§12.1：范围限定授权，撤回立即生效）"
     )]
     CapabilityRevoked { capability: String },
+
+    #[error(
+        "全局暂停中，拒绝这次操作：{reason}\
+         （§12.1：暂停应先撤销尚未消费的执行授权、停止采集和外发，再取消模型任务）"
+    )]
+    Paused { reason: String },
 }

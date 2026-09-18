@@ -306,6 +306,11 @@ pub struct PublicState {
     /// 单独报出来，是因为它和"簇自己提出了几条候选"是两件事：前者是外面递进来的，
     /// 后者是簇从证据里推出来的。合成一个数字的话，"模型提了一条但没进候选"看不出来。
     pub proposed_candidates: usize,
+    /// 全局暂停的理由（§12.1）。`None` 表示在跑。
+    ///
+    /// 界面要能一眼看到它，因为暂停期间**三件事同时停了**：新许可、新采集、模型调用。
+    /// 不显示的话，用户会看到"什么都没发生"，而原因（他自己按下的那个暂停）看不出来。
+    pub paused: Option<String>,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 已经隐藏、等着清理的记忆条数（§12.3）。
@@ -813,6 +818,17 @@ impl Subject {
         output_schema: OutputSchema,
         at: WallClock,
     ) -> Result<ModelConsultation, CoreError> {
+        // §12.1 的"停止**外发**……再**取消模型任务**"。模型调用是这两件事的合流处：
+        // 它既是把材料送出去（外发），也是那个该被取消的任务本身。
+        //
+        // 放在最前面，在所有别的检查之前：放到后面就有人能先构造好一份上下文（那里有
+        // 出站判断）再"顺便"发现暂停了——而一份已经构造好的上下文离发出去只差一步。
+        if let Some(reason) = self.policy.pause_reason() {
+            return Err(CoreError::Paused {
+                reason: reason.to_string(),
+            });
+        }
+
         let goal = self
             .goals
             .goal(goal_id)
@@ -1181,6 +1197,20 @@ impl Subject {
                     // 授权已撤回不是一个"运行出错了"，而是一个需要人处理的拒绝——和等级
                     // 超范围、全局暂停同一类。把它当成普通错误抛出，环路会中断在一句
                     // "内部错误"上，而真正的原因看不出来。
+                    // 暂停与撤回都不是"运行出错了"，而是需要人处理的拒绝——把它们当成普通
+                    // 错误抛出，环路会中断在一句"内部错误"上，而真正的原因看不出来。
+                    Err(CoreError::Paused { reason }) => {
+                        self.store.audit(
+                            at,
+                            AuditCategory::CapabilityDenied,
+                            subject_ref.as_str(),
+                            "paused",
+                            &format!("全局暂停中，拒绝新的采集：{reason}"),
+                        )?;
+                        Ok(AdvanceStep::Refused {
+                            reason: format!("全局暂停中，拒绝新的采集（§12.1）：{reason}"),
+                        })
+                    }
                     Err(CoreError::CapabilityRevoked { capability }) => {
                         self.store.audit(
                             at,
@@ -1304,6 +1334,21 @@ impl Subject {
             self.owner.clone(),
             budget_ref,
         ) {
+            PermitDecision::Paused { reason } => {
+                self.store.audit(
+                    at,
+                    AuditCategory::CapabilityDenied,
+                    intent.action_id.as_str(),
+                    "paused",
+                    &reason,
+                )?;
+                // **不取走**。与下面那一档的差别就在这一行：暂停只是此刻不通，而"此刻"
+                // 会过去。把它取走的话，用户恢复之后会发现该做的事没了，而账上只有一条
+                // "被拒绝"——一次静默的放弃。
+                Ok(AdvanceStep::Refused {
+                    reason: format!("全局暂停中，不签发新许可（§12.1）：{reason}"),
+                })
+            }
             PermitDecision::Refused { reason } => {
                 // §6 第 8 步：否决要留在最小审计账里。
                 self.store.audit(
@@ -1487,9 +1532,23 @@ impl Subject {
 
     /// 这次观测应当在哪个权限范围下进行（§6 第 1 步、§12.1）。
     ///
-    /// 有可推进的目标就取它的范围，没有就用默认范围。两种情况都要过一遍"这项能力还生效吗"——
-    /// **撤回立即生效**这句话的落点就在这里：撤回之后，新的观测不再发生。
+    /// 两道闸都在这里，因为它们说的是同一件事：**这次采集该不该发生**。
+    ///
+    /// * **全局暂停**（§12.1）。那句原话是"暂停应先撤销尚未消费的执行授权、**停止采集和外发**，
+    ///   再取消模型任务"——"停止采集"这四个字就是这一行。此前暂停只挡住了新许可，
+    ///   于是暂停之后系统照样出去读文件、照样调模型：**用户按下暂停，期望的是"现在停"**。
+    /// * **授权撤回**。"撤回立即生效"的落点也在这里：撤回之后新的观测不再发生。
+    ///
+    /// 顺序是先暂停后撤回，因为暂停是更强的一档：撤回了还可以重新授予，而暂停期间
+    /// 连"重新授予之后立刻再试"都该等一等。诊断信息也因此不同——操作员看到"授权已撤回"会去
+    /// 重授，看到"全局暂停"会去找那个按下暂停的人。
     fn observation_scope(&self) -> Result<PermissionScope, CoreError> {
+        if let Some(reason) = self.policy.pause_reason() {
+            return Err(CoreError::Paused {
+                reason: reason.to_string(),
+            });
+        }
+
         let scope = self
             .next_open_goal()
             .and_then(|goal_id| self.goals.goal(&goal_id).map(|goal| goal.permission_scope.clone()))
@@ -1630,6 +1689,22 @@ impl Subject {
     /// 当前生效的全部授权（§12.1）。
     pub fn granted_capabilities(&self) -> Vec<&CapabilityPolicyRef> {
         self.policy.granted()
+    }
+
+    /// 往审计账里加一条（§12.3 的最小审计账）。
+    ///
+    /// 由主体转发，而不是让调用方去拿存储的可变引用：后者等于把"谁能写审计"这个问题交给
+    /// 调用方，而审计是**追责**依据——§12.3 说裁掉它会让"当初为什么这么做"永久无法回答。
+    pub fn audit(
+        &mut self,
+        at: WallClock,
+        category: AuditCategory,
+        subject_ref: &str,
+        outcome: &str,
+        detail: &str,
+    ) -> Result<(), CoreError> {
+        self.store.audit(at, category, subject_ref, outcome, detail)?;
+        Ok(())
     }
 
     /// 策略代理（只读）。
@@ -1813,6 +1888,7 @@ impl Subject {
             observed_evidence: self.observed.len(),
             ledger_records: self.cluster.ledger().len(),
             proposed_candidates: self.cluster.pending_proposals(),
+            paused: self.policy.pause_reason().map(str::to_string),
             memory_entries: self.store.memory_count(&self.owner)?,
             memories_awaiting_purge: self.store.tombstoned_memory_count()?,
             actions: self.store.action_count()?,

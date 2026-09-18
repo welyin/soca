@@ -74,9 +74,19 @@ pub enum PermitDecision {
         /// 为什么现在还不能放行。给人读。
         reason: String,
     },
-    /// 拒绝。再多的人工批准也改变不了它。
+    /// 拒绝。**再多的人工批准也改变不了它**——范围越界、能力被撤回都属于这一类。
     Refused {
         /// 拒绝原因。
+        reason: String,
+    },
+    /// 全局暂停中（§12.1）。
+    ///
+    /// 与 [`PermitDecision::Refused`] 分开，因为两者对"接下来该做什么"的含义完全不同：
+    /// 拒绝是**此路不通**（要放行必须重新委托或重新授予），暂停是**此刻不通**——
+    /// 而"此刻"会过去。调用方因此不该把被暂停挡住的动作取走：§12.1 的暂停是可逆的，
+    /// 而"可逆"不只是说锁会打开，还包括**恢复之后那份工作还在**。
+    Paused {
+        /// 减速/暂停的理由（用户填的）。
         reason: String,
     },
 }
@@ -270,9 +280,16 @@ impl PolicyAgent {
         subject_id: SubjectId,
         budget_ref: BudgetRef,
     ) -> PermitDecision {
+        // 暂停单列一档，**不并进 `Refused`**。两者对"接下来该做什么"的含义完全不同：
+        //
+        // * `Refused` 是**此路不通**——范围越界、能力被撤回。要放行必须重新委托或重新授予，
+        //   所以调用方把那个动作取走是对的。
+        // * `Paused` 是**此刻不通**。§12.1 的暂停是可逆的，而"可逆"不只是说锁会打开：
+        //   恢复之后那份还没做的工作得**还在**。并进 `Refused` 的话，暂停会顺手把待办丢掉，
+        //   用户恢复之后发现该做的事没了，而账上只有一条"被拒绝"——一次静默的放弃。
         if let Some(reason) = &self.paused {
-            return PermitDecision::Refused {
-                reason: format!("全局暂停中，不签发新许可：{reason}（§12.1）"),
+            return PermitDecision::Paused {
+                reason: reason.clone(),
             };
         }
 

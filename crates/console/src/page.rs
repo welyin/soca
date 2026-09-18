@@ -201,12 +201,24 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
         <option value="a4">A4 高风险</option>
       </select>
       <button id="run-select" class="ghost">检验并选择</button>
-      <input id="loop-rounds" type="number" min="1" max="32" value="4" style="width:76px" title="跑几轮">
-      <button id="run-loop">跑几轮闭环</button>
+      <input id="loop-rounds" type="number" min="1" max="32" value="4" style="width:76px" title="最多跑几轮">
+      <button id="run-loop">跑一段</button>
+      <button id="pause" class="ghost">全局暂停</button>
+      <button id="resume-run" class="ghost">恢复</button>
     </div>
     <div class="hint">
       证据门槛是风险等级的函数：A0/A1 要 1 条，A2 起要 3 条。被检验否定的候选直接出局，
       不论它有多少证据——一条被反例推翻的结论不会因为支持者多就重新成立。
+    </div>
+    <div class="hint">
+      <b>「跑一段」交给调度器</b>（§4.1 L4），它决定该不该跑、跑几轮、什么时候停：
+      <b>暂停每一轮都查</b>（用户按下暂停期望的是"现在停"，不是"跑完这几轮再停"）、
+      连续几轮没有进展就退避（继续跑只会把审计账塞满一样的记录）、轮数有界。
+    </div>
+    <div class="hint">
+      <b>全局暂停同时停三件事</b>：新许可、新采集（观测）、模型调用。
+      暂停写不进审计也要停住——停住永远是安全的那一侧；而<b>恢复</b>相反，审计必须写在它前面，
+      否则"怎样才能让这台机器放开"就有了一个答案：把审计写坏。
     </div>
     <pre id="select-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
@@ -656,9 +668,7 @@ $("run-loop").onclick = async function () {
       rounds: parseInt($("loop-rounds").value, 10) || 1,
     });
     $("select-out").textContent = JSON.stringify(result, null, 2);
-    result.rounds.forEach(function (round) {
-      log("第 " + round.round + " 轮：" + describeStep(round.outcome), "ok");
-    });
+    log("调度结果：" + describeSchedule(result.schedule), "ok");
   } catch (error) {
     $("select-out").textContent = error.message;
     log("闭环失败：" + error.message, "err");
@@ -666,6 +676,41 @@ $("run-loop").onclick = async function () {
   $("run-loop").disabled = false;
   refresh();
 };
+
+$("pause").onclick = async function () {
+  try {
+    const result = await api("policy/pause", { reason: "界面上按下的暂停" });
+    log("已暂停：" + result.stopped.join("、") + " 都停了", "err");
+  } catch (error) { log("暂停失败：" + error.message, "err"); }
+  refresh();
+};
+
+$("resume-run").onclick = async function () {
+  try {
+    const result = await api("policy/resume", {});
+    log("已恢复" + (result.was ? "（此前：" + result.was + "）" : "") + "。" + result.note, "ok");
+  } catch (error) { log("恢复失败：" + error.message, "err"); }
+  refresh();
+};
+
+function describeSchedule(schedule) {
+  switch (schedule.kind) {
+    case "rounds_spent":
+      return "跑满 " + schedule.rounds + " 轮";
+    case "finished":
+      return "结束：跑 " + schedule.rounds + " 轮后没有可推进的了";
+    case "backed_off":
+      return "退避：跑 " + schedule.rounds + " 轮，末尾连着 " + schedule.idle_rounds + " 轮没有进展";
+    case "paused":
+      return "暂停中：" + schedule.reason + "（跑了 " + schedule.rounds + " 轮就停）";
+    case "needs_input":
+      return "需要输入：" + schedule.missing.join("；");
+    case "needs_approval":
+      return "等人工批准：" + schedule.reason;
+    default:
+      return schedule.kind;
+  }
+}
 
 function describeStep(outcome) {
   switch (outcome.kind) {

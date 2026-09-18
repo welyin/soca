@@ -1058,6 +1058,106 @@ fn approving_does_not_by_itself_execute_anything() {
 }
 
 #[test]
+fn the_loop_reports_why_the_scheduler_stopped() {
+    // "跑一段"的返回值要说明**为什么停**。否则界面上只有"跑了 N 轮"，而"没有目标了"
+    // 与"连续空转"与"被暂停"三件事看起来一模一样——而它们接下来该做的事完全不同。
+    let mut subject = subject();
+    let payload = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 4})),
+    ));
+    assert_eq!(payload["schedule"]["kind"], "finished", "没有目标时一轮就停");
+    assert_eq!(payload["schedule"]["rounds"], 1);
+
+    call(
+        &mut subject,
+        "POST",
+        "/api/policy/pause",
+        &body(json!({"reason": "演示"})),
+    );
+    let payload = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 4})),
+    ));
+    assert_eq!(payload["schedule"]["kind"], "paused");
+    assert_eq!(payload["schedule"]["rounds"], 0, "一暂停就一轮也不跑");
+}
+
+#[test]
+fn pausing_stops_collection_and_egress_and_resuming_lifts_it() {
+    // §12.1：暂停要停**三件事**，而恢复只作用于之后。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        r#"{"message":"核对摘要"}"#,
+    );
+
+    let paused = json(&call(
+        &mut subject,
+        "POST",
+        "/api/policy/pause",
+        &body(json!({"reason": "演示"})),
+    ));
+    assert_eq!(paused["paused"], true);
+    assert_eq!(
+        paused["stopped"].as_array().expect("数组").len(),
+        3,
+        "许可、采集、模型调用三件事一起停：{paused}"
+    );
+
+    // 采集那一条：423 说的是"现在是锁着的"，与 403 那句"你没有这个权限"不是一回事——
+    // 一个去按恢复，一个去重新授权。
+    let locked = call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+    assert_eq!(locked.status, 423, "实际：{}", locked.body);
+
+    // 外发那一条。
+    let goal_id = json(&call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        r#"{"message":"再核对一次"}"#,
+    ))["goal_id"]
+        .as_str()
+        .expect("有标识")
+        .to_string();
+    let blocked = call(
+        &mut subject,
+        "POST",
+        "/api/consult",
+        &body(json!({"goal_id": goal_id})),
+    );
+    assert_eq!(blocked.status, 423, "实际：{}", blocked.body);
+
+    let resumed = json(&call(
+        &mut subject,
+        "POST",
+        "/api/policy/resume",
+        &body(json!({})),
+    ));
+    assert_eq!(resumed["paused"], false);
+    assert_eq!(resumed["was"], "演示", "要说得出之前是谁停的");
+
+    let ok = call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+    assert_eq!(ok.status, 200, "恢复之后又能观测：{}", ok.body);
+}
+
+#[test]
 fn an_invalid_risk_level_is_refused() {
     let mut subject = subject();
     assert_eq!(

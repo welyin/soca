@@ -10,8 +10,9 @@ use soca_contracts::{
     ExplorationQuota, GoalBudget, GoalId, GoalState, GrantScope, MemoryId, PermissionScope,
     SelectionPolicy, Sha256Hex, UserChannel, WallClock,
 };
-use soca_core::{CoreError, RetentionPolicy, RoundOutcome, Subject};
+use soca_core::{CoreError, RetentionPolicy, Scheduler, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
+use soca_storage::audit::AuditCategory;
 
 use crate::http::{Request, Response};
 use crate::model::ConsoleModel;
@@ -64,6 +65,11 @@ pub fn handle(
         ("POST", "/api/approve") => grant_approval(subject, request, at),
         ("POST", "/api/resume") => resume_goal(subject, request, at),
         ("POST", "/api/body") => body(subject, request, at),
+        // 与 `/api/resume` 分开：那一个是"目标等到了批准，放它走"，这一个是
+        // "整台机器停/动"。两者的作用域差着一个数量级，共用一个路径会让调用方
+        // 以为自己放开的是一个目标，而实际上放开的是全部。
+        ("POST", "/api/policy/pause") => pause(subject, request, at),
+        ("POST", "/api/policy/resume") => resume(subject, request, at),
         ("POST", "/api/loop") => run_loop(subject, request, at),
         ("POST", "/api/select") => select_ladder(subject, request, at),
         ("POST", "/api/chat") => chat(subject, request, at),
@@ -235,6 +241,11 @@ fn observe(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
             403,
             &json!({"error": "capability_revoked", "capability": capability}),
         ),
+        // 暂停也不是故障，而且是**暂时**的：423 说的是"现在是锁着的"，与 403
+        // 那句"你没有这个权限"不同。两者的处置完全不一样——一个去按恢复，一个去重新授权。
+        Err(CoreError::Paused { reason }) => {
+            Response::json(423, &json!({"error": "paused", "reason": reason}))
+        }
         Err(error) => internal(error.to_string()),
     }
 }
@@ -353,6 +364,10 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
             )
         }
         Err(soca_core::CoreError::GoalNotFound { .. }) => Response::text(404, "没有这个目标"),
+        // 同 observe：暂停不是故障，而且是暂时的。
+        Err(soca_core::CoreError::Paused { reason }) => {
+            Response::json(423, &json!({"error": "paused", "reason": reason}))
+        }
         Err(soca_core::CoreError::Contract(error)) => {
             Response::json(409, &json!({"error": "refused", "detail": error.to_string()}))
         }
@@ -740,38 +755,82 @@ fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response
         .unwrap_or(1)
         .clamp(1, 32) as i64;
 
-    let policy = SelectionPolicy::default();
-    let mut reports = Vec::new();
-    for index in 0..rounds {
-        // 每一轮的时刻往后挪一秒。同一时刻连推多轮会让审计账里的时间序看起来像同一件事，
-        // 而"先观测、后得出结论"这个顺序正是靠时间序读出来的。
-        let report = match subject.run_round(&policy, risk, at.plus_seconds(index + 1)) {
-            Ok(report) => report,
-            Err(error) => {
-                return Response::json(
-                    500,
-                    &json!({"error": "round_failed", "detail": error.to_string()}),
-                );
-            }
-        };
-        let finished = matches!(report.outcome, RoundOutcome::Finished { .. });
-        reports.push(json!({
-            "round": report.round,
-            "outcome": report.outcome,
-            "selected": report.selected,
-            "activations": report.activations,
-        }));
-        if finished {
-            break;
-        }
-    }
+    // 交给调度器，而不是在这里自己数轮数。§4.1 L4 那一格里的判断——暂停优先、空转退避、
+    // 有界——只有一份实现，否则界面上的行为与程序里的行为会各有一套。
+    //
+    // 每一轮的细节不进这个响应：它们在事件账与审计账里（§9.1"事件账记来源"）。
+    // 在这里再抄一份，就成了第三份"发生了什么"，而三份迟早对不上。
+    let scheduler = Scheduler {
+        max_rounds: rounds as u32,
+        idle_limit: payload
+            .get("idle_limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(3)
+            .clamp(1, 16) as u32,
+    };
 
+    match scheduler.run(subject, &SelectionPolicy::default(), risk, at) {
+        Ok(report) => Response::json(
+            200,
+            &json!({
+                "risk": risk.as_str(),
+                "schedule": report.outcome,
+                "rounds": report.rounds,
+                "state": subject.public_state(at).ok(),
+            }),
+        ),
+        Err(error) => Response::json(
+            500,
+            &json!({"error": "round_failed", "detail": error.to_string()}),
+        ),
+    }
+}
+
+/// §12.1 的全局暂停。
+fn pause(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let payload = body_json(request).unwrap_or(Value::Null);
+    let reason = payload
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("用户按下暂停")
+        .to_string();
+    subject.policy_mut().pause(reason.clone());
+    // §12.2 要求"审计写失败时默认拒绝新副作用"。这一条**故意**反过来：暂停是**更严**的那一步，
+    // 而停住永远是安全的那一侧——写不进审计，也要先停下。把顺序倒过来（先审计、失败就不停）
+    // 会让"怎样才能让这台机器停不下来"有了一个答案：把审计写坏。
+    let _ = subject.audit(at, AuditCategory::PolicyChanged, "subject", "paused", &reason);
     Response::json(
         200,
         &json!({
-            "risk": risk.as_str(),
-            "rounds": reports,
-            "state": subject.public_state(at).ok(),
+            "paused": true,
+            "reason": reason,
+            // 这三件事**同时**停了。只报"已暂停"而不说停到了哪一层，用户会以为
+            // 只是不能再写文件，而实际上采集和模型调用也停了。
+            "stopped": ["新许可", "新采集（观测）", "模型调用"],
+        }),
+    )
+}
+
+/// 恢复。§12.1 的暂停是可逆的。
+fn resume(subject: &mut Subject, _request: &Request, at: WallClock) -> Response {
+    let was = subject.policy().pause_reason().map(str::to_string);
+    // 与暂停相反：恢复是**更宽松**的那一步，所以审计必须写在它前面。§12.2 那句
+    // "审计写失败时默认拒绝新副作用"的落点正在这里——放开一个已经停住的东西之前，
+    // 得先有一条记录说明是谁、在什么时候放的。
+    if let Err(error) =
+        subject.audit(at, AuditCategory::PolicyChanged, "subject", "resumed", "恢复运行")
+    {
+        return internal(error.to_string());
+    }
+    subject.policy_mut().resume();
+    Response::json(
+        200,
+        &json!({
+            "paused": false,
+            "was": was,
+            // 恢复**不等于**把暂停期间错过的补回来。§12.1 的原话是"已发生副作用只能核对、
+            // 补偿或由用户处理，不能承诺倒转现实"——恢复只是允许新的动作。
+            "note": "恢复只作用于之后；暂停期间该发生而没发生的事不会自动补做",
         }),
     )
 }

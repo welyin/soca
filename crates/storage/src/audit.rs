@@ -50,6 +50,12 @@ pub enum AuditCategory {
     /// 与 [`AuditCategory::PermitRefused`] 分开记录，是因为它们对"接下来该做什么"的含义
     /// 完全不同：一个是等外部输入，另一个是此路不通。
     ApprovalRequired,
+    /// 策略被改动：全局暂停、恢复、范围调整（§12.1）。
+    ///
+    /// 暂停与恢复记在**同一个类别**下，靠 `outcome` 区分。它们不是两件事的两种，
+    /// 而是同一件事的两个方向——而"谁在什么时候把机器停了、什么时候放开"要连起来读
+    /// 才有意义，分成两个类别反而要人去拼。
+    PolicyChanged,
     /// 授予了一次能力授权（§12.1）。
     ///
     /// 与 [`AuditCategory::CapabilityRevoked`] 成对：只记撤回不记授予的话，审计只能回答
@@ -87,6 +93,7 @@ impl AuditCategory {
             Self::PermitRefused => "permit_refused",
             Self::ApprovalGranted => "approval_granted",
             Self::ApprovalRequired => "approval_required",
+            Self::PolicyChanged => "policy_changed",
             Self::CapabilityGranted => "capability_granted",
             Self::CapabilityRevoked => "capability_revoked",
             Self::CapabilityDenied => "capability_denied",
