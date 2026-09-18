@@ -131,6 +131,7 @@ fn bundle_with_one_evidence() -> ContextBundle {
             evidence_ref: EvidenceRef::new("obs:real-1").expect("固定证据"),
             subject_ref: "file:summary.md".to_string(),
             observed_value: "sha256:aaa".to_string(),
+            body: None,
             data_class: DataClass::Public,
         }],
         vec![BeliefSummary {

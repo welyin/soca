@@ -117,6 +117,12 @@ pub struct RevocationReport {
     /// 与上一条分开报，是因为它们是撤回的两个不同后果，而只有前者时看起来像已经做完了。
     /// 记忆是"已经下过的结论"，簇手里的证据是"还能拿来下结论的材料"。
     pub evidence_retracted: usize,
+    /// 有多少条证据因此被**移出主体自己的证据池**，也就是不再可能进入模型上下文。
+    ///
+    /// 第三份名单。台账管"还能不能拿来下结论"，池子管"还能不能给模型看"，记忆管
+    /// "已经下过的结论还算不算"。三件事，一处不做就漏一处——而池子那一处漏得最安静：
+    /// L3 的检验事后会说"这条引用已不可用"，但那时材料已经出过一次境了。
+    pub context_evidence_removed: usize,
     /// 当前等着清理的记忆条数。
     pub awaiting_purge: usize,
 }
@@ -705,10 +711,34 @@ impl Subject {
             evidence_ref: evidence_ref.clone(),
             subject_ref: subject.clone(),
             observed_value: value.clone(),
+            // 正文**现在不抄进池子**，到编译上下文时才按引用去内容仓取。理由见
+            // [`Subject::evidence_with_bodies`]。
+            body: None,
             data_class,
         });
         self.cluster.observe(&envelope, at)?;
         Ok(record)
+    }
+
+    /// 给证据池补上正文（§9.3）。
+    ///
+    /// 正文**按引用现取**，而不是在观测那一刻就抄进池子。池子是一个有界的近期窗口
+    /// （[`MAX_CONTEXT_EVIDENCE`] 条），让它长期持有正文，等于把"不无限复制"这条要求从后门
+    /// 放回来：一份 4 KiB 的正文乘上 64 条就是 256 KiB 常驻内存，而其中绝大多数永远用不到。
+    ///
+    /// 读不出来就**失败**，不吞掉。§9.3 那句"已有引用指向缺失对象时返回可诊断缺失，不能伪造
+    /// 证据"说的正是这里：把一次读失败悄悄换成一个 `None`，模型看到的是一份"这条证据没有正文"
+    /// 的上下文，于是它会照常下断言——而那条证据其实是坏的。
+    fn evidence_with_bodies(&self) -> Result<Vec<EvidenceSlice>, CoreError> {
+        self.observed
+            .iter()
+            .map(|slice| {
+                Ok(EvidenceSlice {
+                    body: self.observed_body(&slice.evidence_ref)?,
+                    ..slice.clone()
+                })
+            })
+            .collect()
     }
 
     /// 取回一次观测的正文（§9.3）。
@@ -781,6 +811,23 @@ impl Subject {
         self.goals.activate(goal_id)?;
 
         let candidates = self.cluster.propose(at)?;
+        let evidence = self.evidence_with_bodies()?;
+        let available: Vec<&EvidenceRef> = evidence
+            .iter()
+            .map(|slice| &slice.evidence_ref)
+            .collect();
+        let grounded =
+            |refs: &[EvidenceRef]| refs.iter().all(|reference| available.contains(&reference));
+
+        // 只带上**依据还在手上**的信念。
+        //
+        // §7.2 的"引用必须能解析为仍可访问的证据"落在这里，而 §8 的那条是它的另一半：
+        // "模型的全部输出都必须能回引证据"。一条建立在已撤回证据上的结论交给模型，
+        // 等于让它引用一条它看不到的东西。
+        //
+        // **过滤，而不是让编译失败。** 一条失去依据的结论不该把整次咨询拖掉，它只是不再算数。
+        // `ContextBundle::validate` 的 `EvidenceNotInContext` 是最后一道防线，不是第一道——
+        // 走到那里时表现是"整次咨询报错"，而原因（某条信念没了依据）从错误里看不出来。
         let belief: Vec<BeliefSummary> = candidates
             .candidates
             .iter()
@@ -788,7 +835,7 @@ impl Subject {
                 Candidate::Claim {
                     statement,
                     evidence_refs,
-                } => Some(BeliefSummary {
+                } if grounded(evidence_refs) => Some(BeliefSummary {
                     statement: statement.clone(),
                     evidence_refs: evidence_refs.clone(),
                 }),
@@ -797,10 +844,15 @@ impl Subject {
             .collect();
 
         // §8 的"过去动作结果"来自动作账，不是来自本模块自己记的一份计数器。
+        //
+        // 同样只带上依据还在的那些：历史结果引用的是**观测**，而观测会因撤回而失效。
+        // 留下一条引用着不存在观测的历史，会让整份上下文过不了校验——而那和"这段历史
+        // 没有依据"是同一件事的两种表现，应当在前者就解决掉。
         let past_outcomes: Vec<ActionOutcomeSlice> = self
             .store
             .recent_outcomes(16)?
             .into_iter()
+            .filter(|record| grounded(&record.observation_refs))
             .map(|record| ActionOutcomeSlice {
                 action_id: record.action_id,
                 tool_id: record.tool_id,
@@ -820,7 +872,7 @@ impl Subject {
         let deadline = goal.deadline.unwrap_or_else(|| at.plus_seconds(600));
         let input = ContextInput {
             goal: goal.statement.clone(),
-            evidence: self.observed.clone(),
+            evidence,
             belief,
             past_outcomes,
             capabilities,
@@ -1443,13 +1495,28 @@ impl Subject {
             .cluster
             .retract_evidence(&affected, "capability_revoked");
 
+        // 第三处：**主体自己的证据池**。
+        //
+        // 这一处此前是漏的，而它漏得最安静：簇的台账已经作废了那些证据，但池子是主体手上
+        // 的另一份名单，而**上下文编译读的是池子**。于是撤回之后，模型照样会看到那些证据，
+        // 照样会引用它们——L3 的检验随后会说"这条引用已不可用"（上一项做好的那条通路），
+        // 但那是**事后**：材料已经出过一次境了。
+        //
+        // 顺带说清它与上面两处分工：台账管"还能不能拿来下结论"，池子管"还能不能给模型看"，
+        // 记忆管"已经下过的结论还算不算"。三份名单、三件事，一处不做就漏一处。
+        let pooled_before = self.observed.len();
+        self.observed
+            .retain(|slice| !affected.contains(&slice.evidence_ref));
+        let pooled_retracted = pooled_before.saturating_sub(self.observed.len());
+
         self.store.audit(
             at,
             AuditCategory::CapabilityRevoked,
             capability.as_str(),
             "revoked",
             &format!(
-                "撤回授权：覆盖 {} 个事件、失效 {} 条记忆、撤回 {evidence_retracted} 条在库证据{}",
+                "撤回授权：覆盖 {} 个事件、失效 {} 条记忆、撤回 {evidence_retracted} 条在库证据、\
+                 移出 {pooled_retracted} 条上下文证据{}",
                 events.len(),
                 invalidated,
                 if was_granted {
@@ -1465,6 +1532,7 @@ impl Subject {
             events_covered: events.len(),
             memories_invalidated: invalidated,
             evidence_retracted,
+            context_evidence_removed: pooled_retracted,
             awaiting_purge: self.store.tombstoned_memory_count()?,
         })
     }

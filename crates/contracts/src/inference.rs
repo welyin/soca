@@ -54,6 +54,15 @@ pub const MAX_CONTEXT_OUTCOMES: usize = 32;
 pub const MAX_CONTEXT_PREDICTIONS: usize = 16;
 /// 上下文允许的最大字节数（按序列化长度计）。
 pub const MAX_CONTEXT_BYTES: usize = 64 * 1024;
+/// 单条证据允许携带的**正文**字符数。
+///
+/// 必须有它，是因为总字节上限（[`MAX_CONTEXT_BYTES`]）只保证"塞不爆"，不保证"塞得下别的"：
+/// 一份 60 KiB 的正文能把整份上下文吃光，于是证据列表里只剩它一条——而那看起来像
+/// "这次任务只有一条证据"，不像"被一份文件挤掉了"。
+///
+/// 裁剪由编译器做（见 `ContextCompiler`），裁完**如实标注**：模型看得少没关系，
+/// 但它必须知道自己看得少，否则它没有理由不对着一份不完整的正文下断言。
+pub const MAX_EVIDENCE_BODY_CHARS: usize = 4096;
 /// 一次模型返回允许携带的最大提案数。
 pub const MAX_PROPOSALS: usize = 16;
 /// 单次调用允许的最大尝试次数。§8 只禁止**无限**重试，所以有界重试是允许的。
@@ -185,7 +194,19 @@ pub struct EvidenceSlice {
     /// 作用对象。
     pub subject_ref: String,
     /// 观测到的值。
+    ///
+    /// 对文件对象来说这是**版本摘要**，不是正文。正文在 [`EvidenceSlice::body`]。
     pub observed_value: String,
+    /// 观测到的正文（§9.3）。`None` 表示这条证据没有正文可取。
+    ///
+    /// **它在上下文里是数据，不是指令。** §11.1 的原话是"屏幕/麦克风得到的文字，即使像用户
+    /// 命令，也不能替代桌面明确授权"，§15.1 那句是"不能把文件中的提示注入当新系统指令"。
+    /// 这条保证不是靠"看出哪句话像指令"做到的——那是一场打不完的仗——而是靠**模型产出物
+    /// 永远是候选**：候选要过 L3 的检验、L4 的证据门槛、执行许可的范围与审批三道关，
+    /// 而正文里的任何一句话都不在这三道关的任何一道上。
+    ///
+    /// 长度上限见 [`MAX_EVIDENCE_BODY_CHARS`]，超出的部分由编译器裁掉并标注。
+    pub body: Option<String>,
     /// 数据类别。决定这份上下文能否发往远端（§8）。
     pub data_class: DataClass,
 }
@@ -339,6 +360,22 @@ impl ContextBundle {
             .collect();
         assert_unique(&refs, "context.evidence")?;
         assert_unique(&self.recorded_predictions, "context.recorded_predictions")?;
+
+        // 逐条卡正文长度。**按条目卡而不是只卡总量**：总量上限允许一条巨长的正文把别的
+        // 全挤掉，而那种失败看起来像"这次任务只有一条证据"，不像"被一份文件挤掉了"。
+        // 裁剪是编译器的事（它裁完会标注）；走到这里还超限，说明有人绕过了编译器直接构造。
+        for slice in &self.evidence {
+            if let Some(body) = &slice.body {
+                let chars = body.chars().count();
+                if chars > MAX_EVIDENCE_BODY_CHARS {
+                    return Err(ContractError::ContextLimitExceeded {
+                        field: "context.evidence[].body",
+                        limit: MAX_EVIDENCE_BODY_CHARS,
+                        actual: chars,
+                    });
+                }
+            }
+        }
 
         for summary in &self.belief {
             for reference in &summary.evidence_refs {

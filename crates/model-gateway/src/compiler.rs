@@ -15,7 +15,7 @@
 use soca_contracts::{
     ActionOutcomeSlice, BeliefSummary, CapabilitySlice, ContextBundle, ContractError, EgressPolicy,
     EvidenceRef, EvidenceSlice, ModelBackend, OutputSchema, PredictionRef, WallClock,
-    MAX_CONTEXT_EVIDENCE,
+    MAX_CONTEXT_EVIDENCE, MAX_EVIDENCE_BODY_CHARS,
 };
 
 use crate::error::GatewayError;
@@ -160,6 +160,39 @@ impl ContextCompiler {
             selected.push(slice.clone());
         }
 
+        // 正文按**每条**上限裁剪，而不是"总量超了再丢证据"。两者的差别很实：丢证据会让被
+        // 引用的结论失去依据（[`ContextBundle::validate`] 会直接拒绝），而裁正文只是让模型
+        // 看得少一点——且它看得见自己看得少，标注就在文末。
+        for slice in &mut selected {
+            if let Some(body) = slice.body.take() {
+                slice.body = Some(bound_body(&body));
+            }
+        }
+
         Ok(selected)
     }
+}
+
+/// 裁剪标记。
+///
+/// 它必须落进**模型读得到的那段文字**里，而不是只留在某个字段上：模型要判断"我对这份正文
+/// 有没有看全"，靠的就是它读到的内容本身。写在一个旁边没人看的 flag 上，等于让模型
+/// 有理由对着一份不完整的正文下断言，而它并不知道自己不完整。
+const TRUNCATION_NOTE: &str = "\n…（原文更长，此处已截断）";
+
+/// 把正文裁到 [`MAX_EVIDENCE_BODY_CHARS`] 之内，超出时如实标注。
+///
+/// 标注**算在上限之内**：先留出它的长度再裁正文。不这么做的话，裁完加上标注又超了，
+/// 而契约层的硬上限会因此拒绝一份本来合法的上下文——那种失败会表现成
+/// "编译器裁过了，却还是过不了校验"，而原因和"裁"这个动作看不出关系。
+fn bound_body(body: &str) -> String {
+    // 先看它本来就装不装得下。少了这一步，一份**刚好等于上限**的正文也会被裁掉一截再贴上
+    // "已截断"——模型于是以为原文更长，而它其实完整地看到了。
+    if body.chars().count() <= MAX_EVIDENCE_BODY_CHARS {
+        return body.to_string();
+    }
+    let note_chars = TRUNCATION_NOTE.chars().count();
+    let budget = MAX_EVIDENCE_BODY_CHARS.saturating_sub(note_chars);
+    let kept: String = body.chars().take(budget).collect();
+    format!("{kept}{TRUNCATION_NOTE}")
 }

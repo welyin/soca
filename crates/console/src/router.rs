@@ -314,6 +314,26 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
                     "attempts": consultation.attempts,
                     "goal": consultation.context.goal,
                     "evidence_given": consultation.context.evidence.len(),
+                    // 模型**实际看到**的证据，含正文。
+                    //
+                    // 这一份里的正文与 `/api/body` 那份是同一个东西的两种取法，用途不同：
+                    // 那个是"按引用取回内容"，这个是"看模型看到了什么"。后者是把上下文摊开
+                    // 给人看——而"正文只出现在 evidence 这一位上"正是 §11.1 那条边界的形状，
+                    // 摊开才看得出它有没有被守住。
+                    "evidence": consultation
+                        .context
+                        .evidence
+                        .iter()
+                        .map(|slice| {
+                            json!({
+                                "evidence_ref": slice.evidence_ref.to_string(),
+                                "subject_ref": slice.subject_ref,
+                                "observed_value": slice.observed_value,
+                                "data_class": slice.data_class.as_str(),
+                                "body": slice.body,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
                     "past_outcomes_given": consultation.context.past_outcomes.len(),
                     "allowed_candidates": consultation
                         .context
@@ -432,6 +452,8 @@ fn revoke_capability(subject: &mut Subject, request: &Request, at: WallClock) ->
                 // 撤回的第二个后果（§7.2）：簇手里"还能拿来下结论的材料"也失效了。
                 // 与上一条分开报，因为只有上一条时看起来像已经做完了。
                 "evidence_retracted": report.evidence_retracted,
+                // 第三份名单：不再可能进入模型上下文的那几条。
+                "context_evidence_removed": report.context_evidence_removed,
                 "awaiting_purge": report.awaiting_purge,
                 "granted": subject
                     .granted_capabilities()

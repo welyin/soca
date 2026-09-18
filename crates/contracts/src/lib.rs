@@ -77,8 +77,8 @@ pub use crate::inference::{
     ActionOutcomeSlice, BeliefSummary, CandidateKind, CapabilitySlice, ContextBundle,
     EvidenceSlice, ModelBudget, ModelOutput, ModelProposal, OutputSchema, TokenUsage,
     CONTEXT_SCHEMA_VERSION, MAX_CONTEXT_BELIEFS, MAX_CONTEXT_BYTES, MAX_CONTEXT_EVIDENCE,
-    MAX_CONTEXT_OUTCOMES, MAX_CONTEXT_PREDICTIONS, MAX_MODEL_ATTEMPTS, MAX_PROPOSALS,
-    MODEL_OUTPUT_SCHEMA_VERSION,
+    MAX_CONTEXT_OUTCOMES, MAX_CONTEXT_PREDICTIONS, MAX_EVIDENCE_BODY_CHARS, MAX_MODEL_ATTEMPTS,
+    MAX_PROPOSALS, MODEL_OUTPUT_SCHEMA_VERSION,
 };
 pub use crate::ids::{
     ActionId, ApprovalId, BlobRef, BootId, BudgetRef, CapabilityPolicyRef, DomainId, EventId,

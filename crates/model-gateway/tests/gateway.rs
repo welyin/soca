@@ -36,7 +36,16 @@ fn slice(name: &str, subject: &str, value: &str, class: DataClass) -> EvidenceSl
         evidence_ref: evidence_ref(name),
         subject_ref: subject.to_string(),
         observed_value: value.to_string(),
+        body: None,
         data_class: class,
+    }
+}
+
+/// 带正文的一条证据。
+fn slice_with_body(name: &str, body: &str) -> EvidenceSlice {
+    EvidenceSlice {
+        body: Some(body.to_string()),
+        ..slice(name, "file:x", "sha256:aaa", DataClass::Public)
     }
 }
 
@@ -223,6 +232,36 @@ fn compilation_fails_rather_than_dropping_cited_evidence() {
             ..
         }))
     ));
+}
+
+#[test]
+fn a_body_over_the_cap_is_truncated_and_marked_within_the_cap() {
+    // 裁剪只在**超出上限时**发生，而且标注算在上限之内。
+    //
+    // 后半句是这一条的重点：留出标注的长度再裁正文，否则裁完加上标注又超了，契约层的硬上限
+    // 会因此拒绝一份本来合法的上下文——而那种失败会表现成"编译器裁过了，却还是过不了校验"，
+    // 和"裁"这个动作看不出关系。
+    let exact = "x".repeat(soca_contracts::MAX_EVIDENCE_BODY_CHARS);
+    let compiler = ContextCompiler::new(ModelBackend::Cpu, false);
+
+    let untouched = compiler
+        .compile(input(vec![slice_with_body("1", &exact)], Vec::new()))
+        .expect("刚好等于上限的正文不该被裁");
+    assert_eq!(
+        untouched.evidence[0].body.as_deref().map(str::len),
+        Some(exact.len()),
+        "等于上限就不算超"
+    );
+
+    let long = "y".repeat(soca_contracts::MAX_EVIDENCE_BODY_CHARS + 1);
+    let truncated = compiler
+        .compile(input(vec![slice_with_body("1", &long)], Vec::new()))
+        .expect("超一个字符就要裁，而不是报错");
+    let body = truncated.evidence[0].body.as_deref().expect("有正文");
+    assert!(body.chars().count() <= soca_contracts::MAX_EVIDENCE_BODY_CHARS);
+    assert!(body.starts_with('y'), "截的是尾部");
+    assert!(body.contains("已截断"), "而且模型要知道自己看得少：{body}");
+    assert!(truncated.validate().is_ok(), "裁完必须仍然过得了校验");
 }
 
 #[test]
