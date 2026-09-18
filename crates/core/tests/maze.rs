@@ -14,7 +14,7 @@
 
 use soca_core::maze::{play_through_actions, run_episode, RunPath};
 use soca_contracts::{
-    ModelBackend, ModelBudget, ModelVersion, SubjectId, WallClock,
+    CapabilityPolicyRef, ModelBackend, ModelBudget, ModelVersion, SubjectId, WallClock,
 };
 use soca_core::{ActionBroker, SimulatedOs, Subject};
 use soca_core_actors::DesktopAndFilesCluster;
@@ -31,6 +31,10 @@ fn at(offset: i64) -> WallClock {
 
 fn store() -> Store {
     Store::open_in_memory(at(0)).expect("内存存储")
+}
+
+fn owner() -> SubjectId {
+    SubjectId::new("user:local").expect("固定主体")
 }
 
 /// 一个带守望文件的主体。守望文件不是摆设：簇会围绕它提候选，于是游戏动作
@@ -181,6 +185,91 @@ fn the_agent_path_pays_every_toll_on_the_way() {
             .iter()
             .map(|step| step.rounds_waited)
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn what_it_learned_becomes_memory_and_the_two_counts_converge() {
+    // §15.2 那句"同一 L1 记忆"。
+    //
+    // 判据不是"它记住了一些东西"，而是**两个数收敛**：认得的格子数，与在册的格子记忆条数。
+    // 一格一条。不等于就说明有一格没记上（那正是探索器有个私有字典的样子），
+    // 或者有一条重复（那是"同一格反复被看见攒出多条"的样子）。
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("走一局");
+
+    assert!(run.memories > 0, "一步都没往记忆里记");
+    let active_cells = subject
+        .store()
+        .recall(&owner(), None, at(0))
+        .expect("召回")
+        .into_iter()
+        .filter(|entry| entry.claim.starts_with("迷宫格"))
+        .count();
+    assert_eq!(
+        active_cells,
+        run.map.len(),
+        "认得的格子数 {} 与在册的格子记忆条数 {active_cells} 对不上——一格一条",
+        run.map.len()
+    );
+
+    // 而其中**确实**有被取代过的一条：门被打开了。世界变了，记忆该跟着变，
+    // 而不是同时留着"门是关的"和"门是开的"两条等着人去分辨。
+    let door_revisions = subject
+        .store()
+        .recall(&owner(), None, at(0))
+        .expect("召回")
+        .into_iter()
+        .filter(|entry| entry.claim.contains("door"))
+        .map(|entry| entry.revision)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        door_revisions >= 2,
+        "门开过之后，那条记忆该是第 2 版（实际最高 {door_revisions} 版）"
+    );
+}
+
+#[test]
+fn revoking_the_capability_takes_back_what_was_learned_through_it() {
+    // §12.1 的"撤回立即生效"，对**知识**也成立。
+    //
+    // 每一格都是从某一次观测里看出来的，而那次观测属于 `cap:game-step` 这个范围。
+    // 撤回它，那些观测失效，于是从它们推出来的格子记忆一起失效——
+    // §12.1 要的"立即生效"于是不只是"不能做新动作"，还包括"不能接着用旧知识"。
+    //
+    // 这条推论只有在格子**真的**是记忆、而且**真的**指回那次观测时才成立。
+    // 探索器里那个进程内的字典在这里会安静地什么也不变。
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("走一局");
+    let before = subject
+        .store()
+        .recall(&owner(), None, at(0))
+        .expect("召回")
+        .into_iter()
+        .filter(|entry| entry.claim.starts_with("迷宫格"))
+        .count();
+    assert_eq!(before, run.map.len());
+
+    let capability = CapabilityPolicyRef::new("cap:game-step").expect("固定能力策略");
+    let report = subject
+        .revoke_capability(&capability, at(900))
+        .expect("撤回");
+    assert!(
+        report.memories_invalidated > 0,
+        "撤回能力应当连带让派生记忆失效：{report:?}"
+    );
+
+    let after = subject
+        .store()
+        .recall(&owner(), None, at(0))
+        .expect("召回")
+        .into_iter()
+        .filter(|entry| entry.claim.starts_with("迷宫格"))
+        .count();
+    assert!(
+        after < before,
+        "撤回之后仍然认得 {after} 格（撤回前 {before} 格）——那些知识没有跟着失效"
     );
 }
 

@@ -1381,6 +1381,7 @@ fn granting_an_approval_lets_the_round_execute_and_verify() {
                     permit_id,
                     receipt,
                     verdict,
+                    ..
                 },
         } => {
             assert_eq!(ran, &action_id.to_string());

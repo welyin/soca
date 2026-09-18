@@ -38,7 +38,8 @@ use soca_contracts::{
     EvidenceSlice, Expectation, ExplorationQuota, GameAction, GameKind, GrantScope, GoalBudget,
     GoalId, GoalStack,
     GoalState, HoldoutSet, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
-    MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
+    MemoryKind, MemoryStatus, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic,
+    Observation,
     OutputSchema, PayloadRef, Percept, PermitId, PermissionScope, PredictionRef, Provenance,
     ResourceCost,
     ResourceScope, RetryWhen, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId,
@@ -309,6 +310,13 @@ pub enum AdvanceStep {
         receipt: String,
         /// 后置条件判定。`None` 表示结果未知或未执行。
         verdict: Option<String>,
+        /// 回执之后那次观测的证据引用。
+        ///
+        /// 它是**这一步产生的证据**，而调用方要拿它把"从这一步推出来的结论"记进 L1
+        /// 并指回原始事件（§7.1）。不给的话，调用方只有两条路：自己再观测一次
+        /// （同一件事发生两次，账上多一条），或者编一个引用（那是假的溯源）。
+        /// `None` 表示这一步没有产生观测：回执是失败或未知。
+        evidence_ref: Option<String>,
     },
     /// 需要一次人工批准（§12.1）。目标已转入等待审批。
     NeedsApproval {
@@ -1681,6 +1689,120 @@ impl Subject {
         Ok(action_id)
     }
 
+    /// 把从某一步里认出来的格子记进 L1（§15.2 的"同一 L1 记忆"）。
+    ///
+    /// `cells` 的每一项是 `(格子引用, 断言)`——引用形如 `<回合>#<行>,<列>`，由调用方给，
+    /// 因为**怎么称呼一个格子是那个领域的约定**，不是记忆层的。断言则是要写给人看的那句话。
+    ///
+    /// ## 为什么这些格子该是记忆，而不是探索器的一个字典
+    ///
+    /// 因为它们的**来路**要算数：每一格都是从某一次观测里看出来的，而那次观测属于某个
+    /// 能力范围。记成记忆并指回那条原始事件之后，撤回那次能力会连带让这些格子失效——
+    /// §12.1 的"撤回立即生效"于是对**知识**也成立，而不只是对**动作**。
+    /// 放在一个进程内的字典里，撤回之后它照样认得那些路。
+    ///
+    /// ## 条目标识只由**格子**派生
+    ///
+    /// 不是一个格子一条记忆、而是**一格一条**：一个格子只有一个当前状态。三种情形：
+    ///
+    /// * 没有过 → 记一条；
+    /// * 有、而且**说的一样** → 什么也不做（幂等：一局 24 步、64 格，不会攒出 64×24 条）；
+    /// * 有、而**说的不一样** → **取代**它，因为世界变了（钥匙被拿走、门被打开）。
+    ///
+    /// 第三种是这里唯一有判断的一处，而它必须走 `supersede` 而不是再记一条：
+    /// 两条同时在册的记忆里，"门是关的"与"门是开的"会长得一样新——查的人没有任何依据
+    /// 分辨哪条是对的，而那正是"记忆"这两个字要解决的问题。
+    ///
+    /// 查的是 `memory_including_hidden`：一条被用户删掉的格子不能因为"又看了一遍"而复活
+    /// （§12.3 的删除是终局，与 `Subject::advance` 里对结论的同一处判断一致）。
+    ///
+    /// 返回**真的改变了几条**（新记 + 取代）。
+    pub fn remember_grid_cells(
+        &mut self,
+        cells: &[(String, String)],
+        evidence: &str,
+        at: WallClock,
+    ) -> Result<usize, CoreError> {
+        let reference = EvidenceRef::new(evidence)?;
+        let provenance = self.claim_provenance(std::slice::from_ref(&reference))?;
+        let mut changed = 0usize;
+        for (cell_ref, claim) in cells {
+            // 基础标识只由**格子**派生，于是"这一格改过几次"是一条**取代链**：
+            // `memory:<hash>` → `memory:<hash>-r2` → …，每一环的 `superseded_by` 指向下一环。
+            //
+            // 新版本必须换标识：`insert_entry` 那一条说得很清楚——**记忆标识一旦使用不得复用，
+            // 它是追溯依据的锚点**。同一个标识写两份不同的内容，追溯链就断在最需要它的地方。
+            // 于是"当前是哪一版"这个问题，只能顺着链走到头来回答。
+            let base = MemoryId::new(format!(
+                "memory:{}",
+                Sha256Hex::of_bytes(cell_ref.as_bytes())
+            ))?;
+
+            let mut current_id = base.clone();
+            let mut current = None;
+            loop {
+                let Some(entry) = self.store.memory_including_hidden(&current_id)? else {
+                    break;
+                };
+                match entry.superseded_by.clone() {
+                    Some(next) => current_id = next,
+                    None => {
+                        current = Some(entry);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(entry) = &current
+                && entry.status == MemoryStatus::Active
+                && entry.claim == *claim
+            {
+                continue;
+            }
+
+            match &current {
+                Some(previous) => {
+                    let revision = previous.revision.saturating_add(1);
+                    let entry = MemoryEntry::new(
+                        MemoryId::new(format!("{base}-r{revision}"))?,
+                        MemoryKind::Fact,
+                        self.owner.clone(),
+                        Some(self.task.clone()),
+                        claim.clone(),
+                        vec![reference.clone()],
+                        provenance.clone(),
+                        DataClass::Personal,
+                        at,
+                    )?
+                    .with_unit(self.cluster.unit_id().clone())
+                    // 取代关系要显式声明：不声明的话旧条目会永远停在 ACTIVE
+                    // （`Store::supersede` 的那条断言）。
+                    .superseding(previous.memory_id.clone(), revision);
+                    self.store.supersede(&previous.memory_id, entry)?;
+                    changed = changed.saturating_add(1);
+                }
+                None => {
+                    let entry = MemoryEntry::new(
+                        base.clone(),
+                        MemoryKind::Fact,
+                        self.owner.clone(),
+                        Some(self.task.clone()),
+                        claim.clone(),
+                        vec![reference.clone()],
+                        provenance.clone(),
+                        DataClass::Personal,
+                        at,
+                    )?
+                    .with_unit(self.cluster.unit_id().clone());
+                    if self.store.record_memory(&entry)? {
+                        changed = changed.saturating_add(1);
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+
     /// 当前这一局的公开感知。**操作员视角**：它读的是执行器里的正文，不进事件账。
     pub fn game_percept(&self) -> Option<Percept> {
         self.broker.game().and_then(GameOs::percept)
@@ -2076,6 +2198,12 @@ impl Subject {
                     permit_id: permit.permit_id.to_string(),
                     receipt,
                     verdict,
+                    // 回执之后那次观测所产生的证据。**由这里交出去，而不是让调用方再观测一次**：
+                    // 同一次观测发生两次，账上就会多一条，而"这一步看见了什么"会有两个答案。
+                    evidence_ref: round
+                        .observation_after
+                        .as_ref()
+                        .map(|record| record.observation.evidence_ref.to_string()),
                 })
             }
         }

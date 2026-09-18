@@ -36,7 +36,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 use soca_contracts::{
-    ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, ExplorationQuota, GameAction,
+    ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, DataClass, ExplorationQuota,
+    GameAction,
     GameKind, GameObservation, GoalBudget, GoalId, GrantScope, MazeCell, MazeObject, MazeView,
     MoveAction,
     MoveOp, Percept, PermissionScope, PublicId, SelectionPolicy, UserChannel, WallClock,
@@ -55,6 +56,15 @@ use crate::subject::{AdvanceStep, RoundOutcome, Subject};
 /// 两者同名会让人以为改一个就得改另一个，而它们本来就该能各自演化——
 /// 比如把一步游戏拆成两个工具，而能力仍然只有一项。
 const GAME_CAPABILITY: &str = "cap:game-step";
+
+/// 一格的内容：对象、颜色、开关状态。
+type CellValue = (String, String, String);
+
+/// 一次吸收里**学到的**格子：位置与该格的内容。
+///
+/// 给个名字而不是把元组写四遍：这里的形状（"世界坐标 → 三个字符串"）在多处出现，
+/// 而它一旦改一处而漏一处，编译器会在最远的那一处报一个读不懂的错。
+type LearnedCells = Vec<((i32, i32), CellValue)>;
 
 /// agent 在视图里恒定所在的格子（`manifest.json` 的 `view_convention`）。
 const AGENT_ROW: i32 = 3;
@@ -126,6 +136,8 @@ pub struct MazeStep {
     pub permit_id: Option<String>,
     /// 后置条件核验的判定。
     pub verdict: Option<String>,
+    /// 这一步**记进 L1** 了几条格子记忆（新记 + 取代）。只在认知通路上有值。
+    pub remembered: usize,
 }
 
 /// 一局是**谁**在走的。
@@ -167,6 +179,12 @@ pub struct MazeRun {
     ///
     /// 有了它，账才是平的：**开局 + 每一步新增 = 最终的格子数**。
     pub initial_cells: usize,
+    /// 这一局往 L1 里记了多少条格子记忆。
+    ///
+    /// 与 `map.len()` 分开：那是**这一局认得多少格**，这是**记进长期记忆多少条**。
+    /// 认知通路下两者应当收敛到同一个数（一格一条）；评估器通路下这里恒为 0——
+    /// 它压根不碰记忆，而那个 0 如实说明了这一点。
+    pub memories: usize,
     /// **同一个格子出现过两种内容的次数。**
     ///
     /// 它应当是 0。不是 0 就说明视图约定被读错了（镜像或转置），而那件事不会以别的方式
@@ -200,7 +218,7 @@ impl MazeRun {
 
 /// 探索器。
 struct Explorer {
-    map: BTreeMap<(i32, i32), (String, String, String)>,
+    map: BTreeMap<(i32, i32), CellValue>,
     visited: BTreeSet<(i32, i32)>,
     position: (i32, i32),
     carrying: String,
@@ -273,7 +291,16 @@ impl Explorer {
     /// 这里最初写的是"视图变了就说明动了"，而那是个 bug：**转身、拾取、开门都会让视图变**，
     /// 于是每转一次身，位置就凭空挪一格，地图整体碎掉。视图是第一人称的，它对旋转和
     /// 平移都敏感，所以它区分不了这两件事——能区分的只有"我按的是哪个键"。
-    fn absorb(&mut self, view: &MazeView, last_action: Option<GameAction>) {
+    /// 返回**这一次学到的格子**（新插入的与内容变了的）。
+    ///
+    /// 调用方要拿它把这批知识记进 L1。返回"变了的那几格"而不是"看过的全部"：
+    /// 一局 24 步里绝大多数步看到的都是同一片已知地面，全报一遍会让记忆层每一秒都在忙，
+    /// 而它记下来的还是那几条。
+    fn absorb(
+        &mut self,
+        view: &MazeView,
+        last_action: Option<GameAction>,
+    ) -> LearnedCells {
         // "这一步到底动没动"。
         //
         // 判据是**两个条件同时成立**：刚才走的是前进，**而且**视图变了。
@@ -305,6 +332,7 @@ impl Explorer {
         }
         .to_string();
 
+        let mut learned: LearnedCells = Vec::new();
         for row in 0..view.view.len() {
             for column in 0..view.view[row].len() {
                 if row == AGENT_ROW as usize && column == AGENT_COLUMN as usize {
@@ -335,17 +363,24 @@ impl Explorer {
                 //
                 // 覆盖带来的问题只有一个：怎么还发现得了"约定读错了"。答案是**静态几何**：
                 // 墙、地板、空地不会因为 agent 做了什么而改变，所以它们对不上就是镜像或转置。
-                if let Some(known) = self.map.get(&at)
-                    && known != &value
-                    && is_static(&known.0)
-                    && is_static(&value.0)
-                {
-                    self.contradictions += 1;
+                match self.map.get(&at) {
+                    Some(known) if known == &value => {}
+                    Some(known) => {
+                        if is_static(&known.0) && is_static(&value.0) {
+                            self.contradictions += 1;
+                        }
+                        self.map.insert(at, value.clone());
+                        learned.push((at, value));
+                    }
+                    None => {
+                        self.map.insert(at, value.clone());
+                        learned.push((at, value));
+                    }
                 }
-                self.map.insert(at, value);
             }
         }
         self.last_view = Some(view.view.clone());
+        learned
     }
 
     /// 选下一步，并说明为什么。
@@ -648,6 +683,29 @@ impl Explorer {
     }
 }
 
+/// 把探索器学到的格子变成 L1 里的说法。
+///
+/// 引用形如 `<回合>#<行>,<列>`——**由这一层给**："怎么称呼一个格子"是迷宫的约定，
+/// 不是记忆层的。让记忆层去拼这个字符串，等于把迷宫的行列约定塞进通用代码里。
+fn cell_facts(
+    episode: &str,
+    learned: &[((i32, i32), CellValue)],
+) -> Vec<(String, String)> {
+    learned
+        .iter()
+        .map(|((row, column), (object, color, state))| {
+            let mut claim = format!("迷宫格 ({row},{column}) 是 {object}");
+            if state != "none" {
+                claim.push_str(&format!("（{state}）"));
+            }
+            if color != "none" {
+                claim.push_str(&format!("，颜色 {color}"));
+            }
+            (format!("{episode}#{row},{column}"), claim)
+        })
+        .collect()
+}
+
 /// 观测里的朝向。非迷宫感知回 0（本模块只跑迷宫，这条分支不该被走到）。
 fn direction_of(observation: &GameObservation) -> u8 {
     match &observation.percept {
@@ -755,6 +813,8 @@ pub fn run_episode(
             candidate_index: None,
             permit_id: None,
             verdict: None,
+            // 评估器通路不碰记忆——它连"开局那一眼"都没记成观测。
+            remembered: 0,
         });
 
         if observation.terminated || observation.truncated {
@@ -776,6 +836,7 @@ pub fn run_episode(
         map: explorer.mapped(),
         // 评估器通路没有"开局那一眼"这一步：起点那一次感知被并进第一步的 `learned` 里。
         initial_cells: 0,
+        memories: 0,
         contradictions: explorer.contradictions,
         mission,
     })
@@ -878,9 +939,21 @@ pub fn play_through_actions(
 
     // 先吸收起点那一次感知。少了它，第一步之后"视图变了没有"就没有可比的基准，
     // 而位置会从第一步起就开始漂。
+    // 开局那一眼也**记成一条观测**——评估器通路没有这一步。
+    //
+    // 它的用处是给"开局看见的那 35 格"一个**真实的**证据引用。没有它，那批格子要么
+    // 记不进 L1，要么得挂到第一步的观测上——而那是一次**别的**观测，于是"这一格是从哪
+    // 看出来的"会有一个错的答案。多一条观测事件的代价，比一条错的溯源小得多。
+    let mut remembered = 0usize;
     if let Some(Percept::Maze(view)) = subject.game_percept() {
         mission = view.mission.clone();
-        explorer.absorb(&view, None);
+        let learned = explorer.absorb(&view, None);
+        let opening = subject.observe(&episode, DataClass::Personal, at)?;
+        remembered = remembered.saturating_add(subject.remember_grid_cells(
+            &cell_facts(&episode, &learned),
+            &opening.observation.evidence_ref.to_string(),
+            at,
+        )?);
     }
     let initial_cells = explorer.map.len();
 
@@ -945,22 +1018,42 @@ pub fn play_through_actions(
                 candidate_index: None,
                 permit_id: None,
                 verdict: None,
+                remembered: 0,
             });
             break;
         };
 
-        let (receipt, permit_id, verdict) = match &advanced {
+        let (receipt, permit_id, verdict, evidence) = match &advanced {
             AdvanceStep::Action {
                 permit_id,
                 receipt,
                 verdict,
+                evidence_ref,
                 ..
-            } => (receipt.clone(), Some(permit_id.clone()), verdict.clone()),
-            other => (format!("{other:?}"), None, None),
+            } => (
+                receipt.clone(),
+                Some(permit_id.clone()),
+                verdict.clone(),
+                evidence_ref.clone(),
+            ),
+            other => (format!("{other:?}"), None, None, None),
         };
 
+        // 先吸收这一步的感知，再拿**这一步自己的**证据把那几格记进 L1。
+        //
+        // 顺序不能反：`absorb` 会说出"这一步新认得了哪几格"，而那些格子正是那次观测
+        // 看见的东西——挂到别的证据上，"这一格是从哪看出来的"就有一个错的答案。
+        let mut step_remembered = 0usize;
         if let Some(Percept::Maze(after)) = subject.game_percept() {
-            explorer.absorb(&after, Some(action));
+            let learned = explorer.absorb(&after, Some(action));
+            if let Some(evidence) = &evidence {
+                step_remembered = subject.remember_grid_cells(
+                    &cell_facts(&episode, &learned),
+                    evidence,
+                    at,
+                )?;
+                remembered = remembered.saturating_add(step_remembered);
+            }
         }
         let (outcome, truncated) = subject
             .game_status()
@@ -985,6 +1078,7 @@ pub fn play_through_actions(
             candidate_index,
             permit_id,
             verdict,
+            remembered: step_remembered,
         });
 
         if truncated || outcome != "running" {
@@ -1005,6 +1099,7 @@ pub fn play_through_actions(
         steps,
         map: explorer.mapped(),
         initial_cells,
+        memories: remembered,
         contradictions: explorer.contradictions,
         mission,
     })

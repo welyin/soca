@@ -195,6 +195,13 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       否则 → 朝最近的未知边界走。确定性，所以同一 seed 再看一遍是同一局。
     </div>
     <div class="hint">
+      <b>「记入 L1」那一栏才是这套东西与"探索器有个字典"的分界。</b>每一格都是**一条记忆**，
+      指回看见它的那次观测——所以<b>撤回 <code>cap:game-step</code> 会让学到的格子一起失效</b>，
+      而不只是"不能做新动作"。§12.1 的"撤回立即生效"于是对<b>知识</b>也成立。
+      门开过之后那一条会变成第 2 版（取代，不是并存——两份同时在册的话，
+      "门是关的"与"门是开的"会长得一样新）。
+    </div>
+    <div class="hint">
       <b>认知通路每步花掉一次激活，而一份目标的额度上限是 32 次</b>（
       <code>MAX_ACTIVATIONS_PER_GOAL</code>）。所以一局走得完走不完，是被这个上限决定的——
       而"额度耗尽"不是故障，正是 §4.2 说的<b>升级触发器</b>：该给更多预算，或该把它拆成几个目标。
@@ -213,7 +220,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       </div>
     </div>
     <table id="maze-steps" style="margin-top:16px">
-      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得（新增）</th></tr></thead>
+      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得（新增）</th><th>记入 L1</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -932,6 +939,10 @@ function renderMaze() {
         + "<td>" + dash(item.verdict) + "</td>"
         + "<td>" + item.known_cells
         + (item.learned ? " <span class=\"dim\">(+" + item.learned + ")</span>" : "") + "</td>"
+        // 「记入 L1」在评估器通路上恒为空：它压根不碰记忆。空着是如实说，不是漏填。
+        + "<td>" + (item.remembered
+            ? escapeHtml(String(item.remembered))
+            : "<span class=\"dim\">—</span>") + "</td>"
         + "</tr>";
     })
     .join("");
@@ -966,6 +977,7 @@ $("maze-run").onclick = async function () {
       "认得 " + mazeRun.map.length + " 格　" +
       "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
       "<br>开局一眼看见 " + (mazeRun.initial_cells || 0) + " 格　" +
+      "记进 L1 " + (mazeRun.memories || 0) + " 条　" +
       "走的是<b>" + (mazeRun.path === "agent" ? "认知通路" : "评估器通路") + "</b>　" +
       (mazeRun.path === "agent"
         ? "拿到许可的有 " + gated + "/" + mazeRun.steps.length + " 步，一共排了 " + waited + " 轮队"
