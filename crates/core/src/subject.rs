@@ -921,7 +921,12 @@ impl Subject {
     ) -> Result<(CandidateSet, Selection), CoreError> {
         let candidates = self.cluster.propose(at)?;
         let review_policy = ReviewPolicy::for_risk(risk, policy.high_risk_from, policy.max_checks);
-        let reviews = review_all(&candidates, self.cluster.ledger(), &review_policy);
+        let reviews = review_all(
+            &candidates,
+            self.cluster.ledger(),
+            &self.content,
+            &review_policy,
+        );
         let selection = select_candidate(&candidates, reviews, policy, risk)?;
         Ok((candidates, selection))
     }
@@ -1640,7 +1645,12 @@ impl Subject {
         });
 
         let review_policy = ReviewPolicy::for_risk(risk, policy.high_risk_from, policy.max_checks);
-        let reviews = review_all(&candidates, self.cluster.ledger(), &review_policy);
+        let reviews = review_all(
+            &candidates,
+            self.cluster.ledger(),
+            &self.content,
+            &review_policy,
+        );
         let selection = select_candidate(&candidates, reviews, policy, risk)?;
         Ok((candidates, selection))
     }

@@ -11,14 +11,16 @@
 //! * **证据"存在过"与"现在还能用"是两件事。** 撤回权限之后，一份完全自洽、证据也确实
 //!   存在过的结论仍然必须出局（§7.2）。
 
+use std::collections::BTreeMap;
+
 use soca_contracts::{
-    ActionLevel, Candidate, CandidateSet, EvidenceRef, SelectionOutcome, SelectionPolicy, UnitId,
-    VerificationKind, Verdict, select,
+    ActionLevel, BlobRef, Candidate, CandidateSet, EvidenceRef, SelectionOutcome, SelectionPolicy,
+    UnitId, VerificationKind, Verdict, select,
 };
 use soca_core_actors::{
     ReviewPolicy, check_claim_grounding, check_evidence_access, check_source_independence,
-    review_all, review_candidate, search_counter_example, EvidenceLedger, EvidenceRecord,
-    MAX_EVIDENCE_RECORDS,
+    review_all, review_candidate, search_counter_example, BodySource, EvidenceLedger,
+    EvidenceRecord, NoBodies, MAX_EVIDENCE_RECORDS,
 };
 
 fn reference(name: &str) -> EvidenceRef {
@@ -46,6 +48,46 @@ fn record(
         derived_from: derived_from.iter().map(|name| reference(name)).collect(),
         observed_by: unit(by),
         retracted: None,
+    }
+}
+
+fn blob_ref(name: &str) -> BlobRef {
+    BlobRef::new(format!("blob:personal:{name}")).expect("固定引用")
+}
+
+/// 造一条**带正文**的记录。
+///
+/// 不带正文文本——记录里只有**引用**，正文在内容仓那一侧（这里是 [`InlineBodies`]）。
+/// 让这个辅助函数同时收一份正文，会诱使调用方以为"把正文写进记录里"也行；而那样一份记录
+/// 一旦落盘，§9.3 好不容易分开的两半就又粘回去了。
+fn record_with_a_body(evidence: &str, subject: &str, value: &str) -> EvidenceRecord {
+    EvidenceRecord {
+        body_ref: Some(blob_ref(evidence)),
+        ..record(evidence, subject, value, "reader-1", &[])
+    }
+}
+
+/// 一份按引用直接给正文的来源。
+///
+/// 用它可以在不建内容仓的前提下测到正文那两条核对。真接内容仓的路径由 `soca-core` 那一端
+/// 端到端测——两层分开是有意的：这一层要能证明"给定这些正文，判定是这样"，而不是
+/// "临时目录建对了，判定是这样"。
+struct InlineBodies(BTreeMap<String, String>);
+
+impl InlineBodies {
+    fn new(pairs: Vec<(BlobRef, &str)>) -> Self {
+        Self(
+            pairs
+                .into_iter()
+                .map(|(reference, body)| (reference.to_string(), body.to_string()))
+                .collect(),
+        )
+    }
+}
+
+impl BodySource for InlineBodies {
+    fn body_of(&self, blob_ref: &BlobRef) -> Option<String> {
+        self.0.get(blob_ref.as_str()).cloned()
     }
 }
 
@@ -278,7 +320,13 @@ fn a_low_risk_task_does_not_search_for_counter_examples() {
 
     let low = ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8);
     assert!(!low.counter_example);
-    let review = review_candidate(0, &claim("版本是 sha256:aaa", &["a"]), &ledger, &low);
+    let review = review_candidate(
+        0,
+        &claim("版本是 sha256:aaa", &["a"]),
+        &ledger,
+        &NoBodies,
+        &low,
+    );
     assert!(
         review
             .outcomes
@@ -289,7 +337,13 @@ fn a_low_risk_task_does_not_search_for_counter_examples() {
 
     let high = ReviewPolicy::for_risk(ActionLevel::A3, ActionLevel::A2, 8);
     assert!(high.counter_example);
-    let review = review_candidate(0, &claim("版本是 sha256:aaa", &["a"]), &ledger, &high);
+    let review = review_candidate(
+        0,
+        &claim("版本是 sha256:aaa", &["a"]),
+        &ledger,
+        &NoBodies,
+        &high,
+    );
     assert!(
         review
             .outcomes
@@ -314,6 +368,7 @@ fn a_claim_asserting_a_value_absent_from_its_own_evidence_is_refuted() {
     let outcome = check_claim_grounding(
         &claim("file:x 的版本是 sha256:bbb", &["real"]),
         &ledger,
+        &NoBodies,
     )
     .expect("命题断言了可核对的值，因此适用");
 
@@ -329,8 +384,12 @@ fn a_claim_asserting_a_value_absent_from_its_own_evidence_is_refuted() {
 #[test]
 fn a_claim_that_quotes_its_own_evidence_is_supported() {
     let ledger = ledger_with(vec![record("real", "file:x", "sha256:aaa", "reader", &[])]);
-    let outcome = check_claim_grounding(&claim("file:x 的版本是 sha256:aaa", &["real"]), &ledger)
-        .expect("适用");
+    let outcome = check_claim_grounding(
+        &claim("file:x 的版本是 sha256:aaa", &["real"]),
+        &ledger,
+        &NoBodies,
+    )
+    .expect("适用");
     assert_eq!(outcome.verdict, Verdict::Supported);
 }
 
@@ -340,7 +399,7 @@ fn a_prose_claim_without_values_is_simply_not_checked() {
     // 而实际上可能一件也没做。
     let ledger = ledger_with(vec![record("real", "file:x", "sha256:aaa", "reader", &[])]);
     assert!(
-        check_claim_grounding(&claim("摘要文件已经更新", &["real"]), &ledger).is_none(),
+        check_claim_grounding(&claim("摘要文件已经更新", &["real"]), &ledger, &NoBodies).is_none(),
         "命题没有断言任何可核对的值，这个工具对它不适用"
     );
 }
@@ -367,7 +426,7 @@ fn review_all_stops_at_the_check_budget() {
         counter_example: true,
         max_checks: 3,
     };
-    let reviews = review_all(&set, &ledger, &policy);
+    let reviews = review_all(&set, &ledger, &NoBodies, &policy);
     let spent: usize = reviews.iter().map(|review| review.outcomes.len()).sum();
     assert!(spent <= 3, "超出预算：{spent}");
     assert!(reviews.len() < set.candidates.len(), "预算用满即停");
@@ -389,7 +448,7 @@ fn a_refuted_claim_cannot_be_selected_even_with_plenty_of_evidence() {
     };
 
     let policy = ReviewPolicy::for_risk(ActionLevel::A2, ActionLevel::A2, 8);
-    let reviews = review_all(&set, &ledger, &policy);
+    let reviews = review_all(&set, &ledger, &NoBodies, &policy);
     assert!(
         reviews[0].is_refuted(),
         "三条同值证据不能压过一条反例：{reviews:?}"
@@ -416,14 +475,133 @@ fn reviewing_the_same_input_twice_gives_the_same_verdicts() {
     };
     let policy = ReviewPolicy::for_risk(ActionLevel::A3, ActionLevel::A2, 8);
 
-    let first = review_all(&set, &ledger, &policy);
-    let second = review_all(&set, &ledger, &policy);
+    let first = review_all(&set, &ledger, &NoBodies, &policy);
+    let second = review_all(&set, &ledger, &NoBodies, &policy);
     assert_eq!(first, second);
 
     let selection_policy = SelectionPolicy::default();
     let left = select(&set, first, &selection_policy, ActionLevel::A3).expect("选择");
     let right = select(&set, second, &selection_policy, ActionLevel::A3).expect("选择");
     assert_eq!(left, right);
+}
+
+// ---------------------------------------------------------------------------
+// 数字来源（§15.1 第 3 步）
+// ---------------------------------------------------------------------------
+
+/// 一份正文。
+const SUMMARY_BODY: &str = "资料摘要\n- 项目代号：晨星\n- 下一次评审：2026-10-15\n";
+
+#[test]
+fn a_date_that_is_not_in_the_cited_body_is_refuted() {
+    // §15.1 第 3 步："核验单元检查引用存在、**数字来源**和遗漏。"
+    //
+    // 在正文进上下文之前，这条查不出来：核对器只能拿版本摘要跟命题对，而版本摘要里
+    // 没有"2026-10-15"这种东西。草稿写一个日期，谁也拦不住。
+    let ledger = ledger_with(vec![record_with_a_body("a", "file:summary.md", "sha256:aaa")]);
+    let bodies = InlineBodies::new(vec![(blob_ref("a"), SUMMARY_BODY)]);
+
+    let outcome = check_claim_grounding(
+        &claim("摘要里说下一次评审是 2026-12-01", &["a"]),
+        &ledger,
+        &bodies,
+    )
+    .expect("正文在手，这一条适用");
+
+    assert_eq!(outcome.verdict, Verdict::Refuted);
+    assert_eq!(
+        outcome.evidence_refs,
+        vec![reference("a")],
+        "数字找不到出处时，该看的是命题自己引的那些——它们本该提供出处"
+    );
+}
+
+#[test]
+fn a_date_that_is_in_the_cited_body_is_supported() {
+    // 对照组。少了它，"挡住了"与"全挡了"分不开——而一条永远否定的规则看起来和一条
+    // 正确的规则一模一样。
+    let ledger = ledger_with(vec![record_with_a_body("a", "file:summary.md", "sha256:aaa")]);
+    let bodies = InlineBodies::new(vec![(blob_ref("a"), SUMMARY_BODY)]);
+
+    let outcome = check_claim_grounding(
+        &claim("摘要里说下一次评审是 2026-10-15", &["a"]),
+        &ledger,
+        &bodies,
+    )
+    .expect("适用");
+    assert_eq!(outcome.verdict, Verdict::Supported);
+}
+
+#[test]
+fn the_number_check_does_not_apply_when_no_cited_evidence_has_a_body() {
+    // 拿一份版本摘要去核"下一次评审是 2026-12-01"，只会把所有带数字的命题一律判成否定。
+    // 那不是发现问题，那是**把"没有材料"误报成"材料不对"**。
+    let ledger = ledger_with(vec![record("a", "file:summary.md", "sha256:aaa", "reader", &[])]);
+
+    assert!(
+        check_claim_grounding(
+            &claim("摘要里说下一次评审是 2026-12-01", &["a"]),
+            &ledger,
+            &NoBodies
+        )
+        .is_none(),
+        "没有可核的正文时，这一条不适用——而不是否定"
+    );
+}
+
+#[test]
+fn a_short_number_is_not_treated_as_an_assertion() {
+    // 这条划出的正是这个检查的能力边界，写出来免得它被当成比实际更强的东西。
+    //
+    // 单个数字在正文里太容易撞上（"第 3 步"、"共 4 项"），把它当断言核，结果是每一份写得
+    // 正常的草稿都被判成否定。所以只认**日期**和**长度不少于四位**的数字串——代价是
+    // `版本 42` 这种短数字不会被查。
+    let ledger = ledger_with(vec![record_with_a_body("a", "file:summary.md", "sha256:aaa")]);
+    let bodies = InlineBodies::new(vec![(blob_ref("a"), SUMMARY_BODY)]);
+
+    assert!(
+        check_claim_grounding(&claim("本次共 3 项变更", &["a"]), &ledger, &bodies).is_none(),
+        "短数字不核——不适用，而不是支持"
+    );
+}
+
+#[test]
+fn a_body_that_cannot_be_fetched_makes_the_claim_unusable() {
+    // §7.2 的"引用必须能解析为存在**且仍可访问**的证据"，落到正文这一层就是：
+    // **这条内容还读不读得回来**。一条引用了已经按保留期清理掉的正文的结论，
+    // 与一条引用了已撤回证据的结论，对"还该不该算数"的答案是一样的。
+    let ledger = ledger_with(vec![record_with_a_body("a", "file:summary.md", "sha256:aaa")]);
+
+    let outcome = check_evidence_access(
+        &claim("摘要里说下一次评审是 2026-10-15", &["a"]),
+        &ledger,
+        &NoBodies,
+    )
+    .expect("引用指着一条取不回的正文");
+    assert_eq!(outcome.kind, VerificationKind::EvidenceAccess);
+    assert_eq!(outcome.verdict, Verdict::Refuted);
+}
+
+#[test]
+fn a_bare_four_digit_run_is_also_checked() {
+    // 四位以上的数字串（不是日期的一部分）同样要核。量级类的错——预算、条数、版本号——
+    // 都落在这一类里。
+    let body = "本轮预算上限 4096 个 token。";
+    let ledger = ledger_with(vec![record_with_a_body("a", "file:x", "sha256:aaa")]);
+    let bodies = InlineBodies::new(vec![(blob_ref("a"), body)]);
+
+    assert_eq!(
+        check_claim_grounding(&claim("本轮预算上限 4096", &["a"]), &ledger, &bodies)
+            .expect("适用")
+            .verdict,
+        Verdict::Supported
+    );
+    assert_eq!(
+        check_claim_grounding(&claim("本轮预算上限 8192", &["a"]), &ledger, &bodies)
+            .expect("适用")
+            .verdict,
+        Verdict::Refuted
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -485,13 +663,14 @@ fn a_claim_citing_retracted_evidence_is_refuted() {
     let mut ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
     let target = claim("file:x 的版本是 sha256:aaa", &["a"]);
     assert!(
-        check_evidence_access(&target, &ledger).is_none(),
+        check_evidence_access(&target, &ledger, &NoBodies).is_none(),
         "撤回之前没有问题可报"
     );
 
     ledger.retract(&[reference("a")], "capability_revoked");
 
-    let outcome = check_evidence_access(&target, &ledger).expect("撤回之后要报出来");
+    let outcome =
+        check_evidence_access(&target, &ledger, &NoBodies).expect("撤回之后要报出来");
     assert_eq!(outcome.kind, VerificationKind::EvidenceAccess);
     assert_eq!(outcome.verdict, Verdict::Refuted);
     assert_eq!(outcome.evidence_refs, vec![reference("a")]);
@@ -501,6 +680,7 @@ fn a_claim_citing_retracted_evidence_is_refuted() {
         0,
         &target,
         &ledger,
+        &NoBodies,
         &ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8),
     );
     assert!(review.is_refuted(), "被否定的候选不该再参与竞争");
@@ -511,7 +691,14 @@ fn a_claim_citing_only_available_evidence_reports_nothing() {
     // 这条判定只在**发现问题**时上报。全部可用时它没有正面结论可报——"这些证据都能用"
     // 是一条没有信息量的判定，写进每一份档案只会让每条候选多一行不变的话。
     let ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
-    assert!(check_evidence_access(&claim("file:x 的版本是 sha256:aaa", &["a"]), &ledger).is_none());
+    assert!(
+        check_evidence_access(
+            &claim("file:x 的版本是 sha256:aaa", &["a"]),
+            &ledger,
+            &NoBodies
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -567,8 +754,12 @@ fn a_retracted_value_is_still_recognized_so_a_claim_asserting_it_gets_caught() {
     ledger.retract(&[reference("a")], "capability_revoked");
 
     assert_eq!(ledger.known_values(), vec!["sha256:aaa"], "仍然认得出来");
-    let outcome = check_claim_grounding(&claim("file:x 的版本是 sha256:aaa", &["a"]), &ledger)
-        .expect("有东西可核");
+    let outcome = check_claim_grounding(
+        &claim("file:x 的版本是 sha256:aaa", &["a"]),
+        &ledger,
+        &NoBodies,
+    )
+    .expect("有东西可核");
     assert_eq!(outcome.verdict, Verdict::Refuted);
 }
 
@@ -586,6 +777,7 @@ fn the_access_check_runs_before_the_others() {
         0,
         &claim("file:x 的版本是 sha256:aaa", &["a", "b"]),
         &ledger,
+        &NoBodies,
         &ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8),
     );
     assert_eq!(
@@ -611,7 +803,7 @@ fn the_verdict_reached_end_to_end_is_traceable_to_the_evidence_that_caused_it() 
     };
 
     let policy = ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8);
-    let reviews = review_all(&set, &ledger, &policy);
+    let reviews = review_all(&set, &ledger, &NoBodies, &policy);
     let selection = select(&set, reviews, &SelectionPolicy::default(), ActionLevel::A1)
         .expect("选择");
 

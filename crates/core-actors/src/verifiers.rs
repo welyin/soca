@@ -24,11 +24,47 @@
 //! 3. **检验只看证据，不看模型自评。** 与 L3 的选择同一原则（§3.2）。
 
 use soca_contracts::{
-    ActionLevel, Candidate, CandidateReview, CandidateSet, EvidenceRef, VerificationKind,
+    ActionLevel, BlobRef, Candidate, CandidateReview, CandidateSet, EvidenceRef, VerificationKind,
     VerificationOutcome, Verdict,
 };
+use soca_storage::ContentStore;
 
 use crate::evidence::EvidenceLedger;
+
+/// 核对时按引用取正文的那一头。
+///
+/// 做成 trait，而不是让验证器直接收一个 `&ContentStore`：验证器要的是**正文**，不关心它存在
+/// 文件里、数据库里还是别处。收一个具体的仓，会让"这批验证器只能跑在有磁盘的环境里"变成一条
+/// 隐式的编译期约束——一条只想给一份假正文的单元测试，得先建一个临时目录。
+pub trait BodySource {
+    /// 取一条正文。返回 `None` 表示**这条引用解析不出可用的正文**——不存在、按保留期清理过，
+    /// 或存储层判定它与声明的摘要对不上。
+    ///
+    /// 三种都返回 `None` 而不是各自报错，是因为调用方要回答的问题是同一个："这条引用还能不能
+    /// 用来核对"。而"不能"是一个确定的答案，不是一个异常。真要把"内容被悄悄换过"与"内容被
+    /// 按约定清理了"分开，读的是主体那条路（`Subject::observed_body` 会为前者报错）。
+    fn body_of(&self, blob_ref: &BlobRef) -> Option<String>;
+}
+
+impl BodySource for ContentStore {
+    fn body_of(&self, blob_ref: &BlobRef) -> Option<String> {
+        let bytes = self.get(blob_ref).ok().flatten()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+/// 一条正文都没有的来源。给"这些用例不关心正文"的测试用。
+///
+/// 显式写出来而不是让 `bodies: Option<&dyn BodySource>`：一个可选的参数会让验证器出现
+/// "没有正文时少查一项"的分支，而那个分支恰恰是**最不该被测试绕过**的那一项。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoBodies;
+
+impl BodySource for NoBodies {
+    fn body_of(&self, _blob_ref: &BlobRef) -> Option<String> {
+        None
+    }
+}
 
 /// 一次审查的策略。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,13 +113,34 @@ impl ReviewPolicy {
 pub fn check_evidence_access(
     claim: &Candidate,
     ledger: &EvidenceLedger,
+    bodies: &dyn BodySource,
 ) -> Option<VerificationOutcome> {
     let Candidate::Claim { evidence_refs, .. } = claim else {
         return None;
     };
 
-    let retracted = ledger.retracted_among(evidence_refs);
-    if retracted.is_empty() {
+    let mut unusable = ledger.retracted_among(evidence_refs);
+
+    // 引用还在，但它指着的那条正文取不回来了。§7.2 把"引用必须能解析为**存在且仍可访问**的
+    // 证据"写成一条硬要求，而"证据"在正文这一层就是**这条内容还读不读得回来**：
+    // 一条引用了已经按保留期清理掉的正文的结论，与一条引用了已撤回证据的结论，
+    // 对"还该不该算数"这个问题的答案是一样的。
+    for reference in evidence_refs {
+        if unusable.contains(reference) {
+            continue;
+        }
+        let Some(record) = ledger.get(reference) else {
+            continue;
+        };
+        let Some(body_ref) = &record.body_ref else {
+            continue;
+        };
+        if bodies.body_of(body_ref).is_none() {
+            unusable.push(reference.clone());
+        }
+    }
+
+    if unusable.is_empty() {
         return None;
     }
 
@@ -93,7 +150,7 @@ pub fn check_evidence_access(
         // 这条候选建立在一份已经作废的材料上，它不该被选中。报成"无法判定"会让它继续
         // 参与竞争，而"证据没了"恰恰是最不该靠竞争来解决的那类问题。
         verdict: Verdict::Refuted,
-        evidence_refs: retracted,
+        evidence_refs: unusable,
     })
 }
 
@@ -199,6 +256,7 @@ pub fn search_counter_example(
 pub fn check_claim_grounding(
     claim: &Candidate,
     ledger: &EvidenceLedger,
+    bodies: &dyn BodySource,
 ) -> Option<VerificationOutcome> {
     let Candidate::Claim {
         statement,
@@ -208,27 +266,59 @@ pub fn check_claim_grounding(
         return None;
     };
 
+    // 命题自己引用的那些材料：观测值 + 正文。两道核对都对着这一份说话。
+    let mut cited_values: Vec<String> = Vec::new();
+    let mut cited_bodies: Vec<String> = Vec::new();
+    for record in evidence_refs.iter().filter_map(|reference| ledger.get(reference)) {
+        cited_values.push(record.observed_value.clone());
+        if let Some(body) = record
+            .body_ref
+            .as_ref()
+            .and_then(|body_ref| bodies.body_of(body_ref))
+        {
+            cited_bodies.push(body);
+        }
+    }
+
+    // 第一道：命题断言了台账里**已知**的某个值，而它自己没引用持该值的那条证据。
     let asserted: Vec<String> = ledger
         .known_values()
         .into_iter()
         .filter(|value| statement.contains(value))
         .map(str::to_string)
         .collect();
-    if asserted.is_empty() {
+    let unsupported: Vec<String> = asserted
+        .iter()
+        .filter(|value| !cited_values.contains(value))
+        .cloned()
+        .collect();
+
+    // 第二道：命题里的数字与日期，在它引用的材料里有没有出处（§15.1 的"数字来源"）。
+    //
+    // **只有在引用里确实有正文时才查这一道。** 拿一份版本摘要去核"下一次评审是 2026-10-15"，
+    // 只会把所有带数字的命题一律判成否定——那不是发现问题，那是把"没有材料"误报成"材料不对"。
+    let tokens = checkable_tokens(statement);
+    let body_check_applies = !cited_bodies.is_empty();
+    let unsourced: Vec<String> = if body_check_applies {
+        tokens
+            .iter()
+            .filter(|token| {
+                !cited_values.iter().any(|value| value.contains(token.as_str()))
+                    && !cited_bodies.iter().any(|body| body.contains(token.as_str()))
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if asserted.is_empty() && (tokens.is_empty() || !body_check_applies) {
+        // 命题里既没有已知的值，也没有可核的数字——这个工具对它不适用，
+        // **不假装核对过了**（模块文档第 1 条）。
         return None;
     }
 
-    let cited: Vec<String> = evidence_refs
-        .iter()
-        .filter_map(|reference| ledger.get(reference))
-        .map(|record| record.observed_value.clone())
-        .collect();
-
-    let unsupported: Vec<&String> = asserted
-        .iter()
-        .filter(|value| !cited.contains(value))
-        .collect();
-    if unsupported.is_empty() {
+    if unsupported.is_empty() && unsourced.is_empty() {
         return Some(VerificationOutcome {
             kind: VerificationKind::Tool,
             verdict: Verdict::Supported,
@@ -236,14 +326,24 @@ pub fn check_claim_grounding(
         });
     }
 
-    // 命题断言了一个它自己没引用的值。台账里真正持这个值的那些记录，就是"它本该引用却
-    // 没引用"的证据——把它们的引用写进判定，审计时才看得出它错在哪一条上。
+    // 两类失败要指的证据不同。
+    //
+    // 第一类有明确的对象：台账里**真正持那个值**的那条记录，就是"它本该引用却没引用"的。
+    // 第二类没有——数字在任何引用的材料里都不存在，找不到一条"正确的出处"，所以指回命题
+    // 自己的引用：它们是**本该提供出处却没有**的那几条。
     let mut culprits: Vec<EvidenceRef> = Vec::new();
     for record in ledger.records() {
-        if unsupported.iter().any(|value| **value == record.observed_value)
+        if unsupported.contains(&record.observed_value)
             && !culprits.contains(&record.evidence_ref)
         {
             culprits.push(record.evidence_ref.clone());
+        }
+    }
+    if !unsourced.is_empty() {
+        for reference in evidence_refs {
+            if !culprits.contains(reference) {
+                culprits.push(reference.clone());
+            }
         }
     }
 
@@ -252,6 +352,65 @@ pub fn check_claim_grounding(
         verdict: Verdict::Refuted,
         evidence_refs: culprits,
     })
+}
+
+/// 命题里值得核的数字。
+///
+/// 这是"数字来源"这一条能机械化的部分，而它只认**日期**和**长度不少于四位的数字串**。
+/// 两条都写下来，是因为它们的收与放都是刻意的：
+///
+/// * **日期整体算一个**（`YYYY-MM-DD`）。逐段核会让 `2026-12-01` 里的 `12` 与 `01` 各自
+///   去撞运气，而它们撞上的可能性比整串高得多——那是把精确度换成假阳性。
+/// * **长度下限**。单个数字在正文里太容易撞上（"第 3 步"、"共 4 项"），把它当断言核，
+///   结果是每一份写得正常的草稿都被判成否定。
+///
+/// 代价是明确的：**`版本 42` 这种短数字不会被查。** 一条只在部分情况下成立的检查最容易
+/// 被当成它成立的那个特例，所以这句话写在这里而不是省略。
+///
+/// 它**不**试图认名字、术语或因果——那需要语义理解，而一个靠启发式的"语义核对"会在审计里
+/// 留下"已核对"的标记，却答不出它到底核对了什么。
+fn checkable_tokens(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        if let Some(date) = date_at(&chars, index) {
+            tokens.push(date);
+            index += 10;
+            continue;
+        }
+        if chars[index].is_ascii_digit() {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            if index - start >= 4 {
+                tokens.push(chars[start..index].iter().collect());
+            }
+            continue;
+        }
+        index += 1;
+    }
+
+    tokens.sort_unstable();
+    tokens.dedup();
+    tokens
+}
+
+/// 从 `index` 起是否是一个 `YYYY-MM-DD` 形状的日期。
+fn date_at(chars: &[char], index: usize) -> Option<String> {
+    let digit = |offset: usize| chars.get(index + offset).is_some_and(char::is_ascii_digit);
+    let dash = |offset: usize| chars.get(index + offset) == Some(&'-');
+    let shaped = (0..4).all(digit)
+        && dash(4)
+        && (5..7).all(digit)
+        && dash(7)
+        && (8..10).all(digit);
+    if !shaped {
+        return None;
+    }
+    Some(chars[index..index + 10].iter().collect())
 }
 
 /// 把四类判定在一条候选上跑一遍。
@@ -263,13 +422,14 @@ pub fn review_candidate(
     index: usize,
     candidate: &Candidate,
     ledger: &EvidenceLedger,
+    bodies: &dyn BodySource,
     policy: &ReviewPolicy,
 ) -> CandidateReview {
     let mut outcomes = Vec::new();
-    if let Some(outcome) = check_evidence_access(candidate, ledger) {
+    if let Some(outcome) = check_evidence_access(candidate, ledger, bodies) {
         outcomes.push(outcome);
     }
-    if let Some(outcome) = check_claim_grounding(candidate, ledger) {
+    if let Some(outcome) = check_claim_grounding(candidate, ledger, bodies) {
         outcomes.push(outcome);
     }
     if let Some(outcome) = check_source_independence(candidate, ledger) {
@@ -291,6 +451,7 @@ pub fn review_candidate(
 pub fn review_all(
     candidates: &CandidateSet,
     ledger: &EvidenceLedger,
+    bodies: &dyn BodySource,
     policy: &ReviewPolicy,
 ) -> Vec<CandidateReview> {
     let mut reviews = Vec::new();
@@ -299,7 +460,7 @@ pub fn review_all(
         if spent >= policy.max_checks {
             break;
         }
-        let review = review_candidate(index, candidate, ledger, policy);
+        let review = review_candidate(index, candidate, ledger, bodies, policy);
         spent = spent.saturating_add(review.outcomes.len());
         // 即便一条检验也没跑成，也要留下档案：`select` 按下标找档案，缺了它就只能当成
         // "没有检验记录"，而这两者在审计里含义不同。

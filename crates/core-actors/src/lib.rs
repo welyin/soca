@@ -39,5 +39,5 @@ pub use crate::map::{
 };
 pub use crate::verifiers::{
     check_claim_grounding, check_evidence_access, check_source_independence, review_all,
-    review_candidate, search_counter_example, ReviewPolicy,
+    review_candidate, search_counter_example, BodySource, NoBodies, ReviewPolicy,
 };
