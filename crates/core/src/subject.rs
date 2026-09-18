@@ -34,16 +34,17 @@ use serde::Serialize;
 use soca_contracts::{
     ActionId, ActionIntent, ActionLevel, ActionOutcomeSlice, Approval, BeliefSummary, BudgetRef,
     Candidate, CandidateSet, CapabilitySlice, CognitiveUnit, ContextBundle, ContractError, DataClass,
-    DerivationKind, EgressPolicy, EvidenceSlice, Expectation, ExplorationQuota, GoalBudget, GoalId,
-    GoalStack, GoalState, MemoryEntry, MemoryId, MemoryKind, ModelBackend, ModelBudget, ModelOutput,
-    ModelVersion, Observation, OutputSchema, PermitId, PermissionScope, PredictionRef, Provenance,
-    ResourceCost, ResourceScope, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, TaskId,
+    DerivationKind, EgressPolicy, Envelope, EventId, EvidenceSlice, Expectation, ExplorationQuota,
+    GoalBudget, GoalId, GoalStack, GoalState, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
+    MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
+    OutputSchema, PayloadRef, PermitId, PermissionScope, PredictionRef, Provenance, ResourceCost,
+    ResourceScope, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId, TaskId,
     ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
 use soca_storage::audit::AuditCategory;
-use soca_storage::Store;
+use soca_storage::{ContentStore, Store};
 
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
@@ -97,6 +98,13 @@ pub const MAX_HANDLED_CLAIMS: usize = 128;
 
 /// 写入类工具的标识。§12.2 禁止的是任意拼接的 shell 字符串，不是一个结构化的写入工具。
 pub const WRITE_TOOL: &str = "fs.write";
+
+/// 用户输入事件流的 epoch。
+///
+/// 用户输入是本地产生的、不经过任何设备适配器，所以它没有"适配器换代"这回事。用一个固定
+/// 值而不是 0 之外的别的东西：§7.1 只要求同一来源同一 epoch 内的序号可比，而给一个永远
+/// 只有一个世代的流编造世代号，只会让读的人以为它有意义。
+pub const USER_INPUT_EPOCH: u32 = 1;
 
 /// 派生出记忆条目标识的种子：命题 + 排序后的证据集合。
 ///
@@ -287,6 +295,8 @@ pub struct Subject {
     /// 算，而当前目标是 B。两者的检查都会通过，但结果仍然是错的：B 这个任务不该执行 A 的动作，
     /// 而用户放弃 A 的意图更不该在别处生效。
     action_goals: BTreeMap<String, GoalId>,
+    /// 分段内容仓（§9.3）。用户输入与将来的大载荷都落在这里，信封只带引用。
+    content: ContentStore,
     /// 本次会话里已经写进记忆的结论，键是 [`derivation_seed`]。
     ///
     /// 这是 §6 第 2 步那个"路由器"的雏形。那句话是"按任务、权限、来源和预算**选择少数
@@ -333,6 +343,13 @@ impl Subject {
     ) -> Result<Self, CoreError> {
         let gateway = ModelGateway::new(transport, backend, remote_authorized, budget, model_version)?;
         let task = TaskId::new(format!("task:{}", owner.as_str()))?;
+        // 内容仓放在事务库旁边（§9.3 把内容与元数据分开的那条理由）。内存存储没有路径，
+        // 就退到一个临时仓——**那意味着重启之后内容就没了**，所以它只应当出现在测试与
+        // 模拟里，而 `with_content_store` 给真实部署一个指定位置的机会。
+        let content = match store.location() {
+            Some(path) => ContentStore::open(path.with_extension("content"))?,
+            None => ContentStore::temporary()?,
+        };
         Ok(Self {
             store,
             broker,
@@ -348,6 +365,7 @@ impl Subject {
             observed: Vec::new(),
             rounds: 0,
             action_goals: BTreeMap::new(),
+            content,
             handled_claims: Vec::new(),
             policy: PolicyAgent::default(),
         })
@@ -398,6 +416,18 @@ impl Subject {
         at: WallClock,
         deadline: Option<WallClock>,
     ) -> Result<GoalId, CoreError> {
+        let statement = statement.into();
+
+        // §6 第 1 步："L0 把用户输入或设备结果写成事件。"
+        //
+        // 在此之前，用户的话只活在目标陈述里——那不是"存下来了"，那是"被引用过一次"。
+        // 目标改了、结束了、被放弃了，那句话就再没有地方可以回看；而 §7.1 的信封（来源、
+        // 时刻、权限范围、数据类别）更是完全没施加到它身上。
+        //
+        // 顺序：先记话，再建目标。**目标建不出来时事件照样留着**——话是用户说的，
+        // 这件事已经发生了；"我们没能把它变成一个任务"是另一件事，不该让前者消失。
+        self.record_user_input(&statement, channel, &permission_scope, at)?;
+
         let goal_id = self.next_goal_id()?;
         self.goals.delegate(
             goal_id.clone(),
@@ -412,6 +442,100 @@ impl Subject {
         // 委托之后立刻落库：§13.3 要求目标属于主体，而"属于"意味着它能跨重启存在。
         self.store.save_goal_stack(&self.goals, at)?;
         Ok(goal_id)
+    }
+
+    /// §6 第 1 步：把用户输入写成事件。
+    ///
+    /// 内容进内容仓、信封只带引用，**哪怕只有一句话也一样**。理由不是大小：§12.3 给对话与
+    /// 转写定了保留期，而保留期要能把内容撤下来。内容内联在事件行上的话，"删掉这段对话"
+    /// 就得改写一条 append-only 的记录——那不是删除，那是篡改历史。
+    fn record_user_input(
+        &mut self,
+        text: &str,
+        channel: UserChannel,
+        permission_scope: &PermissionScope,
+        at: WallClock,
+    ) -> Result<EventId, CoreError> {
+        let media_type = MediaType::new("text/plain")?;
+        let written = self.content.put(text.as_bytes(), DataClass::Personal)?;
+        self.store.record_blob(
+            &written.blob_ref,
+            &written.sha256,
+            media_type.as_str(),
+            written.bytes,
+            at,
+        )?;
+
+        // 每条用户通道一条事件流：序号按（来源，epoch，boot）分配，不同通道各自连续。
+        let source = SourceId::new(format!("channel:{}", channel.as_str()))?;
+        let sequence = self
+            .store
+            .next_stream_sequence(&source, USER_INPUT_EPOCH, &self.boot)?;
+        let event_id = EventId::generate();
+
+        let envelope = Envelope::new(
+            event_id,
+            source,
+            USER_INPUT_EPOCH,
+            self.boot,
+            sequence,
+            self.task.clone(),
+            Vec::new(),
+            at,
+            Monotonic::new(self.boot, sequence.saturating_mul(1_000_000)),
+            // §6.1／§11.1：**整个系统里唯一一个 `is_instruction_authority` 为真的出处。**
+            // 屏幕文字、麦克风转写、文档内容、工具输出都不是。写错方向比别处都严重，
+            // 所以这一句旁边放的是引用而不是解释。
+            Provenance::User { channel },
+            PayloadRef::Blob {
+                blob_ref: written.blob_ref,
+                media_type,
+                bytes: written.bytes,
+                sha256: written.sha256,
+            },
+            permission_scope.clone(),
+            DataClass::Personal,
+            None,
+            IdempotencyKey::new(format!("idem:{event_id}"))?,
+        );
+        self.store.append_event(&envelope, at)?;
+        Ok(event_id)
+    }
+
+    /// 读回事件账里的用户输入，按提交序升序，最多 `limit` 条。
+    ///
+    /// 过滤用的是 [`Provenance::is_instruction_authority`]，而不是"看来源字符串像不像 chat"。
+    /// 判断"这句话是不是用户说的"整个系统只有那一处依据（§6.1），把那份判断复制到这里，
+    /// 两处迟早在某个新通道上分叉——而分叉的方向是某一类输入被当成了指令。
+    pub fn user_inputs(&self, limit: usize) -> Result<Vec<String>, CoreError> {
+        let mut found = Vec::new();
+        for event in self.store.read_events_after(0, limit)? {
+            if !event.envelope.provenance.is_instruction_authority() {
+                continue;
+            }
+            let PayloadRef::Blob { blob_ref, .. } = &event.envelope.payload_ref else {
+                // 内联载荷不是本路径写出来的。跳过而不是猜内容：§11.1 的同一条原则，
+                // 拿不到就说不知道。
+                continue;
+            };
+            let bytes = self.store.read_content(&self.content, blob_ref)?;
+            found.push(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        Ok(found)
+    }
+
+    /// 内容仓（只读）。
+    pub fn content(&self) -> &ContentStore {
+        &self.content
+    }
+
+    /// 换一个内容仓。
+    ///
+    /// 真实部署应当把它指到与事务库一起备份的位置。默认由事务库路径派生，内存存储则退到
+    /// 一个临时仓——**那个临时仓重启就没了**，所以它只适合测试与模拟。
+    pub fn with_content_store(mut self, content: ContentStore) -> Self {
+        self.content = content;
+        self
     }
 
     /// 受理一个目标，让它从 `Proposed` 变成 `Active`。

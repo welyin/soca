@@ -31,6 +31,18 @@ pub enum UserChannel {
     DeviceControl,
 }
 
+impl UserChannel {
+    /// 稳定名称。用于事件流的来源标识与审计记录。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::PushToTalk => "push_to_talk",
+            Self::ApprovalUi => "approval_ui",
+            Self::DeviceControl => "device_control",
+        }
+    }
+}
+
 /// 模型派生变换的种类。派生物必须指向原始事件与模型版本（§7.1）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
