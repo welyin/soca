@@ -16,7 +16,7 @@ use soca_contracts::{
     WallClock,
 };
 use soca_core::{expire_retained, forget, purge_retained, RetentionPolicy};
-use soca_storage::{audit::AuditCategory, StorageError, Store};
+use soca_storage::{audit::AuditCategory, ContentRetention, ContentStore, StorageError, Store};
 
 const DAY: i64 = 86_400;
 
@@ -93,6 +93,7 @@ fn without_the_driver_an_expired_memory_is_invisible_but_never_cleaned() {
 #[test]
 fn hiding_and_purging_are_two_states_not_one() {
     let mut store = in_memory();
+    let content = ContentStore::temporary().expect("临时内容仓");
     store
         .record_memory(&entry("ep", MemoryKind::Episode, 0))
         .expect("写入");
@@ -111,7 +112,13 @@ fn hiding_and_purging_are_two_states_not_one() {
         "隐藏之后内容还在原处——这正是「异步清理」要留出的那个窗口"
     );
 
-    let purged = purge_retained(&mut store, &RetentionPolicy::default(), at(9 * DAY)).expect("清理");
+    let purged = purge_retained(
+        &mut store,
+        &content,
+        &RetentionPolicy::default(),
+        at(9 * DAY),
+    )
+    .expect("清理");
     assert_eq!(purged.purged, 1);
     assert_eq!(purged.awaiting_purge, 0);
     assert!(
@@ -149,6 +156,118 @@ fn a_summary_lives_no_longer_than_what_it_summarizes() {
         MemoryKind::Episode.default_retention_days()
     );
     assert!(MemoryKind::Summary.default_retention_days().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// 内容对象的保留期（§9.3、§12.3 的"对话与转写"）
+// ---------------------------------------------------------------------------
+
+/// 把一个内容对象登记进仓，带上保留期。
+fn register(
+    store: &mut Store,
+    content: &ContentStore,
+    bytes: &[u8],
+    retention: ContentRetention,
+    at_offset: i64,
+) -> soca_contracts::BlobRef {
+    let written = content.put(bytes, DataClass::Personal).expect("写入");
+    store
+        .record_blob(
+            &written.blob_ref,
+            &written.sha256,
+            "text/plain",
+            written.bytes,
+            retention,
+            at(at_offset),
+        )
+        .expect("登记");
+    written.blob_ref
+}
+
+#[test]
+fn content_past_its_recorded_retention_is_retired_then_purged() {
+    // §12.3 那张表里"对话与转写，初值 7 天"这一行，到这一步才有对象可执行。
+    let mut store = in_memory();
+    let content = ContentStore::temporary().expect("临时内容仓");
+    let blob_ref = register(
+        &mut store,
+        &content,
+        "一段对话".as_bytes(),
+        ContentRetention::Days(7),
+        0,
+    );
+
+    let too_early = expire_retained(&mut store, at(7 * DAY - 1)).expect("执行");
+    assert!(too_early.retired_content.is_empty(), "还差一秒");
+
+    let expired = expire_retained(&mut store, at(7 * DAY)).expect("执行");
+    assert_eq!(expired.retired_content.len(), 1);
+    assert_eq!(expired.retired_content[0].retention_days, 7);
+    assert_eq!(expired.content_purged, 0, "这一步只退休，不清理");
+    assert_eq!(expired.content_awaiting_purge, 1);
+    assert!(
+        content.contains(&blob_ref).expect("查询"),
+        "字节还在原处——这正是「异步清理」留出的那个窗口"
+    );
+
+    let purged = purge_retained(
+        &mut store,
+        &content,
+        &RetentionPolicy::default(),
+        at(7 * DAY),
+    )
+    .expect("清理");
+    assert_eq!(purged.content_purged, 1);
+    assert_eq!(purged.content_bytes_freed, "一段对话".len() as u64);
+    assert_eq!(purged.content_awaiting_purge, 0);
+    assert!(!content.contains(&blob_ref).expect("查询"));
+}
+
+#[test]
+fn content_without_a_recorded_retention_never_expires() {
+    // `Keep` 说的是"这东西靠别的机制失效"（证据撤回、版本替换），而不是"我们还没想好"。
+    // 给它编一个天数，等于假装我们知道它该活多久。
+    let mut store = in_memory();
+    let content = ContentStore::temporary().expect("临时内容仓");
+    let blob_ref = register(
+        &mut store,
+        &content,
+        "模型产物".as_bytes(),
+        ContentRetention::Keep,
+        0,
+    );
+
+    let report = expire_retained(&mut store, at(3_650 * DAY)).expect("执行");
+    assert!(report.retired_content.is_empty());
+    assert!(content.contains(&blob_ref).expect("查询"));
+}
+
+#[test]
+fn a_grace_period_delays_the_purge_but_not_the_retirement() {
+    // 退休是"立刻不可见"，清理可以等。非零宽限期给内容留出一段"拿得回来"的窗口——
+    // 而那个窗口**只对内容有意义**：记忆的隐藏与清理之间没有恢复入口。
+    let mut store = in_memory();
+    let content = ContentStore::temporary().expect("临时内容仓");
+    let blob_ref = register(
+        &mut store,
+        &content,
+        "内容".as_bytes(),
+        ContentRetention::Days(1),
+        0,
+    );
+    expire_retained(&mut store, at(DAY)).expect("执行");
+
+    let policy = RetentionPolicy {
+        content_purge_grace_days: 2,
+        ..RetentionPolicy::default()
+    };
+
+    let too_early = purge_retained(&mut store, &content, &policy, at(DAY)).expect("清理");
+    assert_eq!(too_early.content_purged, 0, "宽限期内只退休、不清理");
+    assert!(content.contains(&blob_ref).expect("查询"));
+
+    let late = purge_retained(&mut store, &content, &policy, at(4 * DAY)).expect("清理");
+    assert_eq!(late.content_purged, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +325,7 @@ fn forgetting_something_that_never_existed_is_an_error() {
 #[test]
 fn the_audit_ledger_is_pruned_on_its_own_schedule() {
     let mut store = in_memory();
+    let content = ContentStore::temporary().expect("临时内容仓");
     store
         .audit(at(0), AuditCategory::UnitTransition, "unit:x", "ready", "旧的")
         .expect("写审计");
@@ -219,7 +339,13 @@ fn the_audit_ledger_is_pruned_on_its_own_schedule() {
         )
         .expect("写审计");
 
-    let report = purge_retained(&mut store, &RetentionPolicy::default(), at(40 * DAY)).expect("清理");
+    let report = purge_retained(
+        &mut store,
+        &content,
+        &RetentionPolicy::default(),
+        at(40 * DAY),
+    )
+    .expect("清理");
     assert_eq!(report.audit_pruned, 1, "30 天以前的那条应当被裁掉");
 
     let left = store.audit_entries(64).expect("读审计");
@@ -238,6 +364,7 @@ fn audit_pruning_can_be_turned_off() {
     // 审计是**追责**依据，裁掉它会让"当初为什么这么做"永久无法回答。默认开，
     // 但调用方应当能明确关掉它，而不是只能接受。
     let mut store = in_memory();
+    let content = ContentStore::temporary().expect("临时内容仓");
     store
         .audit(at(0), AuditCategory::UnitTransition, "unit:x", "ready", "旧的")
         .expect("写审计");
@@ -246,7 +373,7 @@ fn audit_pruning_can_be_turned_off() {
         prune_audit: false,
         ..RetentionPolicy::default()
     };
-    let report = purge_retained(&mut store, &policy, at(40 * DAY)).expect("清理");
+    let report = purge_retained(&mut store, &content, &policy, at(40 * DAY)).expect("清理");
     assert_eq!(report.audit_pruned, 0);
     assert_eq!(store.audit_entries(64).expect("读").len(), 1);
 }

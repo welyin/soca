@@ -313,6 +313,13 @@ fn enforce_retention(subject: &mut Subject, request: &Request, at: WallClock) ->
             .unwrap_or(30)
             .clamp(1, 3_650) as i64,
         purge: payload.get("purge").and_then(Value::as_bool).unwrap_or(true),
+        // 默认 0：退休之后当场清掉。非零值留出一段"看不见了但还拿得回来"的窗口，
+        // 而那个窗口只对内容对象有意义——记忆的隐藏与清理之间没有恢复入口。
+        content_purge_grace_days: payload
+            .get("content_purge_grace_days")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(3_650) as i64,
         prune_audit: payload
             .get("prune_audit")
             .and_then(Value::as_bool)
@@ -325,8 +332,14 @@ fn enforce_retention(subject: &mut Subject, request: &Request, at: WallClock) ->
             &json!({
                 "tombstoned": report.tombstoned.len(),
                 "purged": report.purged,
+                // 内容对象那一侧单独报：§12.3 的"对话与转写"与记忆走的是同一条两步路，
+                // 但它们是不同的东西，合并成一个数字之后，界面就答不出"走掉的是哪一类"。
+                "content_retired": report.retired_content.len(),
+                "content_purged": report.content_purged,
+                "content_bytes_freed": report.content_bytes_freed,
                 "audit_pruned": report.audit_pruned,
                 "awaiting_purge": report.awaiting_purge,
+                "content_awaiting_purge": report.content_awaiting_purge,
                 "details": report.tombstoned,
             }),
         ),

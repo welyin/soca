@@ -46,7 +46,7 @@ pub use crate::actions::{
 };
 pub use crate::audit::{AuditCategory, AuditEntry, MAX_DETAIL_LEN};
 pub use crate::blobs::StoredBlob;
-pub use crate::content::{ContentGc, ContentStore, StoredContent};
+pub use crate::content::{ContentGc, ContentRetention, ContentStore, StoredContent};
 pub use crate::error::StorageError;
 pub use crate::events::{AppendOutcome, StoredEvent};
 pub use crate::game_ledger::{GameLedgerEntry, LedgerDecision};

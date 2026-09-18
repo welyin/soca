@@ -21,7 +21,7 @@
 use rusqlite::{params, OptionalExtension};
 use soca_contracts::{BlobRef, Sha256Hex, WallClock};
 
-use crate::content::{ContentGc, ContentStore};
+use crate::content::{ContentGc, ContentRetention, ContentStore};
 use crate::error::StorageError;
 use crate::Store;
 
@@ -38,8 +38,10 @@ pub struct StoredBlob {
     pub bytes: u64,
     /// 写入时刻。
     pub created_at: WallClock,
-    /// 退休时刻。§12.3 的保留期从这里开始算。
+    /// 退休时刻。§12.3 的"先隐藏"这一步；清理走 [`Store::gc_content`]。
     pub retired_at: Option<WallClock>,
+    /// 保留期（§9.3）。写入那一刻记下，之后不随设置变化。
+    pub retention: ContentRetention,
 }
 
 impl StoredBlob {
@@ -47,12 +49,34 @@ impl StoredBlob {
     pub fn is_retired(&self) -> bool {
         self.retired_at.is_some()
     }
+
+    /// 到期时刻。`None` 表示不自动过期。
+    pub fn expires_at(&self) -> Option<WallClock> {
+        self.retention.expires_at(self.created_at)
+    }
+
+    /// 在给定时刻是否已经超过保留期，且尚未退休。
+    pub fn is_expired_at(&self, at: WallClock) -> bool {
+        !self.is_retired() && self.expires_at().is_some_and(|until| until <= at)
+    }
 }
 
-const BLOB_COLUMNS: &str = "blob_ref, sha256, media_type, bytes, created_at_utc, retired_at_utc";
+/// 一行内容元数据的原始列，顺序与 [`BLOB_COLUMNS`] 一致。
+type RawBlob = (
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    Option<i64>,
+);
 
-fn assemble(raw: (String, String, String, i64, String, Option<String>)) -> Result<StoredBlob, StorageError> {
-    let (blob_ref, sha256, media_type, bytes, created_at, retired_at) = raw;
+const BLOB_COLUMNS: &str =
+    "blob_ref, sha256, media_type, bytes, created_at_utc, retired_at_utc, retention_days";
+
+fn assemble(raw: RawBlob) -> Result<StoredBlob, StorageError> {
+    let (blob_ref, sha256, media_type, bytes, created_at, retired_at, retention_days) = raw;
     Ok(StoredBlob {
         blob_ref: BlobRef::new(blob_ref)?,
         sha256: Sha256Hex::parse(sha256)?,
@@ -64,12 +88,11 @@ fn assemble(raw: (String, String, String, i64, String, Option<String>)) -> Resul
         retired_at: retired_at
             .map(|value| WallClock::from_rfc3339(&value))
             .transpose()?,
+        retention: ContentRetention::from_days(retention_days),
     })
 }
 
-fn raw_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(String, String, String, i64, String, Option<String>)> {
+fn raw_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawBlob> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -77,6 +100,7 @@ fn raw_from_row(
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 
@@ -103,6 +127,7 @@ impl Store {
         sha256: &Sha256Hex,
         media_type: &str,
         bytes: u64,
+        retention: ContentRetention,
         at: WallClock,
     ) -> Result<bool, StorageError> {
         if let Some(existing) = load(self.connection(), blob_ref.as_str())? {
@@ -111,20 +136,61 @@ impl Store {
                     "同一内容引用对应了不同的摘要或长度；按内容寻址的引用不该出现这种情况",
                 ));
             }
+            // 保留期也不重写。§9.3 说保留期是元数据的一部分，而"元数据的一部分"意味着
+            // 它记下的是**当初**答应的事；重复登记顺手把它改成新设置，等于让一段被承诺留
+            // 7 天的内容因为一次幂等重放而提前到期。
             return Ok(false);
         }
         self.connection().execute(
-            "INSERT INTO blobs (blob_ref, sha256, media_type, bytes, created_at_utc, retired_at_utc)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+            "INSERT INTO blobs (
+                 blob_ref, sha256, media_type, bytes, created_at_utc, retired_at_utc, retention_days
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
             params![
                 blob_ref.to_string(),
                 sha256.to_string(),
                 media_type,
                 i64::try_from(bytes).unwrap_or(i64::MAX),
                 at.to_string(),
+                retention.days(),
             ],
         )?;
         Ok(true)
+    }
+
+    /// 已经超过保留期、尚未退休的内容对象（§9.3、§12.3）。
+    ///
+    /// 到期**不等于**已经清理：本方法只回答"哪些该退休了"，由调用方显式发起
+    /// [`Store::retire_blob`]。到期过滤在 Rust 侧做，理由与 `expired_memories` 相同——
+    /// RFC 3339 字符串比较只在格式完全一致时才等价于时间比较。
+    pub fn expired_blobs(&self, at: WallClock) -> Result<Vec<StoredBlob>, StorageError> {
+        let mut statement = self.connection().prepare(&format!(
+            "SELECT {BLOB_COLUMNS} FROM blobs
+              WHERE retired_at_utc IS NULL AND retention_days IS NOT NULL
+              ORDER BY created_at_utc, blob_ref"
+        ))?;
+        let rows = statement.query_map([], raw_from_row)?;
+
+        let mut expired = Vec::new();
+        for row in rows {
+            let blob = assemble(row?)?;
+            if blob.is_expired_at(at) {
+                expired.push(blob);
+            }
+        }
+        Ok(expired)
+    }
+
+    /// 当前已经退休、等着清理的内容对象数。
+    ///
+    /// 与 [`Store::blob_count`] 分开：界面要能回答"删掉的东西清干净了没有"，
+    /// 而这个问题只看在册总数答不上来。
+    pub fn retired_blob_count(&self) -> Result<usize, StorageError> {
+        let count: i64 = self.connection().query_row(
+            "SELECT COUNT(*) FROM blobs WHERE retired_at_utc IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// 读一个内容对象的元数据。
@@ -152,14 +218,18 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// 已经退休、且退休时刻早于给定时刻的对象，按退休时刻升序。
-    pub fn retired_blobs_before(
+    /// 已经退休、且退休时刻不晚于 `cutoff` 的对象，按退休时刻升序。
+    ///
+    /// 边界取**闭区间**（`<=`）而不是开区间：同一次保留期执行里"先退休、再清理"是两步，
+    /// 而开区间会让这两步在同一次调用里正好互相错过——那一刻退休的对象永远要等到下一次
+    /// 才被清理，于是"清理完了没有"这个问题的答案永远是"还差一点"。
+    pub fn retired_blobs_until(
         &self,
         cutoff: WallClock,
     ) -> Result<Vec<StoredBlob>, StorageError> {
         let mut statement = self.connection().prepare(&format!(
             "SELECT {BLOB_COLUMNS} FROM blobs
-              WHERE retired_at_utc IS NOT NULL AND retired_at_utc < ?1
+              WHERE retired_at_utc IS NOT NULL AND retired_at_utc <= ?1
               ORDER BY retired_at_utc, blob_ref"
         ))?;
         let rows = statement.query_map(params![cutoff.to_string()], raw_from_row)?;
@@ -205,7 +275,7 @@ impl Store {
         content: &ContentStore,
         cutoff: WallClock,
     ) -> Result<ContentGc, StorageError> {
-        let retired = self.retired_blobs_before(cutoff)?;
+        let retired = self.retired_blobs_until(cutoff)?;
         let mut report = ContentGc::default();
 
         for blob in &retired {
@@ -225,6 +295,7 @@ impl Store {
             .collect();
         let swept = content.gc(&known)?;
 
+        report.purged = retired.len();
         report.orphans = swept.orphans;
         report.stray_temporaries = swept.stray_temporaries;
         report.bytes_freed = report

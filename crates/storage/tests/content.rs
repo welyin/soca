@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use soca_contracts::{BlobRef, DataClass, Sha256Hex, WallClock};
-use soca_storage::{ContentStore, StorageError, Store};
+use soca_storage::{ContentRetention, ContentStore, StorageError, Store};
 
 fn at(offset_seconds: i64) -> WallClock {
     WallClock::from_rfc3339("2026-09-17T10:00:00Z")
@@ -58,6 +58,22 @@ fn content_round_trips_and_is_addressed_by_its_digest() {
         Some("一段对话原文".as_bytes().to_vec())
     );
     assert!(content.contains(&written.blob_ref).expect("查询"));
+}
+
+#[test]
+fn two_temporary_stores_do_not_share_a_directory() {
+    // 并行测试里这条真的会发生。命名只靠 pid 与时钟的话，同一刻启动的两个仓会拿到同一个
+    // 目录名（Windows 上 `SystemTime::now()` 的粒度可以粗到毫秒），然后先结束的那个析构时
+    // 把另一个的目录删掉——表现为一个**和它毫无关系**的偶发写入失败。
+    // 这条是那个缺陷的回归测试。
+    let first = ContentStore::temporary().expect("第一个");
+    let second = ContentStore::temporary().expect("第二个");
+    assert_ne!(first.root(), second.root());
+
+    let first_root = first.root().to_path_buf();
+    drop(first);
+    assert!(second.root().is_dir(), "另一个仓必须还在");
+    assert!(!first_root.exists(), "自己的目录被清掉了");
 }
 
 #[test]
@@ -164,6 +180,7 @@ fn registering_a_reference_with_a_different_digest_is_refused() {
             &written.sha256,
             "text/plain",
             written.bytes,
+            ContentRetention::Keep,
             at(0),
         )
         .expect("登记");
@@ -175,6 +192,7 @@ fn registering_a_reference_with_a_different_digest_is_refused() {
                 &Sha256Hex::of_bytes(b"something else"),
                 "text/plain",
                 written.bytes,
+                ContentRetention::Keep,
                 at(1),
             )
             .is_err(),
@@ -211,6 +229,7 @@ fn a_reference_with_metadata_but_no_bytes_is_also_a_diagnosable_missing() {
             &written.sha256,
             "text/plain",
             written.bytes,
+            ContentRetention::Keep,
             at(0),
         )
         .expect("登记");
@@ -240,6 +259,7 @@ fn gc_removes_objects_that_have_no_metadata_row() {
             &kept.sha256,
             "text/plain",
             kept.bytes,
+            ContentRetention::Keep,
             at(0),
         )
         .expect("登记");
@@ -263,7 +283,14 @@ fn gc_removes_stray_temporaries() {
     let content = ContentStore::temporary().expect("临时内容仓");
     let written = content.put(b"x", DataClass::Personal).expect("写入");
     store
-        .record_blob(&written.blob_ref, &written.sha256, "text/plain", 1, at(0))
+        .record_blob(
+            &written.blob_ref,
+            &written.sha256,
+            "text/plain",
+            1,
+            ContentRetention::Keep,
+            at(0),
+        )
         .expect("登记");
 
     let shard = path_of(&content, &written.blob_ref)
@@ -308,7 +335,14 @@ fn retiring_is_idempotent_and_keeps_the_first_moment() {
     let content = ContentStore::temporary().expect("临时内容仓");
     let written = content.put(b"z", DataClass::Personal).expect("写入");
     store
-        .record_blob(&written.blob_ref, &written.sha256, "text/plain", 1, at(0))
+        .record_blob(
+            &written.blob_ref,
+            &written.sha256,
+            "text/plain",
+            1,
+            ContentRetention::Keep,
+            at(0),
+        )
         .expect("登记");
 
     assert!(store.retire_blob(&written.blob_ref, at(100)).expect("退休"));
@@ -338,6 +372,7 @@ fn retired_content_is_purged_only_after_its_cutoff() {
             &written.sha256,
             "text/plain",
             written.bytes,
+            ContentRetention::Keep,
             at(0),
         )
         .expect("登记");

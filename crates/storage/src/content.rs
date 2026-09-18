@@ -20,10 +20,61 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use soca_contracts::{BlobRef, DataClass, Sha256Hex};
 
 use crate::error::StorageError;
+
+/// 本进程已经建过几个临时内容仓。见 [`ContentStore::temporary`]。
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// 内容对象的保留期（§9.3：「元数据存内容引用、校验和**与保留期**」）。
+///
+/// 保留期在**写入那一刻**被记下，之后不随设置变化。理由见迁移 7 的说明：一段被承诺"留 7 天"
+/// 的对话，不该因为用户第二天把设置改成 3 天就在今晚消失。改设置影响的是之后写入的内容。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentRetention {
+    /// 不自动过期。
+    ///
+    /// 授权文件派生索引、模型产物这类东西靠别的机制失效——证据撤回、版本替换——而不是靠一个
+    /// 天数。给它们编一个天数，等于假装我们知道它们该活多久。
+    Keep,
+    /// 写入之后这么多天过期。
+    Days(i64),
+}
+
+impl ContentRetention {
+    /// 从数据库里的可空天数还原。非正数按"不自动过期"处理，而不是当成瞬时过期。
+    pub fn from_days(days: Option<i64>) -> Self {
+        match days {
+            Some(days) if days > 0 => Self::Days(days),
+            _ => Self::Keep,
+        }
+    }
+
+    /// 写进数据库的天数。
+    pub fn days(self) -> Option<i64> {
+        match self {
+            Self::Keep => None,
+            Self::Days(days) => Some(days),
+        }
+    }
+
+    /// 从写入时刻推出的到期时刻。
+    pub fn expires_at(self, created_at: soca_contracts::WallClock) -> Option<soca_contracts::WallClock> {
+        self.days()
+            .map(|days| created_at.plus_seconds(days.saturating_mul(86_400)))
+    }
+
+    /// 稳定名称，用于报告与审计。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Days(_) => "days",
+        }
+    }
+}
 
 /// 一次内容写入的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +90,8 @@ pub struct StoredContent {
 /// 一次内容回收的结果。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ContentGc {
+    /// 按保留期清理掉的已退休对象数。
+    pub purged: usize,
     /// 回收的孤儿对象数（磁盘上有、元数据里没有）。
     pub orphans: usize,
     /// 清理的中断残留数（写入到一半就崩了留下的临时文件）。
@@ -50,7 +103,7 @@ pub struct ContentGc {
 impl ContentGc {
     /// 本次是否什么都没做。
     pub fn is_empty(&self) -> bool {
-        self.orphans == 0 && self.stray_temporaries == 0
+        self.purged == 0 && self.orphans == 0 && self.stray_temporaries == 0
     }
 }
 
@@ -86,16 +139,20 @@ impl ContentStore {
     ///
     /// 给测试与内存存储用。它的存在是有代价的——**重启之后内容就没了**——所以它不该是
     /// 生产环境的默认值：[`crate::Store::location`] 有路径时，调用方应当把内容仓放在旁边。
+    ///
+    /// 目录名里必须有一个**进程内的计数器**，光靠 `SystemTime::now()` 是不够的：
+    /// 测试是并行的，而 Windows 上 `SystemTime::now()` 的粒度可能粗到毫秒级，同一刻启动的
+    /// 两个测试会拿到同一个目录名——然后先结束的那个把另一个的目录删掉，表现为一个
+    /// "内容写入失败"的偶发错误，和被删掉的那个测试毫无关系。
     pub fn temporary() -> Result<Self, StorageError> {
-        let unique = format!(
-            "soca-content-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        );
-        let root = std::env::temp_dir().join(unique);
+        let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "soca-content-{}-{sequence}",
+            std::process::id()
+        ));
+        // 上一次运行崩溃可能留下同名目录（pid 被复用）。清掉它，而不是把上一次的残留
+        // 当成本次的初始内容——那会让"孤儿对象"这类测试的结果取决于上一次跑了什么。
+        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root)?;
         Ok(Self { root, owned: true })
     }

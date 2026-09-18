@@ -44,7 +44,7 @@ use soca_contracts::{
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
 use soca_storage::audit::AuditCategory;
-use soca_storage::{ContentStore, Store};
+use soca_storage::{ContentRetention, ContentStore, Store};
 
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
@@ -98,6 +98,27 @@ pub const MAX_HANDLED_CLAIMS: usize = 128;
 
 /// 写入类工具的标识。§12.2 禁止的是任意拼接的 shell 字符串，不是一个结构化的写入工具。
 pub const WRITE_TOOL: &str = "fs.write";
+
+/// 对话内容的默认保留天数（§12.3 的初值）。
+pub const CONVERSATION_RETENTION_DAYS: i64 = 7;
+
+/// 一条读回来的用户输入。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UserInput {
+    /// 事件标识。
+    pub event_id: String,
+    /// 通道。
+    pub channel: &'static str,
+    /// 收到时刻。
+    pub at: WallClock,
+    /// 正文。`None` 表示内容已按保留期被清理（§12.3）。
+    ///
+    /// **刻意留成 `None` 而不是报错。** 一段过期的对话不是"坏了"，它是按约定走完了自己的
+    /// 保留期；把它报成读取失败，界面就只能说"出错了"，而用户需要知道的是"那段内容到期了"。
+    /// 反过来，真正的损坏（元数据在册、字节却读不到）仍然报错，不会被这里吞掉——
+    /// §9.3 要的是可诊断缺失，不是把所有缺失都说成"过期了"。
+    pub text: Option<String>,
+}
 
 /// 用户输入事件流的 epoch。
 ///
@@ -297,6 +318,11 @@ pub struct Subject {
     action_goals: BTreeMap<String, GoalId>,
     /// 分段内容仓（§9.3）。用户输入与将来的大载荷都落在这里，信封只带引用。
     content: ContentStore,
+    /// 新写入的对话内容的保留期（§12.3："本地可配置保留，初值 7 天"）。
+    ///
+    /// 注意它只作用于**之后**写入的内容：已经记下的保留期留在内容对象上不动。理由见迁移 7——
+    /// 一段被承诺"留 7 天"的对话，不该因为用户第二天把设置改成 3 天就在今晚消失。
+    conversation_retention: ContentRetention,
     /// 本次会话里已经写进记忆的结论，键是 [`derivation_seed`]。
     ///
     /// 这是 §6 第 2 步那个"路由器"的雏形。那句话是"按任务、权限、来源和预算**选择少数
@@ -366,6 +392,7 @@ impl Subject {
             rounds: 0,
             action_goals: BTreeMap::new(),
             content,
+            conversation_retention: ContentRetention::Days(CONVERSATION_RETENTION_DAYS),
             handled_claims: Vec::new(),
             policy: PolicyAgent::default(),
         })
@@ -463,6 +490,9 @@ impl Subject {
             &written.sha256,
             media_type.as_str(),
             written.bytes,
+            // §12.3："对话与转写 | 本地可配置保留，初值 7 天。" 保留期记在内容对象上，
+            // 由保留期驱动去执行——它是这一行从"没有生产者"变成"有对象可执行"的那一步。
+            self.conversation_retention,
             at,
         )?;
 
@@ -507,19 +537,37 @@ impl Subject {
     /// 过滤用的是 [`Provenance::is_instruction_authority`]，而不是"看来源字符串像不像 chat"。
     /// 判断"这句话是不是用户说的"整个系统只有那一处依据（§6.1），把那份判断复制到这里，
     /// 两处迟早在某个新通道上分叉——而分叉的方向是某一类输入被当成了指令。
-    pub fn user_inputs(&self, limit: usize) -> Result<Vec<String>, CoreError> {
+    pub fn user_inputs(&self, limit: usize) -> Result<Vec<UserInput>, CoreError> {
         let mut found = Vec::new();
         for event in self.store.read_events_after(0, limit)? {
             if !event.envelope.provenance.is_instruction_authority() {
                 continue;
             }
+            let Provenance::User { channel } = &event.envelope.provenance else {
+                continue;
+            };
             let PayloadRef::Blob { blob_ref, .. } = &event.envelope.payload_ref else {
                 // 内联载荷不是本路径写出来的。跳过而不是猜内容：§11.1 的同一条原则，
                 // 拿不到就说不知道。
                 continue;
             };
-            let bytes = self.store.read_content(&self.content, blob_ref)?;
-            found.push(String::from_utf8_lossy(&bytes).into_owned());
+
+            // 元数据还在册 → 内容本该在；读不到就是**真的坏了**，按 §9.3 报可诊断缺失。
+            // 元数据已经不在了 → 它按保留期被清理过，那是约定内的消失，不是故障。
+            // 把两者都说成"过期了"，会让一段被悄悄破坏的内容看起来完全正常。
+            let text = if self.store.blob(blob_ref)?.is_some() {
+                let bytes = self.store.read_content(&self.content, blob_ref)?;
+                Some(String::from_utf8_lossy(&bytes).into_owned())
+            } else {
+                None
+            };
+
+            found.push(UserInput {
+                event_id: event.envelope.event_id.to_string(),
+                channel: channel.as_str(),
+                at: event.envelope.observed_at_utc,
+                text,
+            });
         }
         Ok(found)
     }
@@ -527,6 +575,20 @@ impl Subject {
     /// 内容仓（只读）。
     pub fn content(&self) -> &ContentStore {
         &self.content
+    }
+
+    /// 改对话内容的保留期（§12.3："本地**可配置**保留，初值 7 天"）。
+    ///
+    /// 只影响之后写入的内容。想让存量内容跟随新设置，那是一次显式的操作——不该是改一个
+    /// 数字的副作用。
+    pub fn with_conversation_retention_days(mut self, days: i64) -> Self {
+        self.conversation_retention = ContentRetention::from_days(Some(days));
+        self
+    }
+
+    /// 当前对话内容的保留期。
+    pub fn conversation_retention(&self) -> ContentRetention {
+        self.conversation_retention
     }
 
     /// 换一个内容仓。
@@ -1172,7 +1234,7 @@ impl Subject {
     ) -> Result<RetentionReport, CoreError> {
         let mut report = expire_retained(&mut self.store, at)?;
         if policy.purge {
-            report.merge(purge_retained(&mut self.store, policy, at)?);
+            report.merge(purge_retained(&mut self.store, &self.content, policy, at)?);
         }
         Ok(report)
     }

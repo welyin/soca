@@ -34,7 +34,7 @@
 //! 等有东西真的开始产出摘要，它要解决的第一个问题就是这个链接。
 
 use soca_contracts::{MemoryId, MemoryKind, WallClock};
-use soca_storage::{audit::AuditCategory, StorageError, Store};
+use soca_storage::{audit::AuditCategory, ContentStore, StorageError, Store};
 
 use crate::error::CoreError;
 
@@ -49,6 +49,12 @@ pub struct RetentionPolicy {
     /// 这个状态交给用户，清理留给下一次。§12.3 的原文用的是"**异步**清理"，所以 `false`
     /// 不是降级，而是那条要求的字面意思。
     pub purge: bool,
+    /// 内容对象退休之后，隔多少天才真正清理。
+    ///
+    /// 默认 0——和记忆一样当场清掉。非零值留出一个"看不见了但还拿得回来"的窗口，
+    /// 而那个窗口是有意义的：记忆的隐藏与清理之间没有恢复入口，内容对象有
+    /// （[`Store::retire_blob`] 只标记，字节还在）。
+    pub content_purge_grace_days: i64,
     /// 是否裁掉超期的审计账。
     ///
     /// 单独一个开关，因为它与记忆保留的后果不同：审计是**追责**依据，§12.3 给了它 30 天，
@@ -61,6 +67,7 @@ impl Default for RetentionPolicy {
         Self {
             audit_retention_days: 30,
             purge: true,
+            content_purge_grace_days: 0,
             prune_audit: true,
         }
     }
@@ -81,34 +88,66 @@ pub struct TombstonedMemory {
     pub reason: &'static str,
 }
 
+/// 一个被退休的内容对象。
+///
+/// 与 [`TombstonedMemory`] 一样**不带内容**，只带足量的元数据：清掉一段对话，却把对话
+/// 正文抄进报告，等于绕了一圈又存了一份。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RetiredContent {
+    /// 对象引用。
+    pub blob_ref: String,
+    /// 字节数。
+    pub bytes: u64,
+    /// 当初记下的保留天数。
+    pub retention_days: i64,
+}
+
 /// 一次保留期执行的报告（§12.3 的"给用户完成状态"）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RetentionReport {
-    /// 本次隐藏的条目。
+    /// 本次隐藏的记忆条目。
     pub tombstoned: Vec<TombstonedMemory>,
-    /// 本次清理掉的条目数。
+    /// 本次清理掉的记忆条数。
     pub purged: usize,
+    /// 本次退休的内容对象（§9.3 的保留期，例如对话与转写）。
+    pub retired_content: Vec<RetiredContent>,
+    /// 本次清理掉的内容对象数。
+    pub content_purged: usize,
+    /// 本次释放的字节数。
+    pub content_bytes_freed: u64,
     /// 本次裁掉的审计条数。
     pub audit_pruned: usize,
-    /// 当前仍然等着清理的条目数。
+    /// 当前仍然等着清理的记忆条数。
     ///
     /// 有了它，界面才能说清"删除已完成"与"删除还在排队"的区别——而不是把两者都显示成
     /// 一个勾。
     pub awaiting_purge: usize,
+    /// 当前仍然等着清理的内容对象数。
+    pub content_awaiting_purge: usize,
 }
 
 impl RetentionReport {
     /// 把另一次执行的报告并进来。
     pub fn merge(&mut self, other: RetentionReport) {
         self.tombstoned.extend(other.tombstoned);
+        self.retired_content.extend(other.retired_content);
         self.purged = self.purged.saturating_add(other.purged);
+        self.content_purged = self.content_purged.saturating_add(other.content_purged);
+        self.content_bytes_freed = self
+            .content_bytes_freed
+            .saturating_add(other.content_bytes_freed);
         self.audit_pruned = self.audit_pruned.saturating_add(other.audit_pruned);
         self.awaiting_purge = other.awaiting_purge;
+        self.content_awaiting_purge = other.content_awaiting_purge;
     }
 
     /// 本次是否什么都没做。
     pub fn is_empty(&self) -> bool {
-        self.tombstoned.is_empty() && self.purged == 0 && self.audit_pruned == 0
+        self.tombstoned.is_empty()
+            && self.retired_content.is_empty()
+            && self.purged == 0
+            && self.content_purged == 0
+            && self.audit_pruned == 0
     }
 }
 
@@ -120,10 +159,8 @@ impl RetentionReport {
 /// 它是**存储级**的，不按所有者分工：§12.3 的保留期是一条系统策略，而按所有者各清各的，
 /// 会让一个不再活跃的所有者的过期数据永远留着——而那恰好是最该被清掉的那一类。
 pub fn expire_retained(store: &mut Store, at: WallClock) -> Result<RetentionReport, CoreError> {
-    let expired = store.expired_memories(at)?;
     let mut tombstoned = Vec::new();
-
-    for entry in &expired {
+    for entry in store.expired_memories(at)? {
         store.tombstone(&entry.memory_id, "retention_expired", at)?;
         tombstoned.push(TombstonedMemory {
             memory_id: entry.memory_id.to_string(),
@@ -132,22 +169,39 @@ pub fn expire_retained(store: &mut Store, at: WallClock) -> Result<RetentionRepo
         });
     }
 
-    if !tombstoned.is_empty() {
+    // 内容对象的保留期（§9.3）。走同一条两步路：先退休——它不再是"当前可用"的，
+    // 但字节还在——清理留给 [`purge_retained`]。
+    let mut retired_content = Vec::new();
+    for blob in store.expired_blobs(at)? {
+        store.retire_blob(&blob.blob_ref, at)?;
+        retired_content.push(RetiredContent {
+            blob_ref: blob.blob_ref.to_string(),
+            bytes: blob.bytes,
+            retention_days: blob.retention.days().unwrap_or_default(),
+        });
+    }
+
+    if !tombstoned.is_empty() || !retired_content.is_empty() {
         // 审计只记"做了什么、几条"，不记内容——同一条理由：审计账不是存放个人内容的地方。
         store.audit(
             at,
             AuditCategory::RetentionEnforced,
-            "memory",
+            "retention",
             "expired",
-            &format!("保留期到期，已隐藏 {} 条记忆", tombstoned.len()),
+            &format!(
+                "保留期到期：隐藏 {} 条记忆、退休 {} 个内容对象",
+                tombstoned.len(),
+                retired_content.len()
+            ),
         )?;
     }
 
     Ok(RetentionReport {
         tombstoned,
-        purged: 0,
-        audit_pruned: 0,
+        retired_content,
         awaiting_purge: store.tombstoned_memory_count()?,
+        content_awaiting_purge: store.retired_blob_count()?,
+        ..RetentionReport::default()
     })
 }
 
@@ -158,10 +212,17 @@ pub fn expire_retained(store: &mut Store, at: WallClock) -> Result<RetentionRepo
 /// 对用户而言是同一个问题。
 pub fn purge_retained(
     store: &mut Store,
+    content: &ContentStore,
     policy: &RetentionPolicy,
     at: WallClock,
 ) -> Result<RetentionReport, CoreError> {
     let purged = store.purge_tombstoned()?;
+
+    // 内容对象的清理带上一个可选宽限期：退休之后不立刻删字节，就留下一段"看不见了但还
+    // 拿得回来"的窗口。默认宽限期是 0（和记忆一样当场清掉），因为多留一天就多一天的风险，
+    // 而"能拿回来"这件事对内容才有意义——记忆的隐藏与清理之间没有恢复入口。
+    let cutoff = at.plus_seconds(-policy.content_purge_grace_days.saturating_mul(86_400));
+    let gc = store.gc_content(content, cutoff)?;
 
     let audit_pruned = if policy.prune_audit {
         let cutoff = at.plus_seconds(-policy.audit_retention_days.saturating_mul(86_400));
@@ -170,21 +231,27 @@ pub fn purge_retained(
         0
     };
 
-    if purged > 0 || audit_pruned > 0 {
+    if purged > 0 || gc.purged > 0 || audit_pruned > 0 {
         store.audit(
             at,
             AuditCategory::RetentionEnforced,
-            "memory",
+            "retention",
             "purged",
-            &format!("清理 {purged} 条已隐藏记忆、{audit_pruned} 条超期审计"),
+            &format!(
+                "清理 {purged} 条已隐藏记忆、{} 个内容对象（{} 字节）、{audit_pruned} 条超期审计",
+                gc.purged, gc.bytes_freed
+            ),
         )?;
     }
 
     Ok(RetentionReport {
-        tombstoned: Vec::new(),
         purged,
+        content_purged: gc.purged,
+        content_bytes_freed: gc.bytes_freed,
         audit_pruned,
         awaiting_purge: store.tombstoned_memory_count()?,
+        content_awaiting_purge: store.retired_blob_count()?,
+        ..RetentionReport::default()
     })
 }
 
@@ -234,9 +301,9 @@ pub fn forget(
 
     Ok(RetentionReport {
         tombstoned,
-        purged: 0,
-        audit_pruned: 0,
         awaiting_purge: store.tombstoned_memory_count()?,
+        content_awaiting_purge: store.retired_blob_count()?,
+        ..RetentionReport::default()
     })
 }
 

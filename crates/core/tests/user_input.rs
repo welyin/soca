@@ -11,7 +11,7 @@ use soca_contracts::{
     ActionLevel, CapabilityPolicyRef, DataClass, ExplorationQuota, GoalBudget, ModelBackend,
     ModelBudget, ModelVersion, PayloadRef, UserChannel, WallClock,
 };
-use soca_core::{ActionBroker, SimulatedOs, Subject};
+use soca_core::{ActionBroker, RetentionPolicy, SimulatedOs, Subject};
 use soca_core_actors::DesktopAndFilesCluster;
 use soca_model_gateway::DeterministicTransport;
 use soca_storage::Store;
@@ -54,6 +54,16 @@ fn subject() -> Subject {
         ModelVersion::new("sha256:test-model").expect("固定模型版本"),
     )
     .expect("装配主体")
+}
+
+/// 取出正文，忽略事件元数据。保留期把正文清掉之后那些位置的 `text` 是 `None`。
+fn texts(subject: &Subject, limit: usize) -> Vec<String> {
+    subject
+        .user_inputs(limit)
+        .expect("读回")
+        .into_iter()
+        .filter_map(|input| input.text)
+        .collect()
 }
 
 fn delegate(subject: &mut Subject, text: &str, channel: UserChannel, level: ActionLevel) -> bool {
@@ -138,7 +148,7 @@ fn an_event_is_written_even_when_the_goal_cannot_be_created() {
         "空白陈述建不出目标"
     );
 
-    assert_eq!(subject.user_inputs(8).expect("读回"), vec!["   "]);
+    assert_eq!(texts(&subject, 8), vec!["   "]);
     assert_eq!(subject.goals().len(), 0);
 }
 
@@ -158,7 +168,7 @@ fn different_channels_get_separate_event_streams() {
         .map(|event| event.envelope.source_id.to_string())
         .collect();
     assert_eq!(sources, vec!["channel:chat", "channel:approval_ui"]);
-    assert_eq!(subject.user_inputs(8).expect("读回"), vec!["甲", "乙"]);
+    assert_eq!(texts(&subject, 8), vec!["甲", "乙"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +185,7 @@ fn a_sensor_observation_is_not_returned_as_a_user_message() {
         .expect("观测");
     assert!(delegate(&mut subject, "真的用户输入", UserChannel::Chat, ActionLevel::A1));
 
-    assert_eq!(subject.user_inputs(16).expect("读回"), vec!["真的用户输入"]);
+    assert_eq!(texts(&subject, 16), vec!["真的用户输入"]);
 
     // 反向断言：那条观测确实进了事件账，只是它不是用户输入。
     let events = subject.store().read_events_after(0, 16).expect("读事件");
@@ -188,6 +198,29 @@ fn a_sensor_observation_is_not_returned_as_a_user_message() {
         1,
         "账上只有一条有指令权限"
     );
+}
+
+#[test]
+fn an_expired_conversation_keeps_its_event_but_loses_its_content() {
+    // §12.3："对话与转写 | 本地可配置保留，初值 7 天。"
+    //
+    // 到期之后**事件还在**——"用户说过这句话"这件事发生过，抹掉它等于改写历史；走掉的是内容。
+    // 而读回来是 `text: None` 而不是一个错误：一段按约定到期的对话不是故障。
+    let mut subject = subject();
+    assert!(delegate(&mut subject, "说过的话", UserChannel::Chat, ActionLevel::A1));
+    assert_eq!(texts(&subject, 8), vec!["说过的话"]);
+
+    let report = subject
+        .enforce_retention(&RetentionPolicy::default(), at(9 * 86_400))
+        .expect("执行保留期");
+    assert_eq!(report.retired_content.len(), 1);
+    assert_eq!(report.content_purged, 1);
+
+    let inputs = subject.user_inputs(8).expect("读回");
+    assert_eq!(inputs.len(), 1, "事件还在");
+    assert_eq!(inputs[0].text, None, "内容是 `None`，不是错误");
+    assert_eq!(inputs[0].channel, "chat");
+    assert_eq!(inputs[0].at, at(0), "时刻也还在");
 }
 
 #[test]
