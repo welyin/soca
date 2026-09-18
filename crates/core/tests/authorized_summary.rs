@@ -8,17 +8,19 @@
 //! 前半句是这份测试的提纲，后半句是它存在的理由。所以这里**逐步断言**，不写成
 //! "跑一遍看最后对不对"：把七步压成一句话，恰好就变成了那句话说的东西。
 //!
-//! 四块还没有的部分，明确写在这里而不是让它们藏在"通过"后面：
+//! 三块还没有的部分，明确写在这里而不是让它们藏在"通过"后面：
 //!
 //! * **冷热驻留与恢复**（第 7 步的 checkpoint 与休眠）。单元生命周期有类型、有状态机，
 //!   但主体还没有把它们接起来；这一份测试里也没有那一段。
 //! * **预览**。§15.1 第 5 步要求"Broker显示预览，等待用户批准"——这里用
 //!   "批准绑定到这份具体参数"替代了界面上的预览，而绑定是预览的**用法**，不是它的替身：
 //!   真正的预览还要有人把内容展示出来。
-//! * **"文件已变化则失效草稿并重新核验"**（第 5 步后半句）。这需要草稿记得自己依据的是哪个
-//!   版本，而那是 §13.2 第二种学习的一部分。
 //! * **遗漏检查**（第 3 步的"和遗漏"）。它需要一个"应当覆盖什么"的期望，而那是任务合同
 //!   的事，本版还没有。
+//!
+//! 第 5 步那句"**文件已变化则失效草稿并重新核验**"已经有落点了，见
+//! [`a_draft_is_invalidated_when_the_source_changes_under_it`]：它靠的是 `EvidenceFreshness`
+//! 那条判定——"这条结论的依据里有没有最新的那条观测"。
 
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota,
@@ -330,6 +332,113 @@ fn the_authorized_summary_task_runs_end_to_end() {
         before_retention,
         "而授权的任务摘要留着"
     );
+}
+
+#[test]
+fn a_draft_is_invalidated_when_the_source_changes_under_it() {
+    // §15.1 第 5 步的后半句："在此期间，相关单元可温存；**文件已变化则失效草稿并重新核验**。"
+    //
+    // 场景是：起草之后、保存之前，原文被改了。此时那份草稿依据的是一个已经不存在的版本，
+    // 而它**看起来完全正常**——引用合法、依据核对通过（那个日期确实在它引用的那份旧正文里）。
+    // 只有把"这份材料是不是最新的"单独核一遍才发现得了。
+    //
+    // 让世界改变的办法是**写一次原文**：那是一次真实的副作用，走的也是读取—许可—执行—回执
+    // 那条路。而写进去的内容**保留同一个日期**，这样依据核对仍然通过——于是这条测试验的
+    // 确实是新鲜度，而不是顺带被"数字来源"那条挡下了。
+    let mut subject = subject();
+    let goal_id = subject
+        .delegate(
+            "整理摘要",
+            UserChannel::Chat,
+            PermissionScope {
+                capability_policy_ref: cap(CAP),
+                max_action_level: ActionLevel::A2,
+            },
+            GoalBudget::new(16, 8, 8192, 3_600_000).expect("合法额度"),
+            ExplorationQuota::new(0),
+            at(0),
+            None,
+        )
+        .expect("委托");
+    subject.accept(&goal_id, at(1)).expect("受理");
+
+    subject
+        .observe(SOURCE, DataClass::Personal, at(2))
+        .expect("观测");
+    subject
+        .consult_model(&goal_id, OutputSchema::read_only(), at(3))
+        .expect("起草");
+
+    // 原文被改：内容里仍有那个日期，但版本变了。
+    let revised = format!("{SOURCE_BODY}- 补充：会后追加一行\n");
+    subject
+        .request_write(SOURCE, &revised, at(4))
+        .expect("递交写入");
+    match subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(5))
+        .expect("跑一轮")
+        .outcome
+    {
+        RoundOutcome::Advanced {
+            step: AdvanceStep::NeedsApproval { .. },
+        } => {}
+        other => panic!("A2 写原文应当先等批准，实际：{other:?}"),
+    }
+    let approval = Approval::new(
+        ApprovalId::new("approval:revise").expect("固定审批"),
+        owner(),
+        ActionLevel::A2,
+        UserChannel::ApprovalUi,
+        at(5),
+        None,
+        1,
+    )
+    .expect("合法批准")
+    .for_parameters(write_digest(SOURCE, &revised));
+    subject.grant_approval(&approval, at(5)).expect("记下批准");
+    subject
+        .resume_after_approval(&goal_id, at(5))
+        .expect("恢复");
+    match subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(6))
+        .expect("跑一轮")
+        .outcome
+    {
+        RoundOutcome::Advanced {
+            step: AdvanceStep::Action { verdict, .. },
+        } => assert_eq!(verdict.as_deref(), Some("Supported"), "原文确实被改了"),
+        other => panic!("实际：{other:?}"),
+    }
+
+    // 再观测一次：同一个对象上出现了一条**更晚**的观测。
+    subject
+        .observe(SOURCE, DataClass::Personal, at(7))
+        .expect("重新观测");
+
+    let (candidates, selection) = subject
+        .select(&SelectionPolicy::default(), ActionLevel::A1, at(8))
+        .expect("选择");
+    let drafted = candidates
+        .candidates
+        .iter()
+        .position(|candidate| {
+            matches!(candidate, Candidate::Claim { statement, .. } if statement.contains("2026-10-15"))
+        })
+        .expect("草稿还在候选里");
+    let review = selection
+        .reviews
+        .iter()
+        .find(|review| review.candidate_index == drafted)
+        .expect("有档案");
+
+    assert!(
+        review.outcomes.iter().any(|outcome| {
+            outcome.kind == VerificationKind::EvidenceFreshness
+                && outcome.verdict == Verdict::Refuted
+        }),
+        "原文已经变了，草稿要失效——而且报的是**过期**而不是别的毛病：{review:?}"
+    );
+    assert!(review.is_refuted());
 }
 
 #[test]

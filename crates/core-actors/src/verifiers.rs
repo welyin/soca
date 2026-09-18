@@ -29,7 +29,7 @@ use soca_contracts::{
 };
 use soca_storage::ContentStore;
 
-use crate::evidence::EvidenceLedger;
+use crate::evidence::{EvidenceLedger, EvidenceRecord};
 
 /// 核对时按引用取正文的那一头。
 ///
@@ -151,6 +151,87 @@ pub fn check_evidence_access(
         // 参与竞争，而"证据没了"恰恰是最不该靠竞争来解决的那类问题。
         verdict: Verdict::Refuted,
         evidence_refs: unusable,
+    })
+}
+
+/// 证据新鲜度（§7.2 的"过期证据"、§15.1 第 5 步）。
+///
+/// 查的是：命题引用的证据，是不是**已经被同一个对象上更晚的观测取代了**。
+///
+/// §15.1 第 5 步的原话是"在此期间，相关单元可温存；**文件已变化则失效草稿并重新核验**"。
+/// 在这条判定之前，那句话没有落点：低风险档不搜反例（§6 第 4 步），于是一份依据着旧版本的
+/// 草稿在 A1 上畅通无阻——而"文件已经变了"根本不是一个反方观点，它是一条已经记在账上的观测。
+///
+/// **它只认"更新"，不认"当时"。** 一条明说"当时 X 是 Y"的命题会被它误判，因为候选里没有
+/// 时间字段可以表达那个"当时"。要修得先给命题加上时间范围，而那是更大的改动。这句写在这里，
+/// 是因为一条只在部分情况下成立的判定最容易被当成它成立的那个特例。
+pub fn check_evidence_freshness(
+    claim: &Candidate,
+    ledger: &EvidenceLedger,
+) -> Option<VerificationOutcome> {
+    let Candidate::Claim { evidence_refs, .. } = claim else {
+        return None;
+    };
+
+    // 按对象看，而不是按引用逐条看。**判据是"这条结论的依据里有没有最新的那条观测"**，
+    // 而不是"它引用的每一条是不是最新"。
+    //
+    // 这个区别很实：一条结论完全可能同时引用新旧两条证据（能力簇的版本结论就是这样，
+    // 它把见过的观测都带上），而它引用了最新的那条——那条结论**是新鲜的**。
+    // 按引用逐条判会把它判成过期，于是文件每变一次，所有引用过旧值的结论再也立不起来。
+    let mut subjects: Vec<String> = Vec::new();
+    let mut stale: Vec<EvidenceRef> = Vec::new();
+
+    for record in evidence_refs.iter().filter_map(|reference| ledger.get(reference)) {
+        if subjects.contains(&record.subject_ref) {
+            continue;
+        }
+        subjects.push(record.subject_ref.clone());
+
+        let cited: Vec<&EvidenceRecord> = evidence_refs
+            .iter()
+            .filter_map(|reference| ledger.get(reference))
+            .filter(|other| other.subject_ref == record.subject_ref)
+            .collect();
+
+        // 这个对象在账上**最新**的那条仍可用观测。`about` 按写入顺序给出，所以最后一条就是它。
+        let Some(latest) = ledger.about(&record.subject_ref).pop() else {
+            continue;
+        };
+        // 最新那条已经引用了 → 依据是最新的。
+        if cited
+            .iter()
+            .any(|other| other.evidence_ref == latest.evidence_ref)
+        {
+            continue;
+        }
+        // 而它说的与引用的那些**一样** → 什么都没变。"又看了一眼"不是过期，把它算成过期
+        // 会让每一条结论在第二次观测之后都失效。
+        if cited
+            .iter()
+            .any(|other| other.observed_value == latest.observed_value)
+        {
+            continue;
+        }
+
+        // 到这里：这个对象有一条更晚的观测，它说了另一个值，而这条结论一条都没引用。
+        // 报的是**被取代的那几条引用**，不是取代它们的那些：要处置的是这条结论引错了东西，
+        // 而"我该引用哪一条"可以从 `ledger.about(subject)` 上查到。
+        for other in cited {
+            if !stale.contains(&other.evidence_ref) {
+                stale.push(other.evidence_ref.clone());
+            }
+        }
+    }
+
+    if stale.is_empty() {
+        return None;
+    }
+
+    Some(VerificationOutcome {
+        kind: VerificationKind::EvidenceFreshness,
+        verdict: Verdict::Refuted,
+        evidence_refs: stale,
     })
 }
 
@@ -427,6 +508,11 @@ pub fn review_candidate(
 ) -> CandidateReview {
     let mut outcomes = Vec::new();
     if let Some(outcome) = check_evidence_access(candidate, ledger, bodies) {
+        outcomes.push(outcome);
+    }
+    // 新鲜度紧跟可用性，而且**不分风险等级**：它核的是"这份材料是不是已经被更晚的观测
+    // 取代了"，那不是找茬，是账上已经写着的事实。
+    if let Some(outcome) = check_evidence_freshness(candidate, ledger) {
         outcomes.push(outcome);
     }
     if let Some(outcome) = check_claim_grounding(candidate, ledger, bodies) {

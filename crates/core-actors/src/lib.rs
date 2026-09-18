@@ -39,6 +39,7 @@ pub use crate::map::{
     Cell, KnownCell, KnowledgeMap, MapUpdate, VIEW_AGENT_COLUMN, VIEW_AGENT_ROW,
 };
 pub use crate::verifiers::{
-    check_claim_grounding, check_evidence_access, check_source_independence, review_all,
-    review_candidate, search_counter_example, BodySource, NoBodies, ReviewPolicy,
+    check_claim_grounding, check_evidence_access, check_evidence_freshness,
+    check_source_independence, review_all, review_candidate, search_counter_example, BodySource,
+    NoBodies, ReviewPolicy,
 };

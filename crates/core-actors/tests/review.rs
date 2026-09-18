@@ -18,9 +18,9 @@ use soca_contracts::{
     UnitId, VerificationKind, Verdict, select,
 };
 use soca_core_actors::{
-    ReviewPolicy, check_claim_grounding, check_evidence_access, check_source_independence,
-    review_all, review_candidate, search_counter_example, BodySource, EvidenceLedger,
-    EvidenceRecord, NoBodies, MAX_EVIDENCE_RECORDS,
+    ReviewPolicy, check_claim_grounding, check_evidence_access, check_evidence_freshness,
+    check_source_independence, review_all, review_candidate, search_counter_example, BodySource,
+    EvidenceLedger, EvidenceRecord, NoBodies, MAX_EVIDENCE_RECORDS,
 };
 
 fn reference(name: &str) -> EvidenceRef {
@@ -601,6 +601,125 @@ fn a_bare_four_digit_run_is_also_checked() {
             .expect("适用")
             .verdict,
         Verdict::Refuted
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 证据新鲜度（§7.2 的"过期证据"、§15.1 第 5 步）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_claim_on_evidence_that_a_later_observation_superseded_is_refuted() {
+    // §15.1 第 5 步："在此期间，相关单元可温存；**文件已变化则失效草稿并重新核验**。"
+    //
+    // 在这条判定之前，那句话没有落点：低风险档不搜反例（§6 第 4 步），于是一份依据着旧版本的
+    // 草稿在 A1 上畅通无阻——而"文件已经变了"根本不是反方观点，它是一条已经记在账上的观测。
+    let ledger = ledger_with(vec![
+        record("old", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("new", "file:x", "sha256:bbb", "reader-1", &[]),
+    ]);
+
+    let outcome = check_evidence_freshness(&claim("file:x 的版本是 sha256:aaa", &["old"]), &ledger)
+        .expect("它引用的那条已经被取代了");
+    assert_eq!(outcome.kind, VerificationKind::EvidenceFreshness);
+    assert_eq!(outcome.verdict, Verdict::Refuted);
+    assert_eq!(
+        outcome.evidence_refs,
+        vec![reference("old")],
+        "报的是被取代的那条引用，不是取代它的那条"
+    );
+}
+
+#[test]
+fn a_claim_on_the_newest_observation_is_fresh() {
+    // 对照组。少了它，"挡住了"与"全挡了"分不开。
+    let ledger = ledger_with(vec![
+        record("old", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("new", "file:x", "sha256:bbb", "reader-1", &[]),
+    ]);
+    assert!(
+        check_evidence_freshness(&claim("file:x 的版本是 sha256:bbb", &["new"]), &ledger).is_none()
+    );
+}
+
+#[test]
+fn citing_both_the_old_and_the_new_observation_is_fresh() {
+    // 判据是**"依据里有没有最新的那条"**，不是"它引用的每一条是不是最新"。
+    //
+    // 这个区别很实：能力簇的版本结论会把见过的观测都带上，于是它同时引用新旧两条。
+    // 按引用逐条判会把它判成过期——而文件每变一次，所有引用过旧值的结论就再也立不起来了，
+    // 表现为"每观测一次就废掉一批结论"，环路会整个卡死。
+    let ledger = ledger_with(vec![
+        record("old", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("new", "file:x", "sha256:bbb", "reader-1", &[]),
+    ]);
+    assert!(
+        check_evidence_freshness(&claim("file:x 的版本是 sha256:bbb", &["old", "new"]), &ledger)
+            .is_none(),
+        "它引用了最新的那条，所以是新鲜的"
+    );
+}
+
+#[test]
+fn an_unchanged_value_does_not_make_evidence_stale() {
+    // 同一个对象被看两遍、值一样，先看的那条**不是**过期——什么都没变。
+    //
+    // 少了这一条，"又看了一眼"会被当成"变了"，于是每一条结论在第二次观测之后都失效，
+    // 而那种失效会把环路整个卡死（每一轮都在废弃上一轮的结论）。
+    let ledger = ledger_with(vec![
+        record("a", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("b", "file:x", "sha256:aaa", "reader-2", &[]),
+    ]);
+    assert!(
+        check_evidence_freshness(&claim("file:x 的版本是 sha256:aaa", &["a"]), &ledger).is_none()
+    );
+}
+
+#[test]
+fn a_retracted_observation_is_not_what_supersedes_another() {
+    // 一条已撤回的观测不该被当成"更新的那个"——它已经不作数了。用它去作废一条结论，
+    // 等于让撤回顺手把合法的结论一起带走。
+    let mut ledger = ledger_with(vec![
+        record("old", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("new", "file:x", "sha256:bbb", "reader-1", &[]),
+    ]);
+    ledger.retract(&[reference("new")], "capability_revoked");
+
+    assert!(
+        check_evidence_freshness(&claim("file:x 的版本是 sha256:aaa", &["old"]), &ledger).is_none()
+    );
+}
+
+#[test]
+fn freshness_is_checked_at_every_risk_level() {
+    // 与反例搜索分开的落点：低风险**不搜反例**，但**照样查新鲜度**。
+    // 两者都是"对这条结论不利的证据"，但一个是主动找茬，一个是账上已经写着的事实。
+    let ledger = ledger_with(vec![
+        record("old", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("new", "file:x", "sha256:bbb", "reader-1", &[]),
+    ]);
+    let low = ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8);
+    assert!(!low.counter_example, "低风险不搜反例");
+
+    let review = review_candidate(
+        0,
+        &claim("file:x 的版本是 sha256:aaa", &["old"]),
+        &ledger,
+        &NoBodies,
+        &low,
+    );
+    assert!(review.is_refuted(), "但新鲜度照样查：{:?}", review.outcomes);
+    assert!(
+        review
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.kind == VerificationKind::EvidenceFreshness)
+    );
+    assert!(
+        !review
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.kind == VerificationKind::CounterExample)
     );
 }
 

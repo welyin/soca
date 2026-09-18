@@ -53,6 +53,19 @@ pub enum VerificationKind {
     /// 存在过——只是它现在不能用了。和"值对不上"混在同一个判定里，看审计的人会去查推导
     /// 过程，而真正该看的是"谁在什么时候把权限收回了"。
     EvidenceAccess,
+    /// 证据新鲜度：这条候选引用的证据，是不是**已经被同一个对象上更晚的观测取代了**。
+    ///
+    /// 与 [`VerificationKind::CounterExample`] 分开，是因为两者**该不该跑**的条件完全不同：
+    ///
+    /// * 反例搜索是**主动找茬**。§6 第 4 步明说"低风险纯格式任务不强行编造反方观点"——
+    ///   它是对抗性的，代价是可能逼出编造的反方观点，所以按风险开关。
+    /// * 新鲜度不是找茬，是**核对一个已经记在账上的事实**：同一个对象上有一条更晚的观测
+    ///   说了另一个值。§15.1 第 5 步那句"**文件已变化则失效草稿并重新核验**"说的就是它，
+    ///   而那句话没有任何风险等级限定。
+    ///
+    /// 与 [`VerificationKind::EvidenceAccess`] 也分开：那一条是"证据没了"，这一条是"证据旧了"。
+    /// 处置完全不同——一个去重新授权，一个去重新观测。
+    EvidenceFreshness,
 }
 
 impl VerificationKind {
@@ -63,6 +76,7 @@ impl VerificationKind {
             Self::CounterExample => "counter_example",
             Self::IndependentSource => "independent_source",
             Self::EvidenceAccess => "evidence_access",
+            Self::EvidenceFreshness => "evidence_freshness",
         }
     }
 }
