@@ -23,7 +23,8 @@ use soca_contracts::{
     ActionIntent, ActionReceipt, CommitStatus, DataState, DataStateKind, ExecutionPermit, WallClock,
 };
 
-use crate::os::{AttemptOutcome, SimulatedOs};
+use crate::game_os::{GameOs, GAME_STEP_TOOL};
+use crate::os::{AttemptOutcome, ObjectState, SimulatedOs};
 
 /// 执行代理的判定结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +67,12 @@ pub enum BrokerError {
 #[derive(Debug)]
 pub struct ActionBroker {
     os: SimulatedOs,
+    /// 游戏域的出口。`None` 表示这一局没有游戏。
+    ///
+    /// 与 `os` 并列而不是塞进 `SimulatedOs`：§15.2 要的是"**隔离的** GameHost"，
+    /// 而"模拟文件系统里顺便也能玩游戏"会让文件系统那一套权限看起来覆盖了游戏，
+    /// 或者反过来。两者共用的东西只有一样——**它们都只能从 [`ActionBroker::submit`] 出去**。
+    game: Option<GameOs>,
     /// `Some(reason)` 表示代理不可用。§12.2 要求此时默认拒绝新副作用。
     unavailable: Option<String>,
 }
@@ -75,8 +82,36 @@ impl ActionBroker {
     pub fn new(os: SimulatedOs) -> Self {
         Self {
             os,
+            game: None,
             unavailable: None,
         }
+    }
+
+    /// 接上一个游戏回合。返回 `false` 表示此前已经接过一个。
+    ///
+    /// 一次只接一个：两个回合同时在跑的话，"这次动作打到哪一局"就要靠参数里的一串
+    /// 标识去猜，而猜错的代价是一步落在别的局里。
+    pub fn attach_game(&mut self, game: GameOs) -> bool {
+        if self.game.is_some() {
+            return false;
+        }
+        self.game = Some(game);
+        true
+    }
+
+    /// 当前接上的游戏回合。
+    pub fn game(&self) -> Option<&GameOs> {
+        self.game.as_ref()
+    }
+
+    /// 可变借用游戏回合。
+    pub fn game_mut(&mut self) -> Option<&mut GameOs> {
+        self.game.as_mut()
+    }
+
+    /// 摘下游戏回合。
+    pub fn detach_game(&mut self) -> Option<GameOs> {
+        self.game.take()
     }
 
     /// 借用底层环境。
@@ -87,6 +122,24 @@ impl ActionBroker {
     /// 可变借用底层环境。给传感器侧读取世界用，不给执行用。
     pub fn os_mut(&mut self) -> &mut SimulatedOs {
         &mut self.os
+    }
+
+    /// **公开面上**某个引用读得到什么。
+    ///
+    /// 这是观测唯一的入口。文件与回合在这里合流：`episode:` 归属游戏域，其余归文件系统。
+    /// 观测侧因此不必知道"这次读的是一个文件还是一局游戏"——它知道的只是"对象"。
+    /// 反过来的话，每一处观测点都要先判一次种类，而漏判的那一处会安静地观察到
+    /// "一个不存在的对象"。
+    pub fn read(&self, subject_ref: &str) -> Option<ObjectState> {
+        if let Some(game) = &self.game
+            && let Some(state) = game.read(subject_ref)
+        {
+            return Some(state);
+        }
+        self.os
+            .read(subject_ref)
+            .filter(|state| state.exists)
+            .cloned()
     }
 
     /// 让代理进入不可用状态。对应 §12.2 的"Broker 故障、策略不可读、审计写失败、磁盘满
@@ -139,8 +192,25 @@ impl ActionBroker {
             });
         }
 
-        // 4. 执行。
-        Ok(match self.os.execute(intent) {
+        // 4. 执行。**按工具选出口**，而不是"哪个都试一遍"。
+        //
+        // 试一遍的写法（先问游戏、游戏说不是我的再问文件系统）会让两个域互相知道对方的存在，
+        // 而它们本该只知道自己。更要紧的是：一个说"不是我的"和"我拒了这次"，在试一遍的写法里
+        // 长得一样——于是"游戏拒绝了这个动作"会被下一步悄悄执行在文件系统上。
+        let attempt = if intent.tool_id.as_str() == GAME_STEP_TOOL {
+            match self.game.as_mut() {
+                Some(game) => game.execute(intent),
+                // 没有游戏却来了 `game.step`：**失败关闭**，不是"那就当没发生"。
+                // 当成没发生的话，一次动作会在账上留下一条"已投递"，而世界一步没动。
+                None => AttemptOutcome::Failed {
+                    reason: "这一局没有接上游戏回合，game.step 无处执行".to_string(),
+                },
+            }
+        } else {
+            self.os.execute(intent)
+        };
+
+        Ok(match attempt {
             AttemptOutcome::Applied { version } => {
                 BrokerOutcome::Receipted(Box::new(receipt(
                     intent,

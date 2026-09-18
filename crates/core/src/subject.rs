@@ -35,14 +35,17 @@ use soca_contracts::{
     ActionId, ActionIntent, ActionLevel, ActionOutcomeSlice, Approval, BeliefSummary, BudgetRef,
     Candidate, CandidateSet, CapabilityPolicyRef, CapabilitySlice, CognitiveUnit, ContextBundle,
     ContractError, DataClass, DerivationKind, EgressPolicy, Envelope, EventId, EvidenceRef,
-    EvidenceSlice, Expectation, ExplorationQuota, GrantScope, GoalBudget, GoalId, GoalStack,
+    EvidenceSlice, Expectation, ExplorationQuota, GameAction, GameKind, GrantScope, GoalBudget,
+    GoalId, GoalStack,
     GoalState, HoldoutSet, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
     MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
-    OutputSchema, PayloadRef, PermitId, PermissionScope, PredictionRef, Provenance, ResourceCost,
+    OutputSchema, PayloadRef, Percept, PermitId, PermissionScope, PredictionRef, Provenance,
+    ResourceCost,
     ResourceScope, RetryWhen, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId,
     StrategyAdmission, StrategyCandidate, StrategyVersion, TaskId,
     ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
+use soca_game_host::EngineFactory;
 use soca_contracts::{
     PartitionKey, TemplateId, TopologyEpoch, TopologyPlan, UnitInstance, UnitState,
 };
@@ -53,6 +56,7 @@ use soca_storage::{ContentRetention, ContentStore, Store};
 
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
+use crate::game_os::{GameOs, GAME_STEP_TOOL};
 use crate::lifecycle::{CheckpointOutcome, UnitRegistry, WakeOutcome, WakePolicy};
 use crate::policy::{PermitDecision, PolicyAgent};
 use crate::reconciler::ScaleRun;
@@ -1554,6 +1558,116 @@ impl Subject {
         Ok(action_id)
     }
 
+    /// 起一局游戏，把它接到执行代理上（§15.2）。
+    ///
+    /// 引擎由 [`GameOs`] 拥有，而**动作仍然只能从 Broker 出去**——接上不等于放行。
+    /// 放行要看那个目标的能力范围里有没有 `cap:game-step`，判定在 [`PolicyAgent`] 里，
+    /// 与文件写入走的是同一段代码。
+    pub fn start_game(
+        &mut self,
+        game: GameKind,
+        episode_id: &str,
+        seed: u64,
+        factory: &dyn EngineFactory,
+    ) -> Result<(), CoreError> {
+        let state = GameOs::start(factory, game, episode_id, seed)?;
+        if !self.broker.attach_game(state) {
+            return Err(CoreError::GameAlreadyAttached);
+        }
+        Ok(())
+    }
+
+    /// 请求在游戏里走一步（§15.2）。
+    ///
+    /// 与 [`Subject::request_write`] 是同一种东西：**只投递，不执行**。它构造意图、算好
+    /// 标识、交进待推进槽位；签发许可在 L3、执行在 Broker。
+    ///
+    /// **动作标识必须由"第几步"一起派生。** 只用动作内容派生的话，连着两次 `forward`
+    /// 会撞成同一个标识，第二次被安静地判成"已经应用过"——界面上一切正常，而世界没动。
+    /// 这是一次不可撤销的推进，重放一次就是多走一步。
+    ///
+    /// 等级取 A1：游戏动作在一个沙箱里，最坏后果是"这一局走坏了"，重开一局即可，
+    /// 与"写文件"不在一个量级。而这个判断不改权限的形状——它仍然要一个**范围限定**的授权，
+    /// 范围就是这一个回合。
+    pub fn request_game_step(&mut self, op: &str, _at: WallClock) -> Result<ActionId, CoreError> {
+        let Some(goal_id) = self.next_open_goal() else {
+            return Err(CoreError::UnresolvedSubject(
+                "没有可推进的目标，这次动作无处归属".to_string(),
+            ));
+        };
+        let Some(game) = self.broker.game() else {
+            return Err(CoreError::UnresolvedSubject(
+                "这一局没有接上游戏回合，game.step 无处投递".to_string(),
+            ));
+        };
+        let episode_ref = game.episode_ref().to_string();
+        let step = game.step_index();
+
+        // 动作本身先在这里解析一次。让它构造不出来就走不到队列里——而不是等执行器
+        // 拿到一个解析不了的参数再报错，那时钱已经花了。
+        let action = serde_json::from_value::<GameAction>(serde_json::json!({ "op": op }))
+            .map_err(|error| CoreError::UnresolvedSubject(format!("不是合法的公开动作：{error}")))?;
+        if !game.game().accepts(action) {
+            return Err(CoreError::UnresolvedSubject(format!(
+                "动作 {op} 不属于 {:?}",
+                game.game()
+            )));
+        }
+
+        let action_id = ActionId::new(format!(
+            "action:{}",
+            Sha256Hex::of_bytes(
+                format!("{episode_ref}\u{1f}{step}\u{1f}{op}").as_bytes()
+            )
+        ))?;
+
+        let intent = ActionIntent::new(
+            action_id.clone(),
+            ToolId::new(GAME_STEP_TOOL)?,
+            ResourceScope::new(&episode_ref)?,
+            // 参数里同时带上"这是第几步"：它参与许可绑定的参数摘要，
+            // 于是"许可签发于第 N 步、却在第 N+3 步被用掉"是**构造得出来但校验不过**的。
+            serde_json::json!({ "action": { "op": op }, "step": step }),
+            Vec::new(),
+            PredictionRef::new(format!("prediction:{action_id}"))?,
+            ActionLevel::A1,
+            ResourceCost {
+                est_ram_bytes: 0,
+                est_tokens: 0,
+                // 一步规则推进的量级：起子进程那一局最贵，单步本身是毫秒级。
+                est_millis: 10,
+            },
+            self.cluster.unit_id().clone(),
+        )?;
+
+        self.cluster.queue_action(
+            goal_id.clone(),
+            intent,
+            // 期望只能是"这一步之后这个回合仍然观测得到"——见 `Session::run_game_round`。
+            Expectation::Present {
+                subject_ref: episode_ref,
+            },
+        )?;
+        self.action_goals.insert(action_id.to_string(), goal_id);
+        Ok(action_id)
+    }
+
+    /// 当前这一局的公开感知。**操作员视角**：它读的是执行器里的正文，不进事件账。
+    pub fn game_percept(&self) -> Option<Percept> {
+        self.broker.game().and_then(GameOs::percept)
+    }
+
+    /// 这一局推进到第几步，以及执行器一共试过几次。
+    ///
+    /// 第二个数不是凑数的：它是"这一步**有没有走到执行器**"的唯一证据。
+    /// 一次被许可挡下的动作，世界一步没动、执行器一次没试——两件事分开看，才知道
+    /// "被拒绝"与"执行了但没效果"是两回事。
+    pub fn game_progress(&self) -> Option<(u64, usize)> {
+        self.broker
+            .game()
+            .map(|game| (game.step_index(), game.attempts().len()))
+    }
+
     /// 某个目标名下还有几个待推进的动作。
     pub fn pending_actions_for(&self, goal_id: &GoalId) -> usize {
         self.cluster.pending_actions_for(goal_id)
@@ -1892,7 +2006,13 @@ impl Subject {
                     self.boot,
                 )
                 .with_policy(goal.permission_scope.clone(), DataClass::Personal);
-                let round = session.run_write_round(intent, &permit, at)?;
+                // 按**工具**选闭环，而不是按"调用方是谁"。写入与游戏走的是同一段许可判定，
+                // 从这一行往后才分岔——而分岔点只有一个，就是"怎么做这一件事"。
+                let round = if intent.tool_id.as_str() == GAME_STEP_TOOL {
+                    session.run_game_round(intent, &permit, at)?
+                } else {
+                    session.run_write_round(intent, &permit, at)?
+                };
 
                 // 动作已经走完 §6 第 3–8 步，从待推进队列里取走。留着它会让 L3 每一轮都
                 // 重新提议同一个已经执行过的动作——`run_write_round` 走的是会话路径，

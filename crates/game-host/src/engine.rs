@@ -70,7 +70,10 @@ impl EngineStep {
 }
 
 /// 规则引擎。
-pub trait Engine {
+/// `Send` 是必需的，而不是顺手加的：一个回合随**主体**一起被搬到别的线程上
+/// （控制台把主体放进工作线程）。少了它，`Box<dyn Engine>` 会让整个主体不再是 `Send`，
+/// 而报错会出现在离这里很远的一处——"主体不能跨线程"，看不出与游戏有任何关系。
+pub trait Engine: Send {
     /// 本引擎的游戏种类。宿主据此校验动作域。
     fn game(&self) -> GameKind;
 

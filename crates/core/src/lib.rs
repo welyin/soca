@@ -30,6 +30,7 @@
 pub mod broker;
 pub mod error;
 pub mod learning;
+pub mod game_os;
 pub mod lifecycle;
 pub mod maze;
 pub mod os;

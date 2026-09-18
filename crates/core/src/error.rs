@@ -79,6 +79,9 @@ pub enum CoreError {
     #[error("迁移不能开始：{reason}")]
     ScaleRefused { reason: String },
 
+    #[error("这一局已经接上一个游戏回合了")]
+    GameAlreadyAttached,
+
     #[error("游戏宿主拒绝了这次请求：{0}")]
     Game(#[from] soca_game_host::HostError),
 

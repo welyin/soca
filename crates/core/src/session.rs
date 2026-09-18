@@ -24,7 +24,7 @@ use soca_storage::{Admission, AppendOutcome, ContentRetention, ContentStore, Sto
 
 use crate::broker::{ActionBroker, BrokerOutcome};
 use crate::error::CoreError;
-use crate::os::{write_content, write_subject_ref};
+use crate::os::{write_content, write_subject_ref, ObjectState};
 
 /// 观测值中表示"对象不存在"的哨兵。
 ///
@@ -175,20 +175,14 @@ impl<'a> Session<'a> {
     /// 目前还没有定义——给它填一个数字，等于假装知道它该活多久。
     fn observe_body(
         &mut self,
-        subject_ref: &str,
+        state: &ObjectState,
         at: WallClock,
     ) -> Result<Option<BlobRef>, CoreError> {
-        let stored = {
-            let state = self
-                .broker
-                .os()
-                .read(subject_ref)
-                .filter(|state| state.exists);
-            let Some(state) = state else {
-                return Ok(None);
-            };
-            self.content.put(state.content.as_bytes(), self.data_class)?
-        };
+        // 对象**已经**被读过一次了，这里不再读第二遍。
+        //
+        // 两处各读一次看起来更省事，代价是两次读之间世界可以变——于是"版本值是 A、正文是 B"
+        // 这种记录会在账上留下一条自相矛盾的观测，而它恰恰是核验要依据的那一条。
+        let stored = self.content.put(state.content.as_bytes(), self.data_class)?;
 
         let media_type = MediaType::new("text/plain")?;
         self.store.record_blob(
@@ -222,12 +216,18 @@ impl<'a> Session<'a> {
         subject_ref: &str,
         at: WallClock,
     ) -> Result<(ObservationRecord, Envelope), CoreError> {
-        let value = self
-            .broker
-            .os()
-            .version_of(subject_ref)
-            .unwrap_or(ABSENT_VALUE)
-            .to_string();
+        // **读对象，而不是读文件系统。** 一局游戏的公开感知与一个文件的正文在这一点上
+        // 没有区别——§15.2 要的"同一 L0 事件"就是这句话。
+        //
+        // 这里原本写的是 `broker.os().version_of(..)`。它的代价不是"游戏观测不到"那么明显：
+        // `episode:` 在文件系统里查不到版本，于是**每一次游戏观测都被记成缺席**
+        // （`ABSENT_VALUE`），而表现是核验判 `Refuted`——"动作没生效"。真因是观测走错了门。
+        let state = self.broker.read(subject_ref);
+        let value = state
+            .as_ref()
+            .map(|state| state.version.to_string())
+            .unwrap_or_else(|| ABSENT_VALUE.to_string());
+
         // 对象正文进内容仓，信封只带引用（§4.1 L2 的"不无限复制"）。
         //
         // 内容按**摘要寻址**，所以同一份正文反复被观测只会存一份——"每轮观测都抄一遍全文"
@@ -235,7 +235,10 @@ impl<'a> Session<'a> {
         //
         // 对象不存在时是 `None`，而不是一段空正文：`<absent>` 与"文件存在但为空"是两件事，
         // 前面的版本值已经分开了它们，正文这里必须跟着分开。
-        let body_ref = self.observe_body(subject_ref, at)?;
+        let body_ref = match &state {
+            Some(state) => self.observe_body(state, at)?,
+            None => None,
+        };
 
         let event_id = EventId::generate();
         // 正向构造在契约层，因为撤回权限时要靠它从事件反查该失效的记忆（§12.1）。
@@ -414,6 +417,102 @@ impl<'a> Session<'a> {
         if let DispatchOutcome::Receipted(receipt) = &report.dispatch {
             let receipt = (**receipt).clone();
             self.settle(&receipt, at)?;
+            let observation_after = self.observe(&report.subject_ref, at)?;
+            let outcome = self.verify(
+                &receipt.action_id,
+                &report.prediction.prediction_ref,
+                &report.prediction.expectation,
+                &observation_after.observation,
+                at,
+            )?;
+            report.observation_after = Some(observation_after);
+            report.outcome = Some(outcome);
+            report.receipt = Some(receipt);
+        }
+
+        Ok(report)
+    }
+
+    /// 跑完一整轮"在游戏里推进一步并核对"的闭环（§15.2）。
+    ///
+    /// 形状与 [`Session::run_write_round`] 完全一样：观测 → 预测 → 受理 → 投递 → 回执 →
+    /// 再观测 → 核对。这不是巧合——§15.2 要的就是"**同一** L0 事件、L1 记忆、L3 候选和
+    /// Broker 动作循环"。差别只有两处，而两处都是实质的：
+    ///
+    /// * **对象是回合**，不是文件。`episode:` 的正文是当前公开感知，读它的路与读一个文件
+    ///   是同一条（见 [`ActionBroker::read`]）。
+    /// * **期望只能是 [`Expectation::Present`]。** 写入那一轮能押"版本会变成 X"，因为它
+    ///   自己决定了写什么；而**这一步之后会看见什么，在动作发生之前是不知道的**——
+    ///   那正是要探索的东西。所以这里押的是"这一步之后这个回合仍然观测得到"。
+    ///
+    ///   这个期望比写入那一轮弱，而**弱得诚实**：为了让预测"可检查"而编一个版本号，
+    ///   恰恰是"预测先于动作"这条规矩要防的事（§6.3）。弱的代价写在明面上——
+    ///   它验不出"这一步是不是真的动了"，那一件事由 `GameOs` 的动作级幂等与下一步的
+    ///   观测本身来回答。
+    pub fn run_game_round(
+        &mut self,
+        intent: &ActionIntent,
+        permit: &ExecutionPermit,
+        at: WallClock,
+    ) -> Result<RoundReport, CoreError> {
+        let subject_ref = self
+            .broker
+            .game()
+            .map(|game| game.episode_ref().to_string())
+            .ok_or_else(|| CoreError::UnresolvedSubject(intent.action_id.to_string()))?;
+
+        let observation_before = self.observe(&subject_ref, at)?;
+
+        let prediction = Prediction::new(
+            intent.prediction_ref.clone(),
+            subject_ref.clone(),
+            format!("这一步之后 {subject_ref} 仍然观测得到"),
+            Expectation::Present {
+                subject_ref: subject_ref.clone(),
+            },
+            TimeWindow::new(at, at.plus_seconds(60))?,
+            vec![format!("{subject_ref} 观测不到（缺席）")],
+            Uncertainty {
+                probability: None,
+                // 说清楚"不知道会看见什么"不是遗漏，而是这一轮的**全部内容**。
+                // 写成空向量的话，读的人会以为这一栏还没填。
+                notes: vec![
+                    "这一步之后会看见什么，在动作发生之前不知道——那正是要探索的东西".to_string(),
+                ],
+            },
+        )?;
+        self.predict(&prediction, at)?;
+
+        let admission = self.admit(intent, permit, at)?;
+        if !admission.is_dispatchable() {
+            return Err(CoreError::AdmissionDenied {
+                action_id: intent.action_id.to_string(),
+                reason: admission
+                    .denial_reason
+                    .clone()
+                    .unwrap_or_else(|| "受理方未给出原因".to_string()),
+            });
+        }
+
+        let dispatch = self.dispatch(intent, permit, at)?;
+
+        let mut report = RoundReport {
+            subject_ref,
+            observation_before,
+            prediction,
+            admission,
+            dispatch,
+            receipt: None,
+            observation_after: None,
+            outcome: None,
+        };
+
+        if let DispatchOutcome::Receipted(receipt) = &report.dispatch {
+            let receipt = (**receipt).clone();
+            self.settle(&receipt, at)?;
+            // 回执之后的那次观测**走的是同一条路**：`observe` 把执行器里新的公开感知
+            // 写进内容仓并记一条 L0 事件。于是"这一步看见了什么"与"这个文件现在是什么"
+            // 是同一类事实，落进同一本账。
             let observation_after = self.observe(&report.subject_ref, at)?;
             let outcome = self.verify(
                 &receipt.action_id,
