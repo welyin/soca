@@ -206,12 +206,14 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
         <div id="maze-view" class="maze-grid"></div>
       </div>
       <div>
-        <div class="hint" style="margin-bottom:6px">它拼出来的地图（★ 走过、· 认得）</div>
+        <div class="hint" style="margin-bottom:6px">
+          它拼出来的地图（★ 走过、· 认得）——往回拖，这张图会跟着缩回去
+        </div>
         <div id="maze-map" class="maze-grid"></div>
       </div>
     </div>
     <table id="maze-steps" style="margin-top:16px">
-      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得</th></tr></thead>
+      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得（新增）</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -874,7 +876,11 @@ function renderMaze() {
     .join("");
 
   // 地图：把世界坐标归一化到 0..max，画成一张固定大小的格子图。
-  const cells = mazeRun.map || [];
+  //
+  // **画的是"到这一步为止"的那一张**，不是最后那一张。往回拖滑块时地图会缩回去——
+  // 而它长大这件事，就是"探索"本身。画最后那一张的话，任何一步上看到的都是
+  // "它最后知道了什么"，于是"一步步探索"在页面上就只剩下"它探索完了"。
+  const cells = step.map || mazeRun.map || [];
   const xs = cells.map(function (cell) { return cell.at[0]; });
   const ys = cells.map(function (cell) { return cell.at[1]; });
   const minX = Math.min.apply(null, xs.concat([step.position[0]]));
@@ -904,7 +910,8 @@ function renderMaze() {
 
   $("maze-pos").textContent =
     "第 " + step.index + "/" + mazeRun.steps.length + " 步　" +
-    "朝向 " + step.direction + "　认得 " + step.known_cells + " 格";
+    "朝向 " + step.direction + "　认得 " + step.known_cells + " 格" +
+    (step.learned ? "（这一步新认得 " + step.learned + " 格）" : "（这一步没有新认得的）");
 
   // 步骤表：**走到哪一步高亮到哪一步**，这就是"一步一步"的样子。
   //
@@ -923,7 +930,8 @@ function renderMaze() {
         + "<td>" + dash(item.permit_id) + "</td>"
         + "<td>" + escapeHtml(item.receipt) + "</td>"
         + "<td>" + dash(item.verdict) + "</td>"
-        + "<td>" + item.known_cells + "</td>"
+        + "<td>" + item.known_cells
+        + (item.learned ? " <span class=\"dim\">(+" + item.learned + ")</span>" : "") + "</td>"
         + "</tr>";
     })
     .join("");
@@ -957,7 +965,8 @@ $("maze-run").onclick = async function () {
       "<b>" + escapeHtml(mazeRun.outcome) + "</b>　走了 " + mazeRun.steps.length + " 步　" +
       "认得 " + mazeRun.map.length + " 格　" +
       "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
-      "<br>走的是<b>" + (mazeRun.path === "agent" ? "认知通路" : "评估器通路") + "</b>　" +
+      "<br>开局一眼看见 " + (mazeRun.initial_cells || 0) + " 格　" +
+      "走的是<b>" + (mazeRun.path === "agent" ? "认知通路" : "评估器通路") + "</b>　" +
       (mazeRun.path === "agent"
         ? "拿到许可的有 " + gated + "/" + mazeRun.steps.length + " 步，一共排了 " + waited + " 轮队"
         : "动作直接交给宿主，没有候选竞争与执行许可") +

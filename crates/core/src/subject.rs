@@ -56,7 +56,7 @@ use soca_storage::{ContentRetention, ContentStore, Store};
 
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
-use crate::game_os::{GameOs, GAME_STEP_TOOL};
+use crate::game_os::{episode_ref, GameOs, GAME_STEP_TOOL};
 use crate::lifecycle::{CheckpointOutcome, UnitRegistry, WakeOutcome, WakePolicy};
 use crate::policy::{PermitDecision, PolicyAgent};
 use crate::reconciler::ScaleRun;
@@ -459,6 +459,13 @@ pub struct Subject {
     /// 算，而当前目标是 B。两者的检查都会通过，但结果仍然是错的：B 这个任务不该执行 A 的动作，
     /// 而用户放弃 A 的意图更不该在别处生效。
     action_goals: BTreeMap<String, GoalId>,
+    /// 已经起过几局游戏。
+    ///
+    /// 它的用处只有一个：**让回合标识唯一**。同一个 seed 跑两次是**两局**——seed 描述的是
+    /// 世界，不是这一局。少了它，第二次跑会撞上第一次的动作账：同一串
+    /// `episode/步序/动作` 派生出的动作标识相同，于是"预测已经记过"、
+    /// 而更糟的那个版本是"这个动作已经应用过"，于是第二局安静地一步不动。
+    games_started: u64,
     /// 分段内容仓（§9.3）。用户输入与将来的大载荷都落在这里，信封只带引用。
     content: ContentStore,
     /// 新写入的对话内容的保留期（§12.3："本地可配置保留，初值 7 天"）。
@@ -574,6 +581,7 @@ impl Subject {
             observed: Vec::new(),
             rounds: 0,
             action_goals: BTreeMap::new(),
+            games_started: 0,
             content,
             conversation_retention: ContentRetention::Days(CONVERSATION_RETENTION_DAYS),
             handled_claims: Vec::new(),
@@ -1563,18 +1571,39 @@ impl Subject {
     /// 引擎由 [`GameOs`] 拥有，而**动作仍然只能从 Broker 出去**——接上不等于放行。
     /// 放行要看那个目标的能力范围里有没有 `cap:game-step`，判定在 [`PolicyAgent`] 里，
     /// 与文件写入走的是同一段代码。
+    /// 返回这一局的对象引用（`episode:<id>`）——它就是能力授权要写的那个范围。
+    ///
+    /// **回合标识由这里生成，不由调用方给。** 调用方给的话，"同一个 seed 跑两次"很容易
+    /// 给出同一个标识，而那两局是**两局**：seed 描述的是世界，不是这一局。撞了标识的表现
+    /// 是第二次跑安静地一步不动（动作标识相同，被判成"已经应用过"），而单看那句
+    /// 像是探索器坏了。
     pub fn start_game(
         &mut self,
         game: GameKind,
-        episode_id: &str,
         seed: u64,
         factory: &dyn EngineFactory,
-    ) -> Result<(), CoreError> {
-        let state = GameOs::start(factory, game, episode_id, seed)?;
+    ) -> Result<String, CoreError> {
+        self.games_started = self.games_started.saturating_add(1);
+        let episode_id = format!("{}-{seed}-{}", game.as_str(), self.games_started);
+        let reference = episode_ref(&episode_id);
+        let state = GameOs::start(factory, game, &episode_id, seed)?;
         if !self.broker.attach_game(state) {
             return Err(CoreError::GameAlreadyAttached);
         }
-        Ok(())
+        Ok(reference)
+    }
+
+    /// 收掉当前这一局。返回 `false` 表示本来就没有。
+    ///
+    /// 引擎随 [`GameOs`] 一起落地，`ProcessEngine` 的 `Drop` 会杀掉那个子进程——
+    /// 不显式收一下的话，每起一局就多留一个活着的 Python。
+    ///
+    /// **它不碰目标。** "这一局结束了"与"这个目标结束了"是两件事：前者是引擎的事，
+    /// 后者是账房的事，而账房那边还有一个目标挂着 32 次激活的额度要交代。
+    /// 合成一个动作会让"收了局但没结账"变得看不出来——而那正是下一次起局时
+    /// `next_open_goal` 先轮到旧目标的成因。
+    pub fn end_game(&mut self) -> bool {
+        self.broker.detach_game().is_some()
     }
 
     /// 请求在游戏里走一步（§15.2）。

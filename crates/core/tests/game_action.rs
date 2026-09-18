@@ -67,10 +67,10 @@ fn subject() -> Subject {
 }
 
 /// 起一局、委托一个**只带 `cap:game-step`** 的目标并受理它。
-fn playing_subject(grant: bool) -> Subject {
+fn playing_subject(grant: bool) -> (Subject, String) {
     let mut subject = subject();
-    subject
-        .start_game(GameKind::Maze, EPISODE, 7, &ProbeFactory::new(8))
+    let episode = subject
+        .start_game(GameKind::Maze, 7, &ProbeFactory::new(8))
         .expect("起一局");
     let goal_id = subject
         .delegate(
@@ -89,9 +89,9 @@ fn playing_subject(grant: bool) -> Subject {
     subject.accept(&goal_id, at(1)).expect("受理");
 
     if grant {
-        grant_game_capability(&mut subject, EPISODE);
+        grant_game_capability(&mut subject, &episode);
     }
-    subject
+    (subject, episode)
 }
 
 /// 把 `cap:game-step` 授予**指定的那一个回合**。
@@ -103,11 +103,11 @@ fn playing_subject(grant: bool) -> Subject {
 ///
 /// 那比"想要的"窄——它让"授权一个游戏域"退化成"授权这一局"。窄的方向是安全的，
 /// 但它是一条**实现细节泄漏出来的语义**：把范围匹配推广到非路径引用是还没做的一件。
-fn grant_game_capability(subject: &mut Subject, episode: &str) {
+fn grant_game_capability(subject: &mut Subject, episode_ref_str: &str) {
     subject
         .grant_capability(
             CapabilityPolicyRef::new(GAME_CAP).expect("固定能力策略"),
-            soca_contracts::GrantScope::under(episode_ref(episode)).expect("范围"),
+            soca_contracts::GrantScope::under(episode_ref_str).expect("范围"),
             at(2),
         )
         .expect("授予");
@@ -157,7 +157,7 @@ fn without_the_capability_the_world_does_not_move_and_the_executor_is_never_trie
     //
     // 两个数字都要看：世界没动（步序还是 1），而且**执行器一次都没被试过**（0 次尝试）。
     // 只看着前者的话，"被拒绝了"与"执行了但没效果"是同一个样子。
-    let mut subject = playing_subject(false);
+    let (mut subject, _episode) = playing_subject(false);
     assert_eq!(subject.game_progress(), Some((1, 0)));
 
     subject
@@ -184,7 +184,7 @@ fn without_the_capability_the_world_does_not_move_and_the_executor_is_never_trie
 
 #[test]
 fn a_granted_step_goes_through_predict_admit_dispatch_observe_and_verify() {
-    let mut subject = playing_subject(true);
+    let (mut subject, _episode) = playing_subject(true);
     subject
         .request_game_step("forward", at(3))
         .expect("投递");
@@ -291,7 +291,7 @@ fn the_episode_is_observable_through_the_same_path_as_a_file() {
     // 判据不是"能不能读到正文"，而是**读到的那一份进了事件账**：执行器里的正文与账上的
     // 证据是同一份字节。这里用"预测得到 `Supported`"间接断言它——`Present` 只有在那次
     // 观测真的写成了事件、并被判成存在时才成立。
-    let mut subject = playing_subject(true);
+    let (mut subject, _episode) = playing_subject(true);
     subject
         .request_game_step("turn_left", at(3))
         .expect("投递");
@@ -382,9 +382,16 @@ fn a_grant_for_one_episode_does_not_open_another() {
     //
     // 这里用的是另一局：起一局新的（`episode-test-2`），只给 `episode-test-1` 授过权。
     let mut subject = subject();
-    subject
-        .start_game(GameKind::Maze, "episode-test-2", 7, &ProbeFactory::new(8))
-        .expect("起另一局");
+    // 起两局：授的是**第一局**，而正在跑的是第二局。两局的标识由 `start_game` 自己生成，
+    // 所以它们必然不同——这正是"同一个 seed 跑两次是两局"那句话的样子。
+    let granted = subject
+        .start_game(GameKind::Maze, 7, &ProbeFactory::new(8))
+        .expect("第一局");
+    subject.end_game();
+    let running = subject
+        .start_game(GameKind::Maze, 7, &ProbeFactory::new(8))
+        .expect("第二局");
+    assert_ne!(granted, running, "两局的标识不该撞在一起");
     let goal_id = subject
         .delegate(
             "把这一局走完",
@@ -401,7 +408,7 @@ fn a_grant_for_one_episode_does_not_open_another() {
         .expect("委托");
     subject.accept(&goal_id, at(1)).expect("受理");
     // 授的是**第一局**，不是正在跑的这一局。
-    grant_game_capability(&mut subject, EPISODE);
+    grant_game_capability(&mut subject, &granted);
 
     subject
         .request_game_step("forward", at(3))

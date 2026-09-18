@@ -37,7 +37,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 use soca_contracts::{
     ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, ExplorationQuota, GameAction,
-    GameKind, GameObservation, GoalBudget, GrantScope, MazeCell, MazeObject, MazeView, MoveAction,
+    GameKind, GameObservation, GoalBudget, GoalId, GrantScope, MazeCell, MazeObject, MazeView,
+    MoveAction,
     MoveOp, Percept, PermissionScope, PublicId, SelectionPolicy, UserChannel, WallClock,
     GAME_PROTOCOL_VERSION, MAX_ACTIVATIONS_PER_GOAL,
 };
@@ -45,7 +46,7 @@ use soca_game_host::{GameHost, HostConfig, ProcessEngineConfig, ProcessFactory};
 use soca_storage::Store;
 
 use crate::error::CoreError;
-use crate::game_os::{episode_ref, GAME_STEP_TOOL};
+use crate::game_os::GAME_STEP_TOOL;
 use crate::subject::{AdvanceStep, RoundOutcome, Subject};
 
 /// 游戏操作的能力名（§15.2）。
@@ -94,6 +95,18 @@ pub struct MazeStep {
     pub direction: u8,
     /// 到这一步为止认得的格子数。
     pub known_cells: usize,
+    /// **这一步新认得了多少格。**
+    ///
+    /// 与 `known_cells` 分开：后者是累计量，前者是*这一步*的收获。少了它，"地图在长大"
+    /// 就只是一个结论——而"这一步新看见了三格"才是看得见的动作。转身那一类不改变视野的
+    /// 步数会是 0，那也是对的：**它确实没学到东西**，而那件事值得被看见。
+    pub learned: usize,
+    /// **到这一步为止**的地图。
+    ///
+    /// 逐步存下来，而不是只存最终那一张：往回拖滑块时，地图应当**缩回当时的样子**。
+    /// 只存最终一张的话，任何一步上画的都是"它最后知道的东西"——于是"探索"这件事
+    /// 在页面上看不见了，只剩下"它探索完了"。
+    pub map: Vec<MappedCell>,
     /// 这一步的公开局部视图。
     pub view: Vec<Vec<MazeCell>>,
 
@@ -146,6 +159,14 @@ pub struct MazeRun {
     pub steps: Vec<MazeStep>,
     /// 最后拼出来的地图：世界坐标 → 已知内容。给页面画全局图用。
     pub map: Vec<MappedCell>,
+    /// **开局那一眼**看见了多少格。
+    ///
+    /// 它不属于任何一步：认知通路下它发生在第一次投递之前，评估器通路下它被并进了第一步。
+    /// 所以它单列一笔，而不是并进某一步的 `learned`——并进去的话，那一步看起来"学到了 23 格"，
+    /// 而它其实什么也没做。
+    ///
+    /// 有了它，账才是平的：**开局 + 每一步新增 = 最终的格子数**。
+    pub initial_cells: usize,
     /// **同一个格子出现过两种内容的次数。**
     ///
     /// 它应当是 0。不是 0 就说明视图约定被读错了（镜像或转置），而那件事不会以别的方式
@@ -691,6 +712,7 @@ pub fn run_episode(
             _ => 0,
         };
         let (action, reason) = explorer.decide(direction);
+        let known_before = explorer.map.len();
         let request = ActionRequest {
             protocol_version: GAME_PROTOCOL_VERSION,
             message_type: ActionRequestTag::ActionRequest,
@@ -722,6 +744,8 @@ pub fn run_episode(
             position: explorer.position,
             direction: direction_of(&observation),
             known_cells: explorer.map.len(),
+            learned: explorer.map.len().saturating_sub(known_before),
+            map: explorer.mapped(),
             view: match &observation.percept {
                 Percept::Maze(view) => view.view.clone(),
                 _ => Vec::new(),
@@ -750,6 +774,8 @@ pub fn run_episode(
         truncated: observation.truncated,
         steps,
         map: explorer.mapped(),
+        // 评估器通路没有"开局那一眼"这一步：起点那一次感知被并进第一步的 `learned` 里。
+        initial_cells: 0,
         contradictions: explorer.contradictions,
         mission,
     })
@@ -789,8 +815,36 @@ pub fn play_through_actions(
         GameKind::Maze,
     ));
 
-    let episode_id = format!("maze-{seed}");
-    subject.start_game(GameKind::Maze, &episode_id, seed, &factory)?;
+    // 起新的一局之前，先把之前那几局**收干净**。
+    //
+    // 两件事都要做，而它们不是同一件事：
+    //
+    // * **摘下旧回合。** 引擎随 `GameOs` 一起落地，那个 Python 子进程被杀。
+    //   不摘的话，第二次点"跑一局"会得到"这一局已经接上一个游戏回合了"——
+    //   而页面上那个按钮看起来只是没反应。
+    // * **收掉旧目标。** 它记着的那 32 次激活额度**已经花掉了**，而 `next_open_goal`
+    //   会先轮到它。不收的话，新一局的第一步会绑在旧目标上，然后在"额度已尽"那里
+    //   安静地停住——表现是"探索器不动了"，而账房那边才是原因。
+    //
+    // 顺序不能反：先摘局再收目标，中间那一段没有引擎在跑，也就不会有动作投递到半路。
+    subject.end_game();
+    let stale: Vec<GoalId> = subject
+        .goals()
+        .iter()
+        .filter(|goal| {
+            goal.permission_scope
+                .capability_policy_ref
+                .as_str()
+                .eq_ignore_ascii_case(GAME_CAPABILITY)
+                && !goal.state.is_terminal()
+        })
+        .map(|goal| goal.goal_id.clone())
+        .collect();
+    for goal_id in &stale {
+        subject.abandon(goal_id, at)?;
+    }
+
+    let episode = subject.start_game(GameKind::Maze, seed, &factory)?;
 
     // 委托一个**只带 `cap:game-step`** 的目标，并把这项能力授予**这一个回合**。
     //
@@ -816,11 +870,7 @@ pub fn play_through_actions(
         None,
     )?;
     subject.accept(&goal_id, at.plus_seconds(1))?;
-    subject.grant_capability(
-        capability,
-        GrantScope::under(episode_ref(&episode_id))?,
-        at.plus_seconds(2),
-    )?;
+    subject.grant_capability(capability, GrantScope::under(&episode)?, at.plus_seconds(2))?;
 
     let mut explorer = Explorer::default();
     let mut steps: Vec<MazeStep> = Vec::new();
@@ -832,6 +882,7 @@ pub fn play_through_actions(
         mission = view.mission.clone();
         explorer.absorb(&view, None);
     }
+    let initial_cells = explorer.map.len();
 
     for index in 1..=u64::from(max_steps) {
         let Some(Percept::Maze(view)) = subject.game_percept() else {
@@ -841,6 +892,7 @@ pub fn play_through_actions(
             mission = view.mission.clone();
         }
         let (action, reason) = explorer.decide(view.direction);
+        let known_before = explorer.map.len();
 
         subject.request_game_step(action.op_name(), at)?;
 
@@ -886,6 +938,8 @@ pub fn play_through_actions(
                 position: explorer.position,
                 direction: view.direction,
                 known_cells: explorer.map.len(),
+                learned: explorer.map.len().saturating_sub(known_before),
+                map: explorer.mapped(),
                 view: view.view.clone(),
                 rounds_waited,
                 candidate_index: None,
@@ -921,6 +975,8 @@ pub fn play_through_actions(
             position: explorer.position,
             direction: explorer.last_direction(),
             known_cells: explorer.map.len(),
+            learned: explorer.map.len().saturating_sub(known_before),
+            map: explorer.mapped(),
             view: match subject.game_percept() {
                 Some(Percept::Maze(view)) => view.view.clone(),
                 _ => Vec::new(),
@@ -942,12 +998,13 @@ pub fn play_through_actions(
 
     Ok(MazeRun {
         path: RunPath::Agent,
-        episode_id: episode_ref(&episode_id),
+        episode_id: episode,
         seed,
         outcome,
         truncated,
         steps,
         map: explorer.mapped(),
+        initial_cells,
         contradictions: explorer.contradictions,
         mission,
     })

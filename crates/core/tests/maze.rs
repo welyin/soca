@@ -185,6 +185,79 @@ fn the_agent_path_pays_every_toll_on_the_way() {
 }
 
 #[test]
+fn running_twice_on_the_same_subject_works_the_second_time_too() {
+    // 页面上那个"跑一局"按钮会被点第二次。而第二次曾经是**坏的**：
+    //
+    //     Err(GameAlreadyAttached) → "这一局已经接上一个游戏回合了"
+    //
+    // 两个原因叠在一起，而修一个不够：
+    //
+    // 1. 旧回合没摘，`start_game` 于是拒绝接第二个；
+    // 2. 就算摘了，旧目标还挂在栈上、而它的 32 次激活**已经花光**——`next_open_goal`
+    //    先轮到它，于是新一局的第一步绑在旧目标上、在额度耗尽处安静地停住。
+    //
+    // 第二条尤其值得钉住：它的表现是"第二局一步没走"，而单看那句话像是探索器坏了。
+    let mut subject = subject();
+    let first = play_through_actions(&mut subject, 7, 200, at(0)).expect("第一局");
+    assert!(!first.steps.is_empty());
+
+    let second = play_through_actions(&mut subject, 7, 200, at(600)).expect("第二局");
+    assert!(
+        !second.steps.is_empty(),
+        "第二局一步没走——多半是它绑到了一个额度已尽的旧目标上"
+    );
+    assert_eq!(second.contradictions, 0);
+    assert_eq!(
+        first.steps.len(),
+        second.steps.len(),
+        "同一 seed 的两局应当一样长（它是确定性的）"
+    );
+}
+
+#[test]
+fn the_map_only_grows_and_every_cell_was_new_exactly_once() {
+    // 逐步存下来的那些地图要满足两条**可算**的性质，否则"往回拖会缩回去"就只是画得好：
+    //
+    // 1. **它只增不减。** 看见过的格子不会被忘掉——`map` 只有插入与覆盖，没有删除。
+    //    如果哪一天有人加了删除（比如"过期忘掉"），这条会红，而那是**该**红的：
+    //    地图缩回去与"回到当时"是两件事，前者会让回放说谎。
+    // 2. **开局那一眼 + 每一步"新认得"的加总，正好等于最终的格子数。** 每格恰好新过一次。
+    //    这条把 `initial_cells`、`learned` 与 `known_cells` 三者绑在一起——只算错一处就会红，
+    //    而算错的表现是页面上那个"（+N）"随步数漂移，看不出是哪里错了。
+    //
+    //    开局那一笔**必须**单列：它发生在任何一步之前，并进哪一步都会让那一步看起来
+    //    "什么也没做却学到了 23 格"。（这条断言第一版就没有它，于是 29 ≠ 64。）
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("走一局");
+
+    assert!(!run.steps.is_empty());
+    let mut previous = run.initial_cells;
+    let mut total_learned = run.initial_cells;
+    for step in &run.steps {
+        assert!(
+            step.known_cells >= previous,
+            "第 {} 步的地图缩了：{} → {}",
+            step.index,
+            previous,
+            step.known_cells
+        );
+        assert_eq!(
+            step.map.len(),
+            step.known_cells,
+            "第 {} 步的逐步地图与计数对不上",
+            step.index
+        );
+        total_learned = total_learned.saturating_add(step.learned);
+        previous = step.known_cells;
+    }
+    assert_eq!(
+        total_learned,
+        run.map.len(),
+        "每一步新认得的加总应当正好等于最终的格子数"
+    );
+}
+
+#[test]
 fn the_same_seed_replays_the_same_walk() {
     // 确定性是"能看着它一步步走"的前提：换一次跑出来的不一样，就没有"刚才那一步"可谈。
     let mut first = store();
