@@ -12,6 +12,8 @@
 //! 需要 `minigrid==3.1.0`。没装时这条测试会失败而不是跳过——**跳过会让"没跑"和"跑过了"
 //! 看起来一样**，而这一行要的正是"跑过了"。
 
+use std::collections::BTreeMap;
+
 use soca_core::maze::{play_through_actions, run_episode, RunPath};
 use soca_contracts::{
     CapabilityPolicyRef, ModelBackend, ModelBudget, ModelVersion, SubjectId, WallClock,
@@ -213,6 +215,55 @@ fn the_agent_path_pays_every_toll_on_the_way() {
     assert!(
         run.steps.iter().any(|step| !step.waited_on.is_empty()),
         "整局都没有一轮记录下'给了谁'——多半是它一轮都没排过队"
+    );
+}
+
+#[test]
+fn the_walls_it_learned_match_the_truth() {
+    // **整条链对地面真值的一次比对。**
+    //
+    // 地图是靠"视图约定"拼出来的（agent 恒在 (3,6)、前方是列号变小）。那条约定读错的话
+    // ——镜像或转置——地图会**整体翻转而每一步都"看起来对"**：`contradictions` 是 0
+    // （自洽不等于正确），探索器照样能找到门和钥匙（它只是在一个镜像的世界里找）。
+    // 唯一能戳穿它的是真值。
+    //
+    // 比的是**几何**：墙、目标、岩浆那几类不会因为 agent 做了什么而改变。
+    // 钥匙和门被排除在外，不是因为它们不重要，而是因为**它们本来就该变**——
+    // 钥匙会被拿走、门会被打开，而真值那张图是**开局**的样子。
+    // 拿它去比"现在"，会把一次正确的探索判成错的。
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 300, at(0)).expect("走一局");
+    let truth = run.truth.clone().expect("真值");
+    assert!(
+        run.won(),
+        "这一局该走完，否则地图本来就缺角：{}",
+        run.outcome
+    );
+
+    let offset = (truth.start.x, truth.start.y);
+    let learned: BTreeMap<(i32, i32), String> = run
+        .map
+        .iter()
+        .map(|cell| (cell.at, cell.object.clone()))
+        .collect();
+
+    let mut compared = 0usize;
+    for cell in &truth.cells {
+        if !matches!(cell.object.as_str(), "wall" | "goal" | "lava") {
+            continue;
+        }
+        let at = (cell.x - offset.0, cell.y - offset.1);
+        compared += 1;
+        assert_eq!(
+            learned.get(&at).map(String::as_str),
+            Some(cell.object.as_str()),
+            "格子 {at:?}（世界 {:?}）与真值不符——视图约定多半读反了",
+            (cell.x, cell.y)
+        );
+    }
+    assert!(
+        compared >= 30,
+        "只比了 {compared} 格，这条测试没测到东西"
     );
 }
 

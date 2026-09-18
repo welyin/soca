@@ -82,6 +82,11 @@ pub enum CoreError {
     #[error("这一局已经接上一个游戏回合了")]
     GameAlreadyAttached,
 
+    /// 取不到迷宫真值。**它不算这一局失败**——真值只给操作员当参照物，
+    /// 拿不到时页面说"拿不到"，而不是拿一张空图冒充。
+    #[error("取不到迷宫真值：{reason}")]
+    TrueMapUnavailable { reason: String },
+
     #[error("游戏宿主拒绝了这次请求：{0}")]
     Game(#[from] soca_game_host::HostError),
 

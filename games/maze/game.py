@@ -244,6 +244,58 @@ class Maze:
         return step_payload(self.env, observation, reward, terminated, truncated)
 
 
+def truth(seed):
+    """整座迷宫的真值。**私有控制面，不是引擎协议里的一条。**
+
+    §15.2 那句"迷宫不泄露全图/绝对真值"约束的是**认知单元**：模型只收到公开观测。
+    而操作员要看的那张图、以及赛后指标，本来就在私有控制面上（同一句里写着
+    "Evaluator私有控制面负责reset、种子与赛后指标"）。所以它走的是**另一条入口**——
+    一个命令行开关，而不是协议里的一个请求类型。
+
+    分成两个入口不是为了好看：混进协议里之后，任何一条拿到 `Engine` 的代码都能顺手问一句
+    "真值是什么"，而那一句话会以"某个单元突然很会走迷宫"的形式在很久以后暴露出来。
+    走命令行则要求调用方**显式地**起一个进程，而那个动作在代码里看得见。
+
+    `start` 是开局时 agent 的世界坐标。没有它这张图对不上——**agent 自己的地图是以
+    出发点为原点的**（公开面里没有绝对坐标，它只能这么记），而这里是世界坐标。
+    两者之间差的就是这一个平移。
+    """
+    maze = Maze()
+    observation, _info = maze.env.reset(seed=int(seed))
+    start = (int(maze.env.unwrapped.agent_pos[0]), int(maze.env.unwrapped.agent_pos[1]))
+    grid = maze.env.unwrapped.grid
+    cells = []
+    for x in range(grid.width):
+        for y in range(grid.height):
+            value = grid.get(x, y)
+            if value is None:
+                continue
+            if value.type in ("wall", "door", "key", "ball", "box", "goal", "lava"):
+                # 只有门谈得上开／关／锁，而 `is_open` 也只有门才有——
+                # 对着墙问它开没开，得到的是一个 `AttributeError`，不是 `False`。
+                state = "none"
+                if value.type == "door":
+                    state = (
+                        "open" if value.is_open
+                        else "locked" if value.is_locked
+                        else "closed"
+                    )
+                cells.append({
+                    "x": x,
+                    "y": y,
+                    "object": value.type,
+                    "color": str(value.color) if value.color else "none",
+                    "state": state,
+                })
+    return {
+        "width": grid.width,
+        "height": grid.height,
+        "start": {"x": start[0], "y": start[1]},
+        "direction": int(observation["direction"]),
+        "cells": cells,
+    }
+
+
 def read_frame(stream):
     """读一帧。返回 `None` 表示对端正常关闭。"""
     header = stream.read(4)
@@ -290,7 +342,12 @@ def handle(maze, request):
     raise Refused("protocol", f"未知的请求类型 {kind!r}")
 
 
-def main():
+def main(argv):
+    # 私有控制面：`--truth <seed>` 打一份真值就退出，不进入协议循环。
+    if len(argv) >= 3 and argv[1] == "--truth":
+        print(json.dumps(truth(argv[2]), ensure_ascii=False))
+        return 0
+
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
     maze = Maze()
@@ -323,4 +380,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))

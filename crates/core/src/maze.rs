@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use soca_contracts::{
     ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, DataClass, ExplorationQuota,
     GameAction,
@@ -193,6 +193,58 @@ fn describe_step(step: &AdvanceStep) -> String {
     }
 }
 
+/// 一个坐标。只为对齐 JSON，没有别的用处。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Point {
+    /// 行。
+    pub x: i32,
+    /// 列。
+    pub y: i32,
+}
+
+/// 真值图里的一格。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrueCell {
+    /// 行。
+    pub x: i32,
+    /// 列。
+    pub y: i32,
+    /// 对象。
+    pub object: String,
+    /// 颜色。
+    pub color: String,
+    /// 开关状态。
+    pub state: String,
+}
+
+/// **迷宫真值**——私有控制面，不进公开面（§15.2）。
+///
+/// 它存在只有一个理由：**操作员需要一个参照物**。没有它，页面上那两张图（它现在看到的、
+/// 它拼出来的）都没有可比的第三样东西——"它认得对不对"、"它走到哪儿了"、"还有哪没去"
+/// 全要凭读的人自己记。
+///
+/// 它**不是**认知单元能拿到的东西：走的是另一个入口（命令行开关，不是引擎协议），
+/// 由操作员显式地起一个进程去问。公开面上没有任何一条路通向它。
+///
+/// ## `start` 不是可选的
+///
+/// agent 自己的地图是以**出发点**为原点的（公开面里没有绝对坐标，它只能这么记），
+/// 而真值是世界坐标。两者差一个平移，而那个平移就是 `start`——
+/// 少了它，两张图叠不到一起，参照物也就不成其为参照物。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrueMap {
+    /// 宽。
+    pub width: i32,
+    /// 高。
+    pub height: i32,
+    /// 开局时 agent 的世界坐标。
+    pub start: Point,
+    /// 开局朝向。
+    pub direction: u8,
+    /// 全部格子。
+    pub cells: Vec<TrueCell>,
+}
+
 /// 一局是**谁**在走的。
 ///
 /// 两条路都合法，而它们不是一回事：§15.2 把"Evaluator 私有控制面负责 reset、种子与赛后指标"
@@ -232,6 +284,11 @@ pub struct MazeRun {
     ///
     /// 有了它，账才是平的：**开局 + 每一步新增 = 最终的格子数**。
     pub initial_cells: usize,
+    /// **全局地图（真值）**——操作员的参照物，不从公开面来（§15.2）。
+    ///
+    /// 取不到时是 `None`，而不是一张空图：空图会被读成"这局没有墙"，
+    /// 而真相是"我们没能问出真值"。两者在页面上必须长得不一样。
+    pub truth: Option<TrueMap>,
     /// 这一局往 L1 里记了多少条格子记忆。
     ///
     /// 与 `map.len()` 分开：那是**这一局认得多少格**，这是**记进长期记忆多少条**。
@@ -892,6 +949,9 @@ pub fn run_episode(
         // 评估器通路没有"开局那一眼"这一步：起点那一次感知被并进第一步的 `learned` 里。
         initial_cells: 0,
         memories: 0,
+        // 真值两条路都要：它是**操作员的参照物**，与这一局走的是哪条路无关。
+        // 取不到就算了（`None`），而不是让整个请求失败——它是参照物，不是这一局的一部分。
+        truth: true_map(seed).ok(),
         contradictions: explorer.contradictions,
         mission,
     })
@@ -1175,8 +1235,38 @@ pub fn play_through_actions(
         map: explorer.mapped(),
         initial_cells,
         memories: remembered,
+        truth: true_map(seed).ok(),
         contradictions: explorer.contradictions,
         mission,
+    })
+}
+
+/// 问一次迷宫真值（私有控制面，§15.2）。
+///
+/// 它**另起一个进程**，而不是在跑着的那一局上问一句。理由不是省事，是隔离：
+/// 同一个 seed 给出同一个迷宫，所以另起一个进程问出来的东西与那一局逐格一致；
+/// 而"在同一局上问"需要给引擎加一条协议，那条协议一旦存在，任何拿到引擎的代码都能顺手
+/// 问一句"真值是什么"——它不会立刻出问题，而是以"某个单元突然很会走迷宫"的形式在很久
+/// 以后暴露出来。另一个进程问，则要求调用方显式地做这个动作，而那个动作在代码里看得见。
+pub fn true_map(seed: u64) -> Result<TrueMap, CoreError> {
+    let adapter = adapter_path();
+    let output = std::process::Command::new(engine_program())
+        .args(["-B", "-X", "utf8", &adapter, "--truth", &seed.to_string()])
+        .output()
+        .map_err(|error| CoreError::TrueMapUnavailable {
+            reason: format!("起不了真值进程：{error}"),
+        })?;
+    if !output.status.success() {
+        return Err(CoreError::TrueMapUnavailable {
+            reason: format!(
+                "真值进程退出码 {:?}：{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| CoreError::TrueMapUnavailable {
+        reason: format!("真值不是合法 JSON：{error}"),
     })
 }
 

@@ -224,12 +224,20 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       </div>
       <div>
         <div class="hint" style="margin-bottom:6px">
-          它拼出来的地图——<b>实的是"此刻认得的"，淡的是"这一局最后才认得的"</b>（当地形参照）；
-          蓝框是走过的地方，蓝块是它现在在哪。往回拖滑块，<b>实的会缩回去，淡的不动</b>。
-          <br>淡的那层<b>不是迷宫真值</b>——真值不在公开面上（§15.2）。它是这一局跑完之后
-          它自己认得的东西，只是对 8×8 的 DoorKey 恰好把 64 格走遍了。
+          它拼出来的地图——往回拖滑块，<b>实的那层会缩回去</b>（淡的只当地形参照，不动）。
+          蓝框是走过的地方，蓝块是它现在在哪。
         </div>
         <div id="maze-map" class="maze-grid"></div>
+      </div>
+      <div>
+        <div class="hint" style="margin-bottom:6px">
+          <b>全局地图（迷宫真值 · 私有控制面）</b><br>
+          三张图用同一套坐标，所以可以<b>叠着看</b>：它认得的那块落在整座迷宫的哪一部分、
+          还有哪儿没去过。蓝块是它<b>自己算出来</b>的所在——它要是漂了，你会看到它站在墙里。
+          <br>真值§15.2 不让它进公开面（模型只收公开观测），所以它走的是另一个入口：
+          操作员显式起一个进程去问，认知单元没有任何一条路通向它。
+        </div>
+        <div id="maze-truth" class="maze-grid"></div>
       </div>
     </div>
     <table id="maze-steps" style="margin-top:16px">
@@ -881,6 +889,46 @@ function mapGlyph(cell) {
   return cell.visited ? "·" : " ";
 }
 
+// 全局地图：**迷宫真值**，私有控制面来的。三张图共用一套坐标，所以能叠着看。
+//
+// 真值是世界坐标，而 agent 的地图以**出发点**为原点（公开面里没有绝对坐标，它只能这么记）——
+// 两者差一个平移，而那个平移就是 `truth.start`。少了它，这张图和另外两张对不上，
+// 参照物也就不成其为参照物。
+function renderTruthMap(step, minX, maxX, minY, maxY) {
+  const truth = mazeRun && mazeRun.truth;
+  if (!truth) {
+    $("maze-truth").innerHTML =
+      '<div class="hint">取不到真值（那一局还是能看的——它只是没有参照物）</div>';
+    return;
+  }
+  const start = truth.start || { x: 0, y: 0 };
+  const lookup = {};
+  truth.cells.forEach(function (cell) {
+    lookup[(cell.x - start.x) + "," + (cell.y - start.y)] = cell;
+  });
+
+  let rows = "";
+  for (let y = minY; y <= maxY; y += 1) {
+    let line = "";
+    for (let x = minX; x <= maxX; x += 1) {
+      const at = x + "," + y;
+      let glyph = " ";
+      let kind = "unknown";
+      if (x === step.position[0] && y === step.position[1]) {
+        // agent 的位置画在这里，是**它自己算出来的**那一个，不是真值里的——
+        // 所以这张图同时是一次自检：它漂了，就会看到自己站在墙里。
+        glyph = "你"; kind = "agent";
+      } else if (lookup[at]) {
+        glyph = mapGlyph(lookup[at]);
+        kind = lookup[at].object;
+      }
+      line += "<span class=\"maze-cell " + escapeHtml(kind) + "\">" + escapeHtml(glyph) + "</span>";
+    }
+    rows += "<div class=\"maze-row\">" + line + "</div>";
+  }
+  $("maze-truth").innerHTML = rows;
+}
+
 function renderMaze() {
   if (!mazeRun) { return; }
   const step = mazeRun.steps[Math.min(mazeAt, mazeRun.steps.length - 1)];
@@ -960,6 +1008,7 @@ function renderMaze() {
     rows += "<div class=\"maze-row\">" + line + "</div>";
   }
   $("maze-map").innerHTML = rows;
+  renderTruthMap(step, minX, maxX, minY, maxY);
 
   $("maze-pos").textContent =
     "第 " + step.index + "/" + mazeRun.steps.length + " 步　" +
