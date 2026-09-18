@@ -8,10 +8,11 @@ use serde_json::{json, Value};
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, EventId,
     EvidenceRef, ExplorationQuota, GoalBudget, GoalId, GoalState, GrantScope, MemoryId,
-    PermissionScope, SelectionPolicy, Sha256Hex, StrategyCandidate, StrategyVersion, UserChannel,
-    WallClock,
+    ModelBackend, ModelReservation, PermissionScope, PlannerPolicy, ResourceEnvelope,
+    SelectionPolicy, Sha256Hex,
+    StrategyCandidate, StrategyVersion, UserChannel, WallClock,
 };
-use soca_core::{CoreError, Correction, RetentionPolicy, Scheduler, Subject};
+use soca_core::{CoreError, Correction, Resources, RetentionPolicy, Scheduler, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
 use soca_storage::audit::AuditCategory;
 
@@ -951,11 +952,20 @@ fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response
             .clamp(1, 16) as u32,
     };
 
-    match scheduler.run(subject, &SelectionPolicy::default(), risk, at) {
+    // §17 的"弹性"：包络由调用方给（"**人为**降低可用内存"），规划器（§10.1）判可行性。
+    let resources = match resources_from(&payload) {
+        Ok(resources) => resources,
+        Err(message) => return Response::text(400, message),
+    };
+
+    match scheduler.run(subject, &resources, &SelectionPolicy::default(), risk, at) {
         Ok(report) => Response::json(
             200,
             &json!({
                 "risk": risk.as_str(),
+                // 把看到的资源状况一并报出去：只报"停了"的话，操作员得自己去猜
+                // 是暂停、是资源、还是跑完了。
+                "resources": resources,
                 "schedule": report.outcome,
                 "rounds": report.rounds,
                 "state": subject.public_state(at).ok(),
@@ -966,6 +976,94 @@ fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response
             &json!({"error": "round_failed", "detail": error.to_string()}),
         ),
     }
+}
+
+/// 从请求体里读出一个资源包络，并算出资源状况（§10.1、§17 的"弹性"）。
+///
+/// §17 那一行说的是"**人为**降低可用内存、GPU OOM、磁盘忙时……"——所以这个输入本来就该由
+/// 调用方给，而不是由程序去读硬件：本版没有读真实硬件（§19 末段），而"人为造一份包络"
+/// 恰恰是那一行要求的验收方式。
+///
+/// 没给包络时返回 [`Resources::Unknown`]。**这是刻意的默认**：§17 要的是压力下停住，
+/// 而"没人说有多少资源"不是一种压力。让缺配置表现为"永远不跑"的话，一个忘了填表的界面
+/// 会看起来像挂了。
+fn resources_from(payload: &Value) -> Result<Resources, String> {
+    let Some(envelope) = payload.get("envelope") else {
+        return Ok(Resources::Unknown);
+    };
+
+    // 一次压力事件：不等伸缩滞后（§5.3 的"不能等 10 秒伸缩滞后才处理实际 OOM"）。
+    if envelope.get("emergency").and_then(Value::as_bool) == Some(true) {
+        return Ok(Resources::Emergency {
+            reason: envelope
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("人为制造的压力事件")
+                .to_string(),
+        });
+    }
+
+    let ram_limit_mib = envelope
+        .get("ram_limit_mib")
+        .and_then(Value::as_u64)
+        .ok_or("envelope 缺少 ram_limit_mib")?;
+    let cpu_slots = envelope
+        .get("cpu_slots")
+        .and_then(Value::as_u64)
+        .ok_or("envelope 缺少 cpu_slots")?;
+    let typed = ResourceEnvelope {
+        ram_limit_mib,
+        cpu_slots: cpu_slots.min(u64::from(u32::MAX)) as u32,
+        // API 不可用时为 0，不猜测（§5 的原文）。
+        gpu_allocatable_mib: envelope
+            .get("gpu_allocatable_mib")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        telemetry_age_seconds: envelope
+            .get("telemetry_age_seconds")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+    };
+
+    // 模型画像也由调用方给：**判"能不能跑"要用到模型的 RAM 与 VRAM 占用**，
+    // 拿一个默认值去算，会让"GPU OOM"这一类压力永远造不出来。
+    let mut model = ModelReservation::default();
+    if let Some(declared) = envelope.get("model") {
+        model.ram_mib = declared
+            .get("ram_mib")
+            .and_then(Value::as_u64)
+            .unwrap_or(model.ram_mib);
+        model.vram_mib = declared
+            .get("vram_mib")
+            .and_then(Value::as_u64)
+            .unwrap_or(model.vram_mib);
+        // 后端也必须能声明。少了它，"GPU OOM"这一类压力从产品上就**造不出来**——
+        // 契约层会以"只有 GPU 后端可以预约 VRAM"拒掉那份输入，而那条错误看起来像是
+        // 参数写错了，不像是"我们要测的那件事暂时测不了"。
+        model.backend = match declared.get("backend").and_then(Value::as_str) {
+            None => model.backend,
+            Some("cpu") => ModelBackend::Cpu,
+            Some("gpu") => ModelBackend::Gpu,
+            Some("remote") => ModelBackend::Remote,
+            Some(other) => return Err(format!("model.backend 只能是 cpu/gpu/remote，收到 {other}")),
+        };
+        model.remote_authorized = declared
+            .get("remote_authorized")
+            .and_then(Value::as_bool)
+            .unwrap_or(model.remote_authorized);
+    }
+
+    // 需求叶数取最小档——本版是单主体，需求本身不增长（§2："不因空闲 RAM 多就生成无任务角色"）。
+    // 于是这里的压力只来自**包络**，而那正是 §17 要造的东西。
+    let plan = soca_core_topology::plan_topology(
+        &typed,
+        &model,
+        u64::from(soca_contracts::LEAF_PROFILES[0]),
+        &PlannerPolicy::default(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(Resources::from_plan(&plan))
 }
 
 /// §12.1 的全局暂停。

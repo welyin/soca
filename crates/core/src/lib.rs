@@ -34,6 +34,7 @@ pub mod lifecycle;
 pub mod os;
 pub mod policy;
 pub mod replay;
+pub mod resources;
 pub mod schedule;
 pub mod retention;
 pub mod session;
@@ -50,6 +51,7 @@ pub use crate::retention::{
     expire_retained, forget, purge_retained, RetentionPolicy, RetentionReport, TombstonedMemory,
 };
 pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
+pub use crate::resources::Resources;
 pub use crate::schedule::{ScheduleOutcome, ScheduleReport, Scheduler};
 pub use crate::session::{
     evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,

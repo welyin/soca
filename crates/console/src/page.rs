@@ -202,6 +202,8 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       </select>
       <button id="run-select" class="ghost">检验并选择</button>
       <input id="loop-rounds" type="number" min="1" max="32" value="4" style="width:76px" title="最多跑几轮">
+      <input id="loop-ram" type="number" min="0" step="64" value="4096" style="width:96px" title="可用内存上限（MiB）">
+      <span class="hint">MiB 上限</span>
       <button id="run-loop">跑一段</button>
       <button id="pause" class="ghost">全局暂停</button>
       <button id="resume-run" class="ghost">恢复</button>
@@ -219,6 +221,12 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       <b>全局暂停同时停三件事</b>：新许可、新采集（观测）、模型调用。
       暂停写不进审计也要停住——停住永远是安全的那一侧；而<b>恢复</b>相反，审计必须写在它前面，
       否则"怎样才能让这台机器放开"就有了一个答案：把审计写坏。
+    </div>
+    <div class="hint">
+      <b>内存上限那一格是 §17 的"弹性"那一行。</b>把 MiB 调到 256 以下（控制预算不够）、
+      或者把遥测标成过期，调度器就会在<b>跑第一轮之前</b>停下并报出规划器给的理由——
+      而不是跑一轮再发现。资源压力停的是<b>后台的认知工作</b>，不是你对这个系统的控制权：
+      暂停、批准、取消、看状态在压力之下照常可用（§14 的同一条原则）。
     </div>
     <div class="hint">
       <b>每一条候选都有去处</b>：要么被选中，要么留下一条拒绝记录，带着理由和
@@ -835,9 +843,20 @@ $("run-loop").onclick = async function () {
     const result = await api("loop", {
       risk: $("select-risk").value,
       rounds: parseInt($("loop-rounds").value, 10) || 1,
+      // §17 那句"**人为**降低可用内存"就是这个输入。不填就不带包络，
+      // 而后端按"不知道 = 可以跑"处理——那是刻意的默认（见 `Resources` 的文档）。
+      envelope: {
+        ram_limit_mib: parseInt($("loop-ram").value, 10) || 4096,
+        cpu_slots: 4,
+      },
     });
     $("select-out").textContent = JSON.stringify(result, null, 2);
-    log("调度结果：" + describeSchedule(result.schedule), "ok");
+    log(
+      "调度结果：" + describeSchedule(result.schedule) +
+      "　资源：" + result.resources.kind +
+      (result.resources.reason ? "（" + result.resources.reason + "）" : ""),
+      "ok"
+    );
   } catch (error) {
     $("select-out").textContent = error.message;
     log("闭环失败：" + error.message, "err");

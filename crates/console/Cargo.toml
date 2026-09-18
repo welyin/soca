@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 soca-contracts = { path = "../contracts" }
 soca-core = { path = "../core" }
+soca-core-topology = { path = "../core-topology" }
 soca-core-actors = { path = "../core-actors" }
 soca-model-gateway = { path = "../model-gateway" }
 soca-storage = { path = "../storage" }

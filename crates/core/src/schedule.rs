@@ -6,10 +6,12 @@
 //! 1. **暂停优先于一切。** §12.1 的全局暂停是用户的一个动作，而用户按下它期望的是
 //!    "现在停"。跑完手头这几轮再停，等于把一个安全动作变成一个礼貌建议。所以暂停
 //!    **每一轮都查**，不是只在开头查一次。
-//! 2. **没有进展就要退避。** 没有可推进的候选时继续跑，只会把审计账塞满一样的记录
+//! 2. **资源压力同样优先。** §17"弹性"那一行是"人为降低可用内存、GPU OOM、磁盘忙时，
+//!    **停止后台扩容**并保持取消/审批可响应"。[`Resources`] 承载前半句，与暂停**同列**
+//!    但**报成两回事**——一个是用户按的，一个是机器到的。
+//! 3. **没有进展就要退避。** 没有可推进的候选时继续跑，只会把审计账塞满一样的记录
 //!    ——§12.3 说审计只放最小元数据，正是因为它假设每条记录都对应一次真实发生的事。
-//! 3. **有界。** 一次调度不能占住任意长的时间。这正是 §17"弹性"那一行要的：
-//!    "人为降低可用内存、GPU OOM、磁盘忙时，停止后台扩容并**保持取消/审批可响应**"。
+//! 4. **有界。** 一次调度不能占住任意长的时间。
 //!
 //! ## 它不拥有时钟
 //!
@@ -23,6 +25,7 @@ use serde::Serialize;
 use soca_contracts::{ActionLevel, SelectionPolicy, WallClock};
 
 use crate::error::CoreError;
+use crate::resources::Resources;
 use crate::subject::{AdvanceStep, LoopRound, RoundOutcome, Subject};
 
 /// 一次调度的参数。
@@ -50,9 +53,14 @@ impl Scheduler {
     pub const SECONDS_PER_ROUND: i64 = 1;
 
     /// 跑一段。
+    ///
+    /// `resources` 是这个调用点**看到的**资源状况（§17 的"弹性"）。由调用方给，而不是
+    /// 调度器自己去读硬件：§9.1 说"**应用**决定'谁该工作'"，而"现在有多少资源"是硬件与
+    /// 规划器（§10.1）的回答，不是调度器的。
     pub fn run(
         &self,
         subject: &mut Subject,
+        resources: &Resources,
         policy: &SelectionPolicy,
         risk: ActionLevel,
         at: WallClock,
@@ -65,6 +73,18 @@ impl Scheduler {
             if let Some(reason) = subject.policy().pause_reason() {
                 break ScheduleOutcome::Paused {
                     reason: reason.to_string(),
+                    rounds,
+                };
+            }
+            // 资源压力与暂停同列，而且**每一轮都查**——理由和暂停那一档一样：§17 要的是
+            // "停止后台扩容并**保持取消/审批可响应**"，而"可响应"的前提是它没有先把机器压垮。
+            //
+            // 放在跑轮之前而不是之后：这一档要挡住的是"再要一份资源"，而跑完一轮再检查
+            // 就已经要过了。
+            if let Some(reason) = resources.stop_reason() {
+                break ScheduleOutcome::ResourcePressure {
+                    reason: reason.to_string(),
+                    emergency: resources.is_emergency(),
                     rounds,
                 };
             }
@@ -177,6 +197,20 @@ pub enum ScheduleOutcome {
         /// 停下来之前跑了几轮。
         rounds: u32,
     },
+    /// 资源压力下停下（§17 的"弹性"）。
+    ///
+    /// 与 [`ScheduleOutcome::Paused`] 分开：那一档是**用户按的**，这一档是**机器到的**。
+    /// 合成一个取值的话，操作员看到"停了"会去问"谁按的暂停"——而这一档的答案是
+    /// "没人按，是它自己到了边上"，该做的事完全不同。
+    ResourcePressure {
+        /// 压力来源（§5 的 `PlanReason`，或一次紧急事件的来源）。
+        reason: String,
+        /// 是不是一次压力事件（而不是计划上的暂停）。§5.3 的"不能等 10 秒伸缩滞后
+        /// 才处理实际 OOM"说的就是这一个比特。
+        emergency: bool,
+        /// 停下来之前跑了几轮。
+        rounds: u32,
+    },
     /// 需要外部输入（§6 第 9 步的"请求澄清"）。
     NeedsInput {
         /// 实际跑了几轮。
@@ -201,6 +235,7 @@ impl ScheduleOutcome {
             | Self::Finished { rounds }
             | Self::BackedOff { rounds, .. }
             | Self::Paused { rounds, .. }
+            | Self::ResourcePressure { rounds, .. }
             | Self::NeedsInput { rounds, .. }
             | Self::NeedsApproval { rounds, .. } => *rounds,
         }

@@ -1313,6 +1313,88 @@ fn correcting_by_a_source_that_nothing_was_derived_from_retracts_nothing() {
 }
 
 #[test]
+fn the_console_stops_the_loop_when_told_the_machine_is_out_of_resources() {
+    // §17 的"弹性"那一行："**人为**降低可用内存、GPU OOM、磁盘忙时，**停止后台扩容**并
+    // 保持取消/审批可响应。"
+    //
+    // "人为"两个字点明了这一行的验收方式：包络由调用方造，而不是程序去读硬件——本版不读
+    // 真实硬件（§19 末段），所以"造一份苛刻的包络"是唯一能测的形式。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        &body(json!({"message": "整理摘要"})),
+    );
+
+    // 一、健康的包络：照常跑。
+    let healthy = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({
+            "risk": "a1",
+            "rounds": 2,
+            "envelope": {"ram_limit_mib": 4096, "cpu_slots": 4}
+        })),
+    ));
+    assert_eq!(healthy["resources"]["kind"], "running", "{healthy}");
+    assert_ne!(healthy["schedule"]["kind"], "resource_pressure");
+
+    // 二、把上限降到连控制预算都不够——**一轮都不该跑**。
+    let starved = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({
+            "risk": "a1",
+            "rounds": 2,
+            "envelope": {"ram_limit_mib": 64, "cpu_slots": 1}
+        })),
+    ));
+    assert_eq!(
+        starved["schedule"]["kind"], "resource_pressure",
+        "该停下：{starved}"
+    );
+    assert_eq!(starved["schedule"]["rounds"], 0, "一轮都不该跑");
+    assert!(
+        starved["schedule"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("CONTROL_RESERVE")),
+        "理由要来自规划器：{starved}"
+    );
+
+    // 三、而**控制通道不排在资源队列后面**：压力之下暂停照样能按。
+    let paused = call(
+        &mut subject,
+        "POST",
+        "/api/policy/pause",
+        &body(json!({"reason": "机器扛不住了"})),
+    );
+    assert_eq!(paused.status, 200, "{}", paused.body);
+
+    // 四、没有包络时按"可以跑"处理——**那是刻意的默认**，所以钉一条。
+    //
+    // 权限的默认朝拒绝，因为放行一次不该放行的动作不可逆；调度器的默认朝放行，因为
+    // "没给包络"是配置缺失，不是一种压力。让缺配置表现为"永远不跑"的话，一个忘了填表的
+    // 界面会看起来像挂了——那种故障最难归因。
+    call(
+        &mut subject,
+        "POST",
+        "/api/policy/resume",
+        &body(json!({})),
+    );
+    let unknown = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 1})),
+    ));
+    assert_eq!(unknown["resources"]["kind"], "unknown", "{unknown}");
+    assert_ne!(unknown["schedule"]["kind"], "resource_pressure");
+}
+
+#[test]
 fn the_loop_reports_why_the_scheduler_stopped() {
     // "跑一段"的返回值要说明**为什么停**。否则界面上只有"跑了 N 轮"，而"没有目标了"
     // 与"连续空转"与"被暂停"三件事看起来一模一样——而它们接下来该做的事完全不同。

@@ -14,8 +14,8 @@ use soca_contracts::{
     PermissionScope, RetryWhen, SelectionPolicy, SubjectId, UserChannel, WallClock,
 };
 use soca_core::{
-    ActionBroker, AdvanceStep, CoreError, RoundOutcome, ScheduleOutcome, Scheduler, SimulatedOs,
-    Subject,
+    ActionBroker, AdvanceStep, CoreError, Resources, RoundOutcome, ScheduleOutcome, Scheduler,
+    SimulatedOs, Subject,
 };
 use soca_core_actors::DesktopAndFilesCluster;
 use soca_model_gateway::DeterministicTransport;
@@ -102,7 +102,13 @@ fn the_scheduler_stops_when_there_is_nothing_left_to_do() {
     // 没有目标时一轮就报结束，而不是空转满请求的轮数——空转会把审计账塞满一样的记录。
     let mut subject = subject();
     let report = Scheduler::default()
-        .run(&mut subject, &SelectionPolicy::default(), ActionLevel::A1, at(0))
+        .run(
+            &mut subject,
+            &Resources::Unknown,
+            &SelectionPolicy::default(),
+            ActionLevel::A1,
+            at(0),
+        )
         .expect("跑一段");
 
     assert!(
@@ -125,7 +131,13 @@ fn the_scheduler_stops_at_its_round_budget() {
         max_rounds: 2,
         idle_limit: 8,
     }
-    .run(&mut subject, &SelectionPolicy::default(), ActionLevel::A1, at(2))
+    .run(
+            &mut subject,
+            &Resources::Unknown,
+            &SelectionPolicy::default(),
+            ActionLevel::A1,
+            at(2),
+        )
     .expect("跑一段");
 
     assert!(
@@ -152,7 +164,13 @@ fn the_scheduler_backs_off_when_rounds_make_no_progress() {
         max_rounds: 16,
         idle_limit: 3,
     }
-    .run(&mut subject, &SelectionPolicy::default(), ActionLevel::A2, at(2))
+    .run(
+            &mut subject,
+            &Resources::Unknown,
+            &SelectionPolicy::default(),
+            ActionLevel::A2,
+            at(2),
+        )
     .expect("跑一段");
 
     assert!(
@@ -186,7 +204,13 @@ fn a_paused_subject_runs_no_rounds_at_all() {
     subject.policy_mut().pause("用户按下暂停");
 
     let report = Scheduler::default()
-        .run(&mut subject, &SelectionPolicy::default(), ActionLevel::A1, at(1))
+        .run(
+            &mut subject,
+            &Resources::Unknown,
+            &SelectionPolicy::default(),
+            ActionLevel::A1,
+            at(1),
+        )
         .expect("跑一段");
 
     match &report.outcome {
