@@ -138,6 +138,59 @@ pub struct MazeStep {
     pub verdict: Option<String>,
     /// 这一步**记进 L1** 了几条格子记忆（新记 + 取代）。只在认知通路上有值。
     pub remembered: usize,
+    /// 投递之后、被选中之前，L3 把机会给了谁。
+    ///
+    /// **这是"所有步骤"里原先看不到的那一半。** 只报一个"等了 4 轮"的数字，读的人看不到
+    /// 那 4 轮里发生了什么——而它们各扣了一次激活，各是一轮真实的认知循环。
+    /// 一场 24 步的探索花了 27 轮，那多出来的 3 轮也是这一步的一部分。
+    pub waited_on: Vec<WaitedRound>,
+}
+
+/// 排队期间被别的候选占用的那一轮。
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WaitedRound {
+    /// 这一轮选中了什么。给人看的一句话。
+    pub advanced: String,
+    /// 同一轮里有多少条候选**各有理由地**出局。
+    ///
+    /// 与 `advanced` 一起才看得出"这一轮有多挤"。一条都没有的话，
+    /// 说明这一轮其实没什么竞争——而那与"很多候选在抢"是两回事。
+    pub others_out: usize,
+}
+
+impl WaitedRound {
+    /// 从一轮的结果生成一条记录。
+    fn of(step: &AdvanceStep, others_out: usize) -> Self {
+        Self {
+            advanced: describe_step(step),
+            others_out,
+        }
+    }
+}
+
+/// 一行话说明这一步是什么。
+///
+/// 与 `AdvanceStep` 的 `Debug` 分开：`Debug` 会把整个 `ActionIntent` 打出来，
+/// 而那是给排错用的，不是给看的人用的。
+fn describe_step(step: &AdvanceStep) -> String {
+    match step {
+        AdvanceStep::Observation { subject_ref, .. } => format!("观测了 {subject_ref}"),
+        AdvanceStep::Claim { statement, .. } => {
+            let short: String = statement.chars().take(28).collect();
+            if statement.chars().count() > 28 {
+                format!("记下结论「{short}…」")
+            } else {
+                format!("记下结论「{short}」")
+            }
+        }
+        AdvanceStep::Action { tool_id, .. } => format!("执行了 {tool_id}"),
+        AdvanceStep::Refused { reason, .. } => format!("被拒：{reason}"),
+        AdvanceStep::NeedsApproval { level, .. } => format!("等一次 {level} 的批准"),
+        AdvanceStep::Unsupported {
+            candidate_kind,
+            reason,
+        } => format!("{candidate_kind} 走不通：{reason}"),
+    }
 }
 
 /// 一局是**谁**在走的。
@@ -815,6 +868,8 @@ pub fn run_episode(
             verdict: None,
             // 评估器通路不碰记忆——它连"开局那一眼"都没记成观测。
             remembered: 0,
+            // 也没有排队：它不经过 L3，没有第二方在和它抢。
+            waited_on: Vec::new(),
         });
 
         if observation.terminated || observation.truncated {
@@ -973,9 +1028,15 @@ pub fn play_through_actions(
         let mut rounds_waited = 0u32;
         let mut advanced: Option<(AdvanceStep, Option<usize>)> = None;
         let mut refusal: Option<String> = None;
+        let mut waited_on: Vec<WaitedRound> = Vec::new();
         while rounds_waited < 64 {
             rounds_waited = rounds_waited.saturating_add(1);
             let round = subject.run_round(&SelectionPolicy::default(), ActionLevel::A1, at)?;
+            let others_out = round
+                .selection
+                .as_ref()
+                .map(|selection| selection.rejections.len())
+                .unwrap_or(0);
             match round.outcome {
                 RoundOutcome::Advanced { step } => match &step {
                     AdvanceStep::Action { tool_id, .. } if tool_id == GAME_STEP_TOOL => {
@@ -983,11 +1044,23 @@ pub fn play_through_actions(
                         break;
                     }
                     AdvanceStep::Refused { reason, .. } => {
-                        refusal = Some(reason.clone());
-                        break;
+                        // 被拒的是不是**我们那一步**？
+                        //
+                        // 不能一看到 `Refused` 就断定是我们的：别的候选也会走到这条路上
+                        // （一次观测请求碰上暂停、碰上撤权，同样是 `Refused`），
+                        // 而把它当成我们的，会让这一局在一件与它无关的事上停住。
+                        //
+                        // 判据用**队列**而不是理由里的字：许可被拒时我们的动作会被取走
+                        // （`request_action` 的 `Refused` 分支），而别的候选被拒与它无关。
+                        if subject.pending_actions() == 0 {
+                            refusal = Some(reason.clone());
+                            break;
+                        }
+                        waited_on.push(WaitedRound::of(&step, others_out));
                     }
-                    // 别的候选先被选中：正常。它花掉一轮，这一轮也算"排队"。
-                    _ => {}
+                    // 别的候选先被选中：正常，如实记下这一轮给了谁。它花掉一轮额度，
+                    // 而那一轮也是一步。
+                    other => waited_on.push(WaitedRound::of(other, others_out)),
                 },
                 // 没有可推进的目标——额度用尽或目标结束。这一局到此为止。
                 _ => break,
@@ -1019,6 +1092,7 @@ pub fn play_through_actions(
                 permit_id: None,
                 verdict: None,
                 remembered: 0,
+                waited_on,
             });
             break;
         };
@@ -1079,6 +1153,7 @@ pub fn play_through_actions(
             permit_id,
             verdict,
             remembered: step_remembered,
+            waited_on,
         });
 
         if truncated || outcome != "running" {

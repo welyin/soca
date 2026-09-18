@@ -186,6 +186,34 @@ fn the_agent_path_pays_every_toll_on_the_way() {
             .map(|step| step.rounds_waited)
             .collect::<Vec<_>>()
     );
+
+    // **排队那几轮也看得见**，而不是只有一个数字。
+    //
+    // 这是"所有步骤"里原先缺的那一半：一场 24 步的探索花了 27 轮，多出来的那几轮
+    // 也是一轮真实的认知循环，各扣了一次激活。只报"等了 4 轮"，读的人看不到那 4 轮
+    // 里发生了什么——而"这一局每一轮在做什么"正是要看的东西。
+    for step in &run.steps {
+        assert_eq!(
+            step.waited_on.len() as u32,
+            step.rounds_waited
+                .saturating_sub(if step.permit_id.is_some() { 1 } else { 0 }),
+            "第 {} 步：等了 {} 轮，却只记下 {} 轮给了谁",
+            step.index,
+            step.rounds_waited,
+            step.waited_on.len()
+        );
+        for waited in &step.waited_on {
+            assert!(
+                !waited.advanced.is_empty(),
+                "第 {} 步：有一轮没说清给了谁",
+                step.index
+            );
+        }
+    }
+    assert!(
+        run.steps.iter().any(|step| !step.waited_on.is_empty()),
+        "整局都没有一轮记录下'给了谁'——多半是它一轮都没排过队"
+    );
 }
 
 #[test]

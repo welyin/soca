@@ -78,6 +78,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   .maze-cell.lava { background: #ffb3a7; color: #7a1f10; }
   .maze-cell.ball, .maze-cell.box { background: #cfe0ff; color: #24457a; }
   tr.current { background: #eaf1ff; font-weight: 600; }
+  .wait-list { font-size: 11px; line-height: 1.5; margin-top: 3px; max-width: 320px; }
 
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -933,7 +934,23 @@ function renderMaze() {
         + "<td>" + item.index + "</td>"
         + "<td>" + escapeHtml(item.action) + "</td>"
         + "<td>" + escapeHtml(item.reason) + "</td>"
-        + "<td>" + (item.rounds_waited ? item.rounds_waited + " 轮" : "<span class=\"dim\">—</span>") + "</td>"
+        // 排队那一栏不只报数字：把**每一轮给了谁**列出来。只报一个"4 轮"的话，
+        // 那 4 轮里发生了什么就看不见了——而它们各扣了一次激活，各是一轮真实的认知循环。
+        + "<td>" + (item.rounds_waited
+            ? escapeHtml(String(item.rounds_waited)) + " 轮"
+              + (item.waited_on && item.waited_on.length
+                  ? "<div class=\"dim wait-list\">"
+                    + item.waited_on
+                        .map(function (waited) {
+                          return "↳ " + escapeHtml(waited.advanced) +
+                            (waited.others_out
+                              ? "（同轮还有 " + waited.others_out + " 条出局）"
+                              : "");
+                        })
+                        .join("<br>")
+                    + "</div>"
+                  : "")
+            : "<span class=\"dim\">—</span>") + "</td>"
         + "<td>" + dash(item.permit_id) + "</td>"
         + "<td>" + escapeHtml(item.receipt) + "</td>"
         + "<td>" + dash(item.verdict) + "</td>"
