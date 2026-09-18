@@ -308,11 +308,19 @@ prefixed_id!(
 );
 
 impl EvidenceRef {
+    /// 由一次观测的原始事件构造证据引用。
+    ///
+    /// 这是 [`EvidenceRef::origin_event_id`] 的正向。**两者必须成对改动**：撤回权限时要靠
+    /// 正向从事件找出该失效的记忆（§12.1），而追责时要靠反向从证据找回原始事件（§7.1）。
+    /// 只改一边的表现是"撤回漏掉了一批记忆"或"来源链断了"——两种都不会报错。
+    pub fn for_observation(event_id: &EventId) -> Result<Self, ContractError> {
+        Self::new(format!("obs:{event_id}"))
+    }
+
     /// 这条证据引用编码的原始事件标识。
     ///
-    /// 只有 `obs:` 形状的引用携带事件标识——它是 [`crate::Observation`] 的证据引用，由
-    /// `obs:{event_id}` 构成（见 `Session::observe_event`）。`tool-result:` 与 `receipt:`
-    /// 指向动作侧的事实，它们没有原始事件。
+    /// 只有 `obs:` 形状的引用携带事件标识——它是 [`crate::Observation`] 的证据引用。
+    /// `tool-result:` 与 `receipt:` 指向动作侧的事实，它们没有原始事件。
     ///
     /// 做成方法而不是让调用方各自 `strip_prefix`：这个关系是**契约的一部分**——§7.1 要求
     /// 派生物指向原始事件。散在各处的字符串切分迟早会有一处写错，而那种错误的表现是

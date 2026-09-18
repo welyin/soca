@@ -50,6 +50,18 @@ pub enum AuditCategory {
     /// 与 [`AuditCategory::PermitRefused`] 分开记录，是因为它们对"接下来该做什么"的含义
     /// 完全不同：一个是等外部输入，另一个是此路不通。
     ApprovalRequired,
+    /// 授予了一次能力授权（§12.1）。
+    ///
+    /// 与 [`AuditCategory::CapabilityRevoked`] 成对：只记撤回不记授予的话，审计只能回答
+    /// "什么时候收回的"，答不出"当初是谁、什么时候给的"——而后者才是追溯的起点。
+    CapabilityGranted,
+    /// 撤回了一次能力授权（§12.1："范围限定授权，**撤回立即生效**"）。
+    ///
+    /// 与 [`AuditCategory::RetentionEnforced`] 分开记录：撤回是一次**决定**，而保留期是一次
+    /// 到期。前者要回答"是谁在什么时候收回的"，后者只需要回答"清掉了多少"。
+    CapabilityRevoked,
+    /// 一次因为授权已撤回而被拒绝的观测或许可（§12.1）。
+    CapabilityDenied,
     /// 执行了一次保留期动作：隐藏超期记忆、清理已隐藏内容、或裁掉超期审计（§12.3）。
     ///
     /// 详情里只写**条数**，不写内容。从保留期里删掉一条记忆，却把它的内容抄进审计账，
@@ -75,6 +87,9 @@ impl AuditCategory {
             Self::PermitRefused => "permit_refused",
             Self::ApprovalGranted => "approval_granted",
             Self::ApprovalRequired => "approval_required",
+            Self::CapabilityGranted => "capability_granted",
+            Self::CapabilityRevoked => "capability_revoked",
+            Self::CapabilityDenied => "capability_denied",
             Self::RetentionEnforced => "retention_enforced",
         }
     }

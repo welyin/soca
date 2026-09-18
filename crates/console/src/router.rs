@@ -10,7 +10,7 @@ use soca_contracts::{
     GoalBudget, GoalId, GoalState, MemoryId, PermissionScope, SelectionPolicy, Sha256Hex,
     UserChannel, WallClock,
 };
-use soca_core::{RetentionPolicy, RoundOutcome, Subject};
+use soca_core::{CoreError, RetentionPolicy, RoundOutcome, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
 
 use crate::http::{Request, Response};
@@ -55,6 +55,8 @@ pub fn handle(
         ("GET", "/api/model") => Response::json(200, &model.summary()),
         ("POST", "/api/model") => connect_model(subject, model, request),
         ("POST", "/api/model/reset") => reset_model(subject, model),
+        ("POST", "/api/grant") => grant_capability(subject, request, at),
+        ("POST", "/api/revoke") => revoke_capability(subject, request, at),
         ("POST", "/api/retention") => enforce_retention(subject, request, at),
         ("POST", "/api/forget") => forget_memory(subject, request, at),
         ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
@@ -222,6 +224,12 @@ fn observe(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
                 "sequence": record.sequence,
             }),
         ),
+        // 授权被撤回不是"服务器出错了"。返回 500 会让界面显示一个故障，而用户需要知道的
+        // 是"这个能力已经被收回去了，要恢复得重新授予"（§12.1）。
+        Err(CoreError::CapabilityRevoked { capability }) => Response::json(
+            403,
+            &json!({"error": "capability_revoked", "capability": capability}),
+        ),
         Err(error) => internal(error.to_string()),
     }
 }
@@ -296,6 +304,74 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
                 &json!({"error": "model_output_refused", "detail": error.to_string()}),
             )
         }
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 能力策略名。控制台的委托都用它，所以它也是默认值。
+const DEFAULT_CAPABILITY: &str = "cap:read-selected-folder";
+
+/// 授予一项能力策略（§12.1）。
+fn grant_capability(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let payload = body_json(request).unwrap_or(Value::Null);
+    let name = payload
+        .get("capability")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_CAPABILITY);
+    let capability = match CapabilityPolicyRef::new(name) {
+        Ok(capability) => capability,
+        Err(error) => return Response::text(400, error.to_string()),
+    };
+
+    match subject.grant_capability(capability, at) {
+        Ok(was_new) => Response::json(
+            200,
+            &json!({
+                "capability": name,
+                "was_new": was_new,
+                "granted": subject
+                    .granted_capabilities()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 撤回一项能力策略，并让已经由它产生的记忆立即失效（§12.1、§12.3）。
+///
+/// 接口一次做两件事，因为它们**必须**一起发生：只停将来、不清过去的话，一份通过已撤回授权
+/// 读到的内容会继续被检索、被引用。把它们拆成两个接口，就是把"忘了清过去"变成一个
+/// 可以发生的调用顺序。
+fn revoke_capability(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let payload = body_json(request).unwrap_or(Value::Null);
+    let name = payload
+        .get("capability")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_CAPABILITY);
+    let capability = match CapabilityPolicyRef::new(name) {
+        Ok(capability) => capability,
+        Err(error) => return Response::text(400, error.to_string()),
+    };
+
+    match subject.revoke_capability(&capability, at) {
+        Ok(report) => Response::json(
+            200,
+            &json!({
+                "capability": name,
+                "was_granted": report.was_granted,
+                "events_covered": report.events_covered,
+                "memories_invalidated": report.memories_invalidated,
+                "awaiting_purge": report.awaiting_purge,
+                "granted": subject
+                    .granted_capabilities()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            }),
+        ),
         Err(error) => internal(error.to_string()),
     }
 }

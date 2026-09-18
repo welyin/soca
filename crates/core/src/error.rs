@@ -63,4 +63,10 @@ pub enum CoreError {
         current: u64,
         attempted: u64,
     },
+
+    #[error(
+        "能力策略 {capability} 不在生效授权内，拒绝这次操作\
+         （§12.1：范围限定授权，撤回立即生效）"
+    )]
+    CapabilityRevoked { capability: String },
 }

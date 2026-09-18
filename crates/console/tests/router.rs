@@ -736,6 +736,107 @@ fn the_loop_stops_early_when_there_is_nothing_left_to_do() {
 }
 
 // ---------------------------------------------------------------------------
+// 授权与撤回（§12.1）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_console_walks_a_revocation_from_grant_to_invalidation() {
+    // §12.1 的"撤回立即生效"有两半，而这个测试把两半一起走完：新的观测停住，
+    // 已有的记忆失效——再重新授予，一切恢复。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        &body(json!({"message": "核对摘要文件"})),
+    );
+    call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+    let looped = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 6})),
+    ));
+    assert!(
+        looped["state"]["memory_entries"].as_u64().expect("数字") >= 1,
+        "先攒下一条结论：{looped}"
+    );
+
+    let revoked = json(&call(
+        &mut subject,
+        "POST",
+        "/api/revoke",
+        &body(json!({"capability": "cap:read-selected-folder"})),
+    ));
+    assert_eq!(revoked["was_granted"], true);
+    assert!(
+        revoked["memories_invalidated"].as_u64().expect("数字") >= 1,
+        "已有的记忆要失效：{revoked}"
+    );
+    assert!(
+        revoked["granted"].as_array().expect("数组").is_empty(),
+        "撤回之后没有生效的授权：{revoked}"
+    );
+
+    let state = json(&call(&mut subject, "GET", "/api/state", ""));
+    assert_eq!(state["memory_entries"], 0, "撤回之后它们不再被检索到");
+
+    // 新的观测停住。403 而不是 500——"授权被收回了"不是"服务器坏了"。
+    let refused = call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+    assert_eq!(refused.status, 403, "{}", refused.body);
+
+    let granted = json(&call(
+        &mut subject,
+        "POST",
+        "/api/grant",
+        &body(json!({"capability": "cap:read-selected-folder"})),
+    ));
+    assert_eq!(granted["was_new"], true);
+    assert_eq!(
+        call(
+            &mut subject,
+            "POST",
+            "/api/observe",
+            &body(json!({"subject": WATCHED, "data_class": "personal"})),
+        )
+        .status,
+        200,
+        "重新授予之后恢复"
+    );
+}
+
+#[test]
+fn revoking_an_ungranted_capability_is_idempotent_not_an_error() {
+    let mut subject = subject();
+    let first = json(&call(
+        &mut subject,
+        "POST",
+        "/api/revoke",
+        &body(json!({"capability": "cap:never-given"})),
+    ));
+    assert_eq!(first["was_granted"], false, "从来没给过，撤回是幂等的");
+
+    let second = json(&call(
+        &mut subject,
+        "POST",
+        "/api/revoke",
+        &body(json!({"capability": "cap:never-given"})),
+    ));
+    assert_eq!(second["was_granted"], false);
+    assert_eq!(second["memories_invalidated"], 0);
+}
+
+// ---------------------------------------------------------------------------
 // 保留期与删除（§12.3）
 // ---------------------------------------------------------------------------
 

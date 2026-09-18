@@ -33,8 +33,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use soca_contracts::{
     ActionId, ActionIntent, ActionLevel, ActionOutcomeSlice, Approval, BeliefSummary, BudgetRef,
-    Candidate, CandidateSet, CapabilitySlice, CognitiveUnit, ContextBundle, ContractError, DataClass,
-    DerivationKind, EgressPolicy, Envelope, EventId, EvidenceSlice, Expectation, ExplorationQuota,
+    Candidate, CandidateSet, CapabilityPolicyRef, CapabilitySlice, CognitiveUnit, ContextBundle,
+    ContractError, DataClass, DerivationKind, EgressPolicy, Envelope, EventId, EvidenceRef,
+    EvidenceSlice, Expectation, ExplorationQuota,
     GoalBudget, GoalId, GoalStack, GoalState, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
     MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
     OutputSchema, PayloadRef, PermitId, PermissionScope, PredictionRef, Provenance, ResourceCost,
@@ -101,6 +102,19 @@ pub const WRITE_TOOL: &str = "fs.write";
 
 /// 对话内容的默认保留天数（§12.3 的初值）。
 pub const CONVERSATION_RETENTION_DAYS: i64 = 7;
+
+/// 一次能力撤回的报告（§12.1、§12.3）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RevocationReport {
+    /// 撤回之前它是否还在授权内。`false` 表示这是一次幂等重放。
+    pub was_granted: bool,
+    /// 这个能力覆盖了多少个事件。
+    pub events_covered: usize,
+    /// 有多少条记忆因此**立即**不可见。
+    pub memories_invalidated: usize,
+    /// 当前等着清理的记忆条数。
+    pub awaiting_purge: usize,
+}
 
 /// 一条读回来的用户输入。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -646,10 +660,14 @@ impl Subject {
         data_class: DataClass,
         at: WallClock,
     ) -> Result<ObservationRecord, CoreError> {
+        // 这次观测在哪个权限范围下进行，以及那个范围**现在还有效吗**。
+        let scope = self.observation_scope()?;
         let (record, envelope) = {
             let unit = self.cluster.unit_id().clone();
             let task = self.task.clone();
-            let mut session = Session::new(&mut self.store, &mut self.broker, unit, task, self.boot);
+            let mut session =
+                Session::new(&mut self.store, &mut self.broker, unit, task, self.boot)
+                    .with_policy(scope, data_class);
             session.observe_event(subject_ref, at)?
         };
 
@@ -965,11 +983,30 @@ impl Subject {
                 // 观测的数据类别取 personal：**保守的那一档**。低估类别会让本该留在本地的
                 // 内容被允许出站，而 §8 的默认是"私人数据不得出站"；高估的代价只是让本地模型
                 // 也守 strict。默认值的方向要朝安全那一侧。
-                let record = self.observe(subject_ref, DataClass::Personal, at)?;
-                Ok(AdvanceStep::Observation {
-                    subject_ref: subject_ref.clone(),
-                    evidence_ref: record.observation.evidence_ref.to_string(),
-                })
+                match self.observe(subject_ref, DataClass::Personal, at) {
+                    Ok(record) => Ok(AdvanceStep::Observation {
+                        subject_ref: subject_ref.clone(),
+                        evidence_ref: record.observation.evidence_ref.to_string(),
+                    }),
+                    // 授权已撤回不是一个"运行出错了"，而是一个需要人处理的拒绝——和等级
+                    // 超范围、全局暂停同一类。把它当成普通错误抛出，环路会中断在一句
+                    // "内部错误"上，而真正的原因看不出来。
+                    Err(CoreError::CapabilityRevoked { capability }) => {
+                        self.store.audit(
+                            at,
+                            AuditCategory::CapabilityDenied,
+                            capability.as_str(),
+                            "denied",
+                            "授权已撤回，拒绝新的观测",
+                        )?;
+                        Ok(AdvanceStep::Refused {
+                            reason: format!(
+                                "能力策略 {capability} 已撤回，新的观测不再发生（§12.1）"
+                            ),
+                        })
+                    }
+                    Err(other) => Err(other),
+                }
             }
             Candidate::Claim {
                 statement,
@@ -1255,6 +1292,113 @@ impl Subject {
     /// 当前还有多少条记忆等着被清理。
     pub fn memories_awaiting_purge(&self) -> Result<usize, CoreError> {
         Ok(self.store.tombstoned_memory_count()?)
+    }
+
+    /// 这次观测应当在哪个权限范围下进行（§6 第 1 步、§12.1）。
+    ///
+    /// 有可推进的目标就取它的范围，没有就用默认范围。两种情况都要过一遍"这项能力还生效吗"——
+    /// **撤回立即生效**这句话的落点就在这里：撤回之后，新的观测不再发生。
+    fn observation_scope(&self) -> Result<PermissionScope, CoreError> {
+        let scope = self
+            .next_open_goal()
+            .and_then(|goal_id| self.goals.goal(&goal_id).map(|goal| goal.permission_scope.clone()))
+            .unwrap_or_else(|| self.default_scope());
+
+        if !self.policy.is_granted(&scope.capability_policy_ref) {
+            return Err(CoreError::CapabilityRevoked {
+                capability: scope.capability_policy_ref.to_string(),
+            });
+        }
+        Ok(scope)
+    }
+
+    /// 没有具体目标时的权限范围。
+    fn default_scope(&self) -> PermissionScope {
+        PermissionScope {
+            capability_policy_ref: self.policy.default_capability().clone(),
+            // 上限取 A1："四处看看"不该悄悄带上改文件的能力。§12.1 的 A1 正好是
+            // "读取已选文件、授权窗口"。
+            max_action_level: ActionLevel::A1,
+        }
+    }
+
+    /// 授予一项能力策略（§12.1）。
+    pub fn grant_capability(
+        &mut self,
+        capability: CapabilityPolicyRef,
+        at: WallClock,
+    ) -> Result<bool, CoreError> {
+        let was_new = self.policy.grant(capability.clone());
+        if was_new {
+            self.store.audit(
+                at,
+                AuditCategory::CapabilityGranted,
+                capability.as_str(),
+                "granted",
+                "授予能力授权",
+            )?;
+        }
+        Ok(was_new)
+    }
+
+    /// 撤回一项能力策略，并**让已经由它产生的记忆立即失效**（§12.1、§12.3）。
+    ///
+    /// 两件事一起做，因为它们回答的是同一个问题的两半："撤回之后还能不能继续"和
+    /// "撤回之前看到的东西还算不算数"。只做前者的话，一份通过已撤回授权读到的内容会继续
+    /// 被检索、被引用、被写进模型上下文——撤回就成了一句只对将来有效的空话。
+    ///
+    /// 走的是"**事件 → 证据引用 → 记忆**"这条链，而不是"记忆 → 出处 → 能力"。后者要求每条
+    /// 记忆记着自己是在哪个授权下产生的，而那会是一份必须和事件账保持同步的副本——
+    /// 一份会分叉的副本。
+    ///
+    /// 内容对象**不**在这里退休：它们不携带能力归属，而"猜一个可能的归属然后删掉"比不删更糟。
+    pub fn revoke_capability(
+        &mut self,
+        capability: &CapabilityPolicyRef,
+        at: WallClock,
+    ) -> Result<RevocationReport, CoreError> {
+        let was_granted = self.policy.revoke(capability);
+
+        let events = self.store.events_under_capability(capability)?;
+        let mut invalidated = 0usize;
+        for event_id in &events {
+            let reference = EvidenceRef::for_observation(event_id)?;
+            invalidated =
+                invalidated.saturating_add(self.store.tombstone_by_evidence(
+                    &reference,
+                    "capability_revoked",
+                    at,
+                )?);
+        }
+
+        self.store.audit(
+            at,
+            AuditCategory::CapabilityRevoked,
+            capability.as_str(),
+            "revoked",
+            &format!(
+                "撤回授权：覆盖 {} 个事件、失效 {} 条记忆{}",
+                events.len(),
+                invalidated,
+                if was_granted {
+                    ""
+                } else {
+                    "（此前已不在授权内）"
+                }
+            ),
+        )?;
+
+        Ok(RevocationReport {
+            was_granted,
+            events_covered: events.len(),
+            memories_invalidated: invalidated,
+            awaiting_purge: self.store.tombstoned_memory_count()?,
+        })
+    }
+
+    /// 当前生效的全部授权（§12.1）。
+    pub fn granted_capabilities(&self) -> Vec<&CapabilityPolicyRef> {
+        self.policy.granted()
     }
 
     /// 策略代理（只读）。

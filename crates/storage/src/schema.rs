@@ -11,7 +11,7 @@ use soca_contracts::WallClock;
 use crate::error::StorageError;
 
 /// 本程序支持的最新 schema 版本。
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 /// 迁移 1：初始表结构。
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -34,6 +34,9 @@ const MIGRATION_0006: &str = include_str!("../migrations/0006_approvals.sql");
 /// 迁移 7：内容对象的保留期。
 const MIGRATION_0007: &str = include_str!("../migrations/0007_blob_retention.sql");
 
+/// 迁移 8：事件的权限范围。
+const MIGRATION_0008: &str = include_str!("../migrations/0008_event_capability.sql");
+
 /// 迁移清单。按版本升序，只增不改：已发布的迁移一旦被编辑，旧库就会与新代码不一致。
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, MIGRATION_0001),
@@ -43,6 +46,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (5, MIGRATION_0005),
     (6, MIGRATION_0006),
     (7, MIGRATION_0007),
+    (8, MIGRATION_0008),
 ];
 
 /// 打开连接后、迁移前必须设置的连接级参数。

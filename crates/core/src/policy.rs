@@ -24,6 +24,8 @@
 //! `Approval::covers` 那些错误全部归入 `NeedsApproval` 的原因：批准过期、次数用尽、
 //! 绑定了别的动作——它们的正确下一步都是"请针对这一次动作再批一次"。
 
+use std::collections::BTreeSet;
+
 use soca_contracts::{
     ActionIntent, ActionLevel, Approval, ApprovalRequirement, BudgetRef, CapabilityPolicyRef,
     ExecutionPermit, PermissionScope, PermitId, PolicyVersion, SubjectId, WallClock,
@@ -89,7 +91,14 @@ impl PermitDecision {
 #[derive(Debug, Clone)]
 pub struct PolicyAgent {
     policy_version: PolicyVersion,
-    capability_policy_ref: CapabilityPolicyRef,
+    /// 默认能力策略。用于"当前没有具体目标"时的观测——L0 总得有一个范围可依（§6 第 1 步）。
+    default_capability: CapabilityPolicyRef,
+    /// 当前生效的能力授权（§12.1："范围限定授权，**撤回立即生效**"）。
+    ///
+    /// 用**集合**而不是一个布尔值，是因为授权的粒度是能力：撤回"读已选目录"不该连带撤掉
+    /// "看授权窗口"。一个全局开关做不到这件事，而它最可能的后果是用户因为怕误伤而不敢撤回——
+    /// 一个不敢用的撤回，等于没有撤回。
+    granted: BTreeSet<CapabilityPolicyRef>,
     permit_ttl_seconds: i64,
     /// `Some(reason)` 表示全局暂停。§12.1 末段要求暂停时先撤销尚未消费的执行授权
     /// 并停止外发；对**尚未签发**的许可，表现就是这里一律拒绝。
@@ -98,10 +107,12 @@ pub struct PolicyAgent {
 
 impl Default for PolicyAgent {
     fn default() -> Self {
+        let default_capability = CapabilityPolicyRef::new("cap:read-selected-folder")
+            .expect("固定能力策略");
         Self {
             policy_version: PolicyVersion::new("policy-v1").expect("固定策略版本"),
-            capability_policy_ref: CapabilityPolicyRef::new("cap:read-selected-folder")
-                .expect("固定能力策略"),
+            default_capability: default_capability.clone(),
+            granted: [default_capability].into_iter().collect(),
             permit_ttl_seconds: DEFAULT_PERMIT_TTL_SECONDS,
             paused: None,
         }
@@ -109,14 +120,15 @@ impl Default for PolicyAgent {
 }
 
 impl PolicyAgent {
-    /// 用一个策略版本与能力策略构造。
-    pub fn new(
-        policy_version: PolicyVersion,
-        capability_policy_ref: CapabilityPolicyRef,
-    ) -> Self {
+    /// 用一个策略版本与初始授权构造。
+    ///
+    /// 初始授权就是**全部**生效的授权：给一个集合再让调用方自己往里加，会留下一个
+    /// "构造完但还没授权"的窗口，而那个窗口里的拒绝看起来像故障。
+    pub fn new(policy_version: PolicyVersion, capability_policy_ref: CapabilityPolicyRef) -> Self {
         Self {
             policy_version,
-            capability_policy_ref,
+            default_capability: capability_policy_ref.clone(),
+            granted: [capability_policy_ref].into_iter().collect(),
             permit_ttl_seconds: DEFAULT_PERMIT_TTL_SECONDS,
             paused: None,
         }
@@ -127,9 +139,43 @@ impl PolicyAgent {
         &self.policy_version
     }
 
-    /// 本次生效的能力策略。
-    pub fn capability_policy_ref(&self) -> &CapabilityPolicyRef {
-        &self.capability_policy_ref
+    /// 没有具体目标时用的能力策略。
+    pub fn default_capability(&self) -> &CapabilityPolicyRef {
+        &self.default_capability
+    }
+
+    /// 当前生效的全部授权，按标识排序。
+    pub fn granted(&self) -> Vec<&CapabilityPolicyRef> {
+        self.granted.iter().collect()
+    }
+
+    /// 某项能力当前是否生效（§12.1）。
+    pub fn is_granted(&self, capability: &CapabilityPolicyRef) -> bool {
+        self.granted.contains(capability)
+    }
+
+    /// 授予一项能力。返回 `false` 表示此前已经授过。
+    ///
+    /// 授予是幂等的：重复授予不该被理解成"又批了一次"，而额度那类东西是靠次数算的，
+    /// 靠重复授予累加会让"用户点了两次"变成"可以两次"。
+    pub fn grant(&mut self, capability: CapabilityPolicyRef) -> bool {
+        self.granted.insert(capability)
+    }
+
+    /// 撤回一项能力。返回 `false` 表示此前就不在授权内（幂等）。
+    ///
+    /// 撤回**只影响之后**。已经发生的观测不会因此消失——它们已经写在事件账上了，
+    /// 而"抹掉历史"不是撤回，那是篡改。让过去产生的记忆失效是另一件事，走
+    /// `Subject::revoke_capability` 的失效传播。
+    pub fn revoke(&mut self, capability: &CapabilityPolicyRef) -> bool {
+        self.granted.remove(capability)
+    }
+
+    /// 撤回全部授权。§12.1 末段的"全局暂停"之外，这是更强的一档。
+    pub fn revoke_all(&mut self) -> usize {
+        let count = self.granted.len();
+        self.granted.clear();
+        count
     }
 
     /// 许可有效期（秒）。
@@ -209,12 +255,15 @@ impl PolicyAgent {
             };
         }
 
-        if scope.capability_policy_ref != self.capability_policy_ref {
+        // §12.1 的"范围限定授权，撤回立即生效"。撤回之后，这个能力名下不再签发任何许可——
+        // 而这不是"运气不好"，它和等级超范围一样属于"再多批准也没用"的那一类：
+        // 要恢复得先重新授予，不是就地补一次同意。
+        if !self.is_granted(&scope.capability_policy_ref) {
             return PermitDecision::Refused {
                 reason: format!(
-                    "候选声明的能力策略 {} 不是本次生效的 {}；策略不可读或版本不一致时\
-                     默认拒绝新副作用（§12.2）",
-                    scope.capability_policy_ref, self.capability_policy_ref
+                    "能力策略 {} 当前不在生效授权内（已撤回或从未授予）；\
+                     范围限定授权撤回立即生效（§12.1）",
+                    scope.capability_policy_ref
                 ),
             };
         }
@@ -254,7 +303,9 @@ impl PolicyAgent {
             PERMIT_MAX_USES,
             budget_ref,
             self.policy_version.clone(),
-            self.capability_policy_ref.clone(),
+            // 许可记录的是**实际授权这次动作**的那一项，而不是一个全局默认值。
+            // 记默认值的话，事后审计看到的是"当时默认是什么"，而不是"当时是什么批的"。
+            scope.capability_policy_ref.clone(),
             approval_id,
         ) {
             Ok(permit) => PermitDecision::Issued(Box::new(permit)),

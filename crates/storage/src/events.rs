@@ -9,7 +9,7 @@
 //! 第二条事件，也不重复触发单元唤醒。
 
 use rusqlite::{params, OptionalExtension};
-use soca_contracts::{Envelope, Provenance, WallClock};
+use soca_contracts::{CapabilityPolicyRef, Envelope, EventId, Provenance, WallClock};
 
 use crate::error::StorageError;
 use crate::Store;
@@ -127,8 +127,10 @@ impl Store {
             "INSERT INTO events (
                  event_id, task_id, source_id, source_epoch, boot_id, source_sequence,
                  observed_at_utc, received_monotonic_ns, data_class, provenance_kind,
-                 instruction_authority, envelope_json, inline_payload, blob_ref, recorded_at_utc
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 instruction_authority, capability_policy_ref,
+                 envelope_json, inline_payload, blob_ref, recorded_at_utc
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                       ?13, ?14, ?15, ?16)",
             params![
                 event_id,
                 envelope.task_id.to_string(),
@@ -141,6 +143,8 @@ impl Store {
                 envelope.data_class.as_str(),
                 provenance_kind(&envelope.provenance),
                 i64::from(envelope.provenance.is_instruction_authority()),
+                // §12.1 的撤回要反查它。见迁移 8。
+                envelope.permission_scope.capability_policy_ref.to_string(),
                 serde_json::to_string(envelope)?,
                 inline_payload,
                 blob_ref,
@@ -167,6 +171,32 @@ impl Store {
 
         tx.commit()?;
         Ok(AppendOutcome::Appended { sequence })
+    }
+
+    /// 某个能力策略下产生的事件标识，按提交序升序（§12.1 的撤回反查）。
+    ///
+    /// 只交出事件标识，不直接拼证据引用：记忆引用的是 `obs:{event_id}`，而那条关系归
+    /// [`soca_contracts::EvidenceRef::origin_event_id`] 管。在这里再拼一次，等于把同一个
+    /// 约定复制到第二处——两处迟早在某一处分叉，而分叉的表现是"撤回漏掉了一批记忆"。
+    pub fn events_under_capability(
+        &self,
+        capability: &CapabilityPolicyRef,
+    ) -> Result<Vec<EventId>, StorageError> {
+        let mut statement = self.connection().prepare(
+            "SELECT event_id FROM events
+              WHERE capability_policy_ref = ?1
+              ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![capability.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+
+        let mut found = Vec::new();
+        for row in rows {
+            let raw = row?;
+            found.push(EventId::parse(raw.as_str())?);
+        }
+        Ok(found)
     }
 
     /// 读取游标之后的事件，按提交序升序。

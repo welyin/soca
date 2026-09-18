@@ -237,6 +237,26 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>授权与撤回</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §12.1：「范围限定授权，<b>撤回立即生效</b>。」这句话有两半——撤回之后
+      <b>不再产生新的观测</b>，而且<b>之前读到的东西要失效</b>。只做前一半，撤回就成了一句
+      只对将来有效的空话。
+    </div>
+    <div class="row">
+      <input id="capability" type="text" value="cap:read-selected-folder" style="flex:1">
+      <button id="grant-cap" class="ghost">授予</button>
+      <button id="revoke-cap">撤回</button>
+    </div>
+    <div class="hint">
+      撤回走的是「事件 → 证据引用 → 记忆」这条链：只有**引用**了该授权下事件的那些记忆会失效，
+      别的授权名下的记忆不受影响。内容对象不在撤回范围内——它们不携带能力归属，
+      而猜一个归属然后删掉比不删更糟。
+    </div>
+    <pre id="revoke-out" style="margin-top:14px">（尚未运行）</pre>
+  </section>
+
+  <section>
     <h2>保留期与删除</h2>
     <div class="hint" style="margin:0 0 12px">
       §12.3：「先写 tombstone 使查询立即不可见，<b>再异步清理</b>，并给用户完成状态。」
@@ -513,6 +533,36 @@ async function execAction(path, payload, label) {
     showExec(label, await api(path, payload));
   } catch (error) {
     $("exec-out").textContent = error.message;
+    log(label + "失败：" + error.message, "err");
+  }
+  refresh();
+}
+
+$("grant-cap").onclick = async function () {
+  await capabilityAction("grant", "已授予");
+};
+
+$("revoke-cap").onclick = async function () {
+  await capabilityAction("revoke", "已撤回");
+};
+
+async function capabilityAction(path, label) {
+  const capability = $("capability").value.trim();
+  if (!capability) { log("先填一个能力策略标识", "err"); return; }
+  try {
+    const result = await api(path, { capability: capability });
+    $("revoke-out").textContent = JSON.stringify(result, null, 2);
+    if (path === "revoke") {
+      log(
+        label + " " + capability + "：覆盖 " + result.events_covered +
+        " 个事件、失效 " + result.memories_invalidated + " 条记忆",
+        "ok"
+      );
+    } else {
+      log(label + " " + capability + "；当前生效：" + result.granted.join("、"), "ok");
+    }
+  } catch (error) {
+    $("revoke-out").textContent = error.message;
     log(label + "失败：" + error.message, "err");
   }
   refresh();

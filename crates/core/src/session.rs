@@ -180,7 +180,9 @@ impl<'a> Session<'a> {
             .to_string();
 
         let event_id = EventId::generate();
-        let evidence_ref = EvidenceRef::new(format!("obs:{event_id}"))?;
+        // 正向构造在契约层，因为撤回权限时要靠它从事件反查该失效的记忆（§12.1）。
+        // 这里手拼一次、那里手拼一次，两处迟早在某一处分叉。
+        let evidence_ref = EvidenceRef::for_observation(&event_id)?;
         let observation = Observation {
             subject: subject_ref.to_string(),
             value,
