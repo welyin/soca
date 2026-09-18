@@ -73,6 +73,8 @@ pub fn handle(
         // 而 §17 要计时的正是后者（且只有后者）。
         // §6.2 的迁移。与 `/api/loop` 共用 `envelope` 的形状：同一个输入的两种用法。
         ("POST", "/api/scale") => scale_topology(subject, request, at),
+        // §17 的"认知游戏"：真引擎、真投影、逐步回放。
+        ("POST", "/api/maze/run") => run_maze(subject, request, at),
         ("POST", "/api/unit/sleep") => sleep_unit(subject, request, at),
         ("POST", "/api/unit/wake") => wake_unit(subject, request, at),
         ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
@@ -1044,6 +1046,41 @@ fn wake_unit(subject: &mut Subject, _request: &Request, at: WallClock) -> Respon
             }),
         ),
         Err(error) => Response::text(409, error.to_string()),
+    }
+}
+
+/// 跑一局迷宫，把**每一步**都带回来（§17 的"认知游戏"那一行）。
+///
+/// 一次调用跑完一整局，而不是"一步一个请求"。理由是这个引擎**一个回合一个进程**
+/// （`ProcessFactory` 的注释写得很清楚：进程之间不共享内存，第 N 局的隐藏状态不可能
+/// 泄漏到第 N+1 局）。要按步请求，就得把那个进程留在某处——而"留在某处"在
+/// `GameHost` 借用了存储之后，是一个自己引用自己的结构。
+///
+/// 一局一次调用还带来了一个**看得更好**的副作用：整段轨迹一次给全，界面可以拖动回放，
+/// 而不是只能盯着直播。同一 seed 的同一局是确定性的，所以"再看一遍那一步"是成立的。
+fn run_maze(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    // 种子属于**私有控制面**：它进引擎，不出现在任何公开观测里（§13）。
+    // 界面上留一个能改它的口子，是为了"换一局"这件事可复现——而不是为了让它流到别处。
+    let seed = payload.get("seed").and_then(Value::as_u64).unwrap_or(7);
+    let max_steps = payload
+        .get("max_steps")
+        .and_then(Value::as_u64)
+        .unwrap_or(300)
+        .clamp(1, 640) as u32;
+
+    match soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, at) {
+        Ok(run) => Response::json(
+            200,
+            &json!({
+                "run": run,
+                "note": "每一步里的 reason 就是探索器当时的判断。它是确定性的，\
+                         所以同一 seed 再看一遍是同一局。",
+            }),
+        ),
+        Err(error) => Response::text(500, error.to_string()),
     }
 }
 

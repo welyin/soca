@@ -31,6 +31,7 @@ pub mod broker;
 pub mod error;
 pub mod learning;
 pub mod lifecycle;
+pub mod maze;
 pub mod os;
 pub mod policy;
 pub mod reconciler;

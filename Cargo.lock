@@ -699,6 +699,7 @@ dependencies = [
  "soca-contracts",
  "soca-core-actors",
  "soca-core-topology",
+ "soca-game-host",
  "soca-model-gateway",
  "soca-storage",
  "tempfile",

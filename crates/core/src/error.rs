@@ -78,4 +78,10 @@ pub enum CoreError {
 
     #[error("迁移不能开始：{reason}")]
     ScaleRefused { reason: String },
+
+    #[error("游戏宿主拒绝了这次请求：{0}")]
+    Game(#[from] soca_game_host::HostError),
+
+    #[error("游戏规则引擎不可用：{0}")]
+    Engine(#[from] soca_game_host::EngineError),
 }

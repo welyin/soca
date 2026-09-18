@@ -60,6 +60,25 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   .metric { background: #0c0e13; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
   .metric .k { color: var(--dim); font-size: 11px; letter-spacing: .6px; }
   .metric .v { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .maze-grid { font-family: ui-monospace, Consolas, monospace; font-size: 15px; line-height: 1.25; }
+  .maze-row { white-space: nowrap; }
+  .maze-cell {
+    display: inline-block; width: 22px; height: 22px; text-align: center;
+    border-radius: 3px; margin: 1px;
+  }
+  .maze-cell.wall { background: #2a2f3a; color: #2a2f3a; }
+  .maze-cell.empty, .maze-cell.floor { background: #eef1f5; color: #9aa4b2; }
+  .maze-cell.unseen { background: #dfe3ea; color: #b6bec9; }
+  .maze-cell.unknown { background: transparent; color: transparent; }
+  .maze-cell.agent { background: #2f6feb; color: #fff; font-weight: 700; }
+  .maze-cell.key { background: #ffe08a; color: #8a5a00; }
+  .maze-cell.goal { background: #b7f7c2; color: #126b28; }
+  .maze-cell.door, .maze-cell.door-closed, .maze-cell.door-locked { background: #d8c3a5; color: #6b4b1f; }
+  .maze-cell.door-open { background: #eef1f5; color: #6b4b1f; }
+  .maze-cell.lava { background: #ffb3a7; color: #7a1f10; }
+  .maze-cell.ball, .maze-cell.box { background: #cfe0ff; color: #24457a; }
+  tr.current { background: #eaf1ff; font-weight: 600; }
+
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
@@ -137,7 +156,50 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       能力被撤回之后，那个单元唤不醒。
     </div>
     <pre id="unit-out" style="margin-top:14px">（尚未运行）</pre>
+  </section>
 
+  <section>
+    <h2>迷宫探索（§17 的"认知游戏"）</h2>
+    <div class="hint" style="margin:0 0 12px">
+      真规则引擎：<code>MiniGrid-DoorKey-8x8-v0</code>，一个回合一个 Python 子进程，
+      走 <code>games/maze/game.py</code> 的投影。公开面上只有 <b>7×7 局部视图</b>、
+      任务文本、朝向和携带物——<b>绝对坐标、完整地图、seed、info 一样都不出那道门</b>。
+    </div>
+    <div class="row">
+      <input id="maze-seed" type="number" min="0" value="7" style="width:88px" title="种子（私有控制面）">
+      <button id="maze-run">跑一局</button>
+      <button id="maze-prev" class="ghost">◀ 上一步</button>
+      <button id="maze-play" class="ghost">▶ 播放</button>
+      <button id="maze-next" class="ghost">下一步 ▶</button>
+      <span class="hint" id="maze-pos">—</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <input id="maze-slider" type="range" min="0" max="0" value="0" style="flex:1">
+    </div>
+    <div class="hint">
+      <b>每一步都能说出为什么。</b>探索器维护一张从局部视图按视图约定拼出来的地图
+      （agent 恒在 <code>(3,6)</code>，前方是<b>列号变小</b>），按固定优先级挑目标：
+      目标已知且门开着 → 直奔目标；手里有钥匙 → 去开门；知道钥匙在哪 → 去拿；
+      否则 → 朝最近的未知边界走。确定性，所以同一 seed 再看一遍是同一局。
+    </div>
+    <div id="maze-summary" class="hint" style="margin-top:10px">（尚未运行）</div>
+    <div style="display:flex; gap:24px; align-items:flex-start; margin-top:14px; flex-wrap:wrap">
+      <div>
+        <div class="hint" style="margin-bottom:6px">它现在看到的（7×7 局部视图）</div>
+        <div id="maze-view" class="maze-grid"></div>
+      </div>
+      <div>
+        <div class="hint" style="margin-bottom:6px">它拼出来的地图（★ 走过、· 认得）</div>
+        <div id="maze-map" class="maze-grid"></div>
+      </div>
+    </div>
+    <table id="maze-steps" style="margin-top:16px">
+      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>回执</th><th>认得</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
     <h2 style="margin-top:22px">拓扑迁移（§6.2 / §17）</h2>
     <div class="hint" style="margin:0 0 12px">
       §17：「同需求异资源输出不同叶/簇/协调数；迁移有 <b>epoch</b>、fencing、
@@ -742,6 +804,163 @@ function renderRejections(candidates, rejections) {
 // 上一次提的建议。**必须由用户显式提交回来**——"提了就等于启用了"是 §13.2 那句话最容易
 // 落空的地方，而落空之后看不出来。
 let pendingStrategy = null;
+
+// 一局的逐步回放。整段轨迹一次拿全，然后在这里拖动——**看得清楚比看得"实时"要紧**，
+// 而同一 seed 是确定性的，所以回看某一步与它当时发生的样子一致。
+let mazeRun = null;
+let mazeAt = 0;
+let mazeTimer = null;
+
+function mazeGlyph(cell) {
+  if (cell.object === "agent") { return "你"; }
+  if (cell.object === "unseen") { return "·"; }
+  if (cell.object === "wall") { return "█"; }
+  if (cell.object === "door") {
+    if (cell.state === "open") { return "/"; }
+    if (cell.state === "locked") { return "🔒".length ? "锁" : "锁"; }
+    return "门";
+  }
+  if (cell.object === "key") { return "钥"; }
+  if (cell.object === "ball") { return "球"; }
+  if (cell.object === "box") { return "箱"; }
+  if (cell.object === "goal") { return "★"; }
+  if (cell.object === "lava") { return "~"; }
+  if (cell.object === "floor") { return "_"; }
+  return " ";
+}
+
+// 一格在**地图**上的字形：它只认得格子，不认得 agent（agent 的位置另画）。
+function mapGlyph(cell) {
+  if (cell.object === "wall") { return "█"; }
+  if (cell.object === "door") { return cell.state === "open" ? "/" : "门"; }
+  if (cell.object === "key") { return "钥"; }
+  if (cell.object === "goal") { return "★"; }
+  if (cell.object === "lava") { return "~"; }
+  if (cell.object === "floor") { return "_"; }
+  return cell.visited ? "·" : " ";
+}
+
+function renderMaze() {
+  if (!mazeRun) { return; }
+  const step = mazeRun.steps[Math.min(mazeAt, mazeRun.steps.length - 1)];
+  if (!step) { return; }
+
+  $("maze-view").innerHTML = step.view
+    .map(function (row) {
+      return "<div class=\"maze-row\">" + row
+        .map(function (cell) {
+          const kind = cell.object + (cell.state && cell.state !== "none" ? "-" + cell.state : "");
+          return "<span class=\"maze-cell " + escapeHtml(kind) + "\">" + escapeHtml(mazeGlyph(cell)) + "</span>";
+        })
+        .join("") + "</div>";
+    })
+    .join("");
+
+  // 地图：把世界坐标归一化到 0..max，画成一张固定大小的格子图。
+  const cells = mazeRun.map || [];
+  const xs = cells.map(function (cell) { return cell.at[0]; });
+  const ys = cells.map(function (cell) { return cell.at[1]; });
+  const minX = Math.min.apply(null, xs.concat([step.position[0]]));
+  const maxX = Math.max.apply(null, xs.concat([step.position[0]]));
+  const minY = Math.min.apply(null, ys.concat([step.position[1]]));
+  const maxY = Math.max.apply(null, ys.concat([step.position[1]]));
+  const lookup = {};
+  cells.forEach(function (cell) { lookup[cell.at[0] + "," + cell.at[1]] = cell; });
+
+  let rows = "";
+  for (let y = minY; y <= maxY; y += 1) {
+    let line = "";
+    for (let x = minX; x <= maxX; x += 1) {
+      let glyph = " ";
+      let kind = "unknown";
+      if (x === step.position[0] && y === step.position[1]) {
+        glyph = "你"; kind = "agent";
+      } else if (lookup[x + "," + y]) {
+        glyph = mapGlyph(lookup[x + "," + y]);
+        kind = lookup[x + "," + y].object;
+      }
+      line += "<span class=\"maze-cell " + escapeHtml(kind) + "\">" + escapeHtml(glyph) + "</span>";
+    }
+    rows += "<div class=\"maze-row\">" + line + "</div>";
+  }
+  $("maze-map").innerHTML = rows;
+
+  $("maze-pos").textContent =
+    "第 " + step.index + "/" + mazeRun.steps.length + " 步　" +
+    "朝向 " + step.direction + "　认得 " + step.known_cells + " 格";
+
+  // 步骤表：**走到哪一步高亮到哪一步**，这就是"一步一步"的样子。
+  $("maze-steps").querySelector("tbody").innerHTML = mazeRun.steps
+    .map(function (item, index) {
+      const active = index === mazeAt ? " class=\"current\"" : "";
+      return "<tr" + active + ">"
+        + "<td>" + item.index + "</td>"
+        + "<td>" + escapeHtml(item.action) + "</td>"
+        + "<td>" + escapeHtml(item.reason) + "</td>"
+        + "<td>" + escapeHtml(item.receipt) + "</td>"
+        + "<td>" + item.known_cells + "</td>"
+        + "</tr>";
+    })
+    .join("");
+
+  const slider = $("maze-slider");
+  slider.max = String(mazeRun.steps.length - 1);
+  slider.value = String(mazeAt);
+}
+
+function mazeGo(index) {
+  if (!mazeRun) { return; }
+  mazeAt = Math.max(0, Math.min(index, mazeRun.steps.length - 1));
+  renderMaze();
+}
+
+$("maze-run").onclick = async function () {
+  if (mazeTimer) { clearInterval(mazeTimer); mazeTimer = null; $("maze-play").textContent = "▶ 播放"; }
+  $("maze-run").disabled = true;
+  $("maze-summary").textContent = "跑一局……（每局起一个 Python 子进程，第一次要等一秒左右）";
+  try {
+    const result = await api("maze/run", {
+      seed: parseInt($("maze-seed").value, 10) || 7,
+      max_steps: 300,
+    });
+    mazeRun = result.run;
+    mazeAt = 0;
+    $("maze-summary").innerHTML =
+      "<b>" + escapeHtml(mazeRun.outcome) + "</b>　走了 " + mazeRun.steps.length + " 步　" +
+      "认得 " + mazeRun.map.length + " 格　" +
+      "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
+      "<br>任务：" + escapeHtml(mazeRun.mission);
+    renderMaze();
+    log("迷宫：seed " + mazeRun.seed + " → " + mazeRun.outcome + "，走了 " + mazeRun.steps.length + " 步", "ok");
+  } catch (error) {
+    $("maze-summary").textContent = error.message;
+    log("跑迷宫失败：" + error.message, "err");
+  }
+  $("maze-run").disabled = false;
+};
+
+$("maze-prev").onclick = function () { mazeGo(mazeAt - 1); };
+$("maze-next").onclick = function () { mazeGo(mazeAt + 1); };
+$("maze-slider").oninput = function () { mazeGo(parseInt(this.value, 10) || 0); };
+$("maze-play").onclick = function () {
+  if (mazeTimer) {
+    clearInterval(mazeTimer);
+    mazeTimer = null;
+    $("maze-play").textContent = "▶ 播放";
+    return;
+  }
+  if (!mazeRun) { log("先跑一局", "err"); return; }
+  $("maze-play").textContent = "■ 停";
+  mazeTimer = setInterval(function () {
+    if (!mazeRun || mazeAt >= mazeRun.steps.length - 1) {
+      clearInterval(mazeTimer);
+      mazeTimer = null;
+      $("maze-play").textContent = "▶ 播放";
+      return;
+    }
+    mazeGo(mazeAt + 1);
+  }, 420);
+};
 
 $("run-scale").onclick = async function () {
   try {
