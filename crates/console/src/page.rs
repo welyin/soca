@@ -237,6 +237,27 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>保留期与删除</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §12.3：「先写 tombstone 使查询立即不可见，<b>再异步清理</b>，并给用户完成状态。」
+      两步分开报——用户看到的"删除完成"指的是前者，后者可能还在排队。
+    </div>
+    <div class="row">
+      <button id="run-retention" class="ghost">执行保留期清理</button>
+      <span class="hint">隐藏超期记忆、清理已隐藏内容、剪掉超期审计</span>
+    </div>
+    <div class="row">
+      <input id="forget-id" type="text" placeholder="要删除的记忆标识，例如 memory:..." style="flex:1">
+      <button id="forget">删除这条记忆</button>
+    </div>
+    <div class="hint">
+      用户删除是<a>立即不可见</a>，物理清理留给下一次保留期执行——§12.3 要的是"异步清理"，
+      把清理塞进删除请求会让界面卡在一次可能很慢的传播上。
+    </div>
+    <pre id="retention-out" style="margin-top:14px">（尚未运行）</pre>
+  </section>
+
+  <section>
     <h2>事件</h2>
     <div id="log"><div class="empty">还没有操作</div></div>
   </section>
@@ -496,6 +517,41 @@ async function execAction(path, payload, label) {
   }
   refresh();
 }
+
+$("run-retention").onclick = async function () {
+  try {
+    const result = await api("retention", {});
+    $("retention-out").textContent = JSON.stringify(result, null, 2);
+    log(
+      "保留期：隐藏 " + result.tombstoned + " 条、清理 " + result.purged +
+      " 条、裁掉审计 " + result.audit_pruned + " 条；仍待清理 " + result.awaiting_purge,
+      "ok"
+    );
+  } catch (error) {
+    $("retention-out").textContent = error.message;
+    log("保留期执行失败：" + error.message, "err");
+  }
+  refresh();
+};
+
+$("forget").onclick = async function () {
+  const id = $("forget-id").value.trim();
+  if (!id) { log("先填一个记忆标识", "err"); return; }
+  try {
+    const result = await api("forget", { memory_id: id });
+    $("retention-out").textContent = JSON.stringify(result, null, 2);
+    log(
+      result.tombstoned > 0
+        ? "已删除，它现在不可见了"
+        : "这条此前已经删过（重复删除是幂等的）",
+      "ok"
+    );
+  } catch (error) {
+    $("retention-out").textContent = error.message;
+    log("删除失败：" + error.message, "err");
+  }
+  refresh();
+};
 
 $("run-loop").onclick = async function () {
   $("run-loop").disabled = true;

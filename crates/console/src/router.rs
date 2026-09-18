@@ -7,10 +7,10 @@
 use serde_json::{json, Value};
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota,
-    GoalBudget, GoalId, GoalState, PermissionScope, SelectionPolicy, Sha256Hex, UserChannel,
-    WallClock,
+    GoalBudget, GoalId, GoalState, MemoryId, PermissionScope, SelectionPolicy, Sha256Hex,
+    UserChannel, WallClock,
 };
-use soca_core::{RoundOutcome, Subject};
+use soca_core::{RetentionPolicy, RoundOutcome, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
 
 use crate::http::{Request, Response};
@@ -55,6 +55,8 @@ pub fn handle(
         ("GET", "/api/model") => Response::json(200, &model.summary()),
         ("POST", "/api/model") => connect_model(subject, model, request),
         ("POST", "/api/model/reset") => reset_model(subject, model),
+        ("POST", "/api/retention") => enforce_retention(subject, request, at),
+        ("POST", "/api/forget") => forget_memory(subject, request, at),
         ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
         ("POST", "/api/write") => request_write(subject, request, at),
         ("POST", "/api/approve") => grant_approval(subject, request, at),
@@ -295,6 +297,67 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
             )
         }
         Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 执行一次保留期清理（§12.3）。
+///
+/// 返回里把"隐藏"与"清理"分开报。§12.3 要的是"先写 tombstone 使查询立即不可见，**再异步
+/// 清理**，并给用户完成状态"——把两个数合成一个"已完成"，用户就无从知道内容是不是真的走了。
+fn enforce_retention(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let payload = body_json(request).unwrap_or(Value::Null);
+    let policy = RetentionPolicy {
+        audit_retention_days: payload
+            .get("audit_retention_days")
+            .and_then(Value::as_u64)
+            .unwrap_or(30)
+            .clamp(1, 3_650) as i64,
+        purge: payload.get("purge").and_then(Value::as_bool).unwrap_or(true),
+        prune_audit: payload
+            .get("prune_audit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    };
+
+    match subject.enforce_retention(&policy, at) {
+        Ok(report) => Response::json(
+            200,
+            &json!({
+                "tombstoned": report.tombstoned.len(),
+                "purged": report.purged,
+                "audit_pruned": report.audit_pruned,
+                "awaiting_purge": report.awaiting_purge,
+                "details": report.tombstoned,
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 用户显式删掉一条记忆（§12.3 的"用户可随时删除"）。
+fn forget_memory(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let Some(raw) = payload.get("memory_id").and_then(Value::as_str) else {
+        return Response::text(400, "缺少 memory_id");
+    };
+    let memory_id = match MemoryId::new(raw) {
+        Ok(id) => id,
+        Err(error) => return Response::text(400, error.to_string()),
+    };
+
+    match subject.forget(&memory_id, at) {
+        Ok(report) => Response::json(
+            200,
+            &json!({
+                // 0 表示这条此前已经删过。它不是失败——用户看到"删掉了"的提示之后又点了一次，
+                // 报错会把他困在一个"删不掉"的界面上，而东西早就不见了。
+                "tombstoned": report.tombstoned.len(),
+                "awaiting_purge": report.awaiting_purge,
+            }),
+        ),
+        Err(error) => Response::text(404, error.to_string()),
     }
 }
 

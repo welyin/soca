@@ -243,6 +243,19 @@ impl Store {
         Ok(expired)
     }
 
+    /// 当前已经隐藏、等着清理的条目数。
+    ///
+    /// 界面需要它来区分"删除已完成"与"删除还在排队"（§12.3 要求给用户完成状态）。两者都
+    /// 显示成一个勾，用户就无从知道内容是不是真的走了。
+    pub fn tombstoned_memory_count(&self) -> Result<usize, StorageError> {
+        let count: i64 = self.connection().query_row(
+            "SELECT COUNT(*) FROM memory_entries WHERE status = 'tombstoned'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// 用一条新修订取代旧条目（§13.2：不覆盖原证据）。
     ///
     /// 一次事务里做三件事：插入新条目、把旧条目标为 `Superseded`、回填旧条目的继任者。

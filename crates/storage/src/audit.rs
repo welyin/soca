@@ -50,6 +50,12 @@ pub enum AuditCategory {
     /// 与 [`AuditCategory::PermitRefused`] 分开记录，是因为它们对"接下来该做什么"的含义
     /// 完全不同：一个是等外部输入，另一个是此路不通。
     ApprovalRequired,
+    /// 执行了一次保留期动作：隐藏超期记忆、清理已隐藏内容、或裁掉超期审计（§12.3）。
+    ///
+    /// 详情里只写**条数**，不写内容。从保留期里删掉一条记忆，却把它的内容抄进审计账，
+    /// 等于绕了一圈又存了一份——而 §12.3 对审计账的要求恰恰是"不保存密码、完整 prompt
+    /// 或无限个人内容"。
+    RetentionEnforced,
 }
 
 impl AuditCategory {
@@ -69,6 +75,7 @@ impl AuditCategory {
             Self::PermitRefused => "permit_refused",
             Self::ApprovalGranted => "approval_granted",
             Self::ApprovalRequired => "approval_required",
+            Self::RetentionEnforced => "retention_enforced",
         }
     }
 }

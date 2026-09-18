@@ -736,6 +736,111 @@ fn the_loop_stops_early_when_there_is_nothing_left_to_do() {
 }
 
 // ---------------------------------------------------------------------------
+// 保留期与删除（§12.3）
+// ---------------------------------------------------------------------------
+
+/// 让环路记下一条结论，并把它写进记忆。返回那条记忆的标识。
+fn record_a_memory(subject: &mut Subject) -> String {
+    call(
+        subject,
+        "POST",
+        "/api/chat",
+        &body(json!({"message": "核对摘要文件"})),
+    );
+    call(
+        subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+    let report = json(&call(
+        subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a1", "rounds": 6})),
+    ));
+    report["rounds"]
+        .as_array()
+        .expect("数组")
+        .iter()
+        .find_map(|round| round["outcome"]["step"]["memory_id"].as_str())
+        .expect("环路应当记下一条结论")
+        .to_string()
+}
+
+#[test]
+fn the_console_reports_hiding_and_purging_as_different_states() {
+    // §12.3 的"先写 tombstone 使查询立即不可见，**再异步清理**，并给用户完成状态"。
+    // 界面必须能分开回答"看不见了"与"清干净了"——合成一个勾，用户就无从知道内容是不是真的走了。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+
+    let forgotten = json(&call(
+        &mut subject,
+        "POST",
+        "/api/forget",
+        &body(json!({"memory_id": memory_id})),
+    ));
+    assert_eq!(forgotten["tombstoned"], 1);
+    assert_eq!(forgotten["awaiting_purge"], 1);
+
+    let state = json(&call(&mut subject, "GET", "/api/state", ""));
+    assert_eq!(state["memory_entries"], 0, "删完立刻不可检索");
+    assert_eq!(state["memories_awaiting_purge"], 1, "但内容还在原处等着");
+
+    // 重复删除是幂等的成功。用户看到失败提示会以为没删掉，然后点第二次——
+    // 而此时把它报成错误，只会把他困在一个"删不掉"的界面上。
+    let again = json(&call(
+        &mut subject,
+        "POST",
+        "/api/forget",
+        &body(json!({"memory_id": memory_id})),
+    ));
+    assert_eq!(again["tombstoned"], 0, "不该再报一次删除");
+    assert_eq!(again["awaiting_purge"], 1);
+
+    let purged = json(&call(&mut subject, "POST", "/api/retention", &body(json!({}))));
+    assert_eq!(purged["purged"], 1);
+    assert_eq!(purged["awaiting_purge"], 0);
+
+    let state = json(&call(&mut subject, "GET", "/api/state", ""));
+    assert_eq!(state["memories_awaiting_purge"], 0);
+}
+
+#[test]
+fn forgetting_something_already_purged_says_not_found_rather_than_pretending() {
+    // 清理之后那条记录连审计入口也读不到了。这时再删只能是"找不到"——系统无从判断它
+    // 是被删过还是从来不存在，而把这两种情况都说成"已删除"，就是在替一个它不掌握的事实作证。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+    call(
+        &mut subject,
+        "POST",
+        "/api/forget",
+        &body(json!({"memory_id": memory_id.clone()})),
+    );
+    call(&mut subject, "POST", "/api/retention", &body(json!({})));
+
+    let response = call(
+        &mut subject,
+        "POST",
+        "/api/forget",
+        &body(json!({"memory_id": memory_id})),
+    );
+    assert_eq!(response.status, 404);
+}
+
+#[test]
+fn a_retention_run_on_a_clean_subject_reports_nothing_to_do() {
+    let mut subject = subject();
+    let report = json(&call(&mut subject, "POST", "/api/retention", &body(json!({}))));
+    assert_eq!(report["tombstoned"], 0);
+    assert_eq!(report["purged"], 0);
+    assert_eq!(report["awaiting_purge"], 0);
+    assert_eq!(report["audit_pruned"], 0);
+}
+
+// ---------------------------------------------------------------------------
 // 执行与审批
 // ---------------------------------------------------------------------------
 

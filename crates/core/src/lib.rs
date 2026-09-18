@@ -7,6 +7,7 @@
 //! | [`os`] | 确定性模拟 OS，含动作级幂等与可复现故障注入 | §16 P0 的"模拟 OS" |
 //! | [`broker`] | 副作用唯一出口，只有执行许可能通过 | §12.2 |
 //! | [`policy`] | 策略代理：决定要不要签发执行许可 | §12.1、§12.2 |
+//! | [`retention`] | 保留期驱动：先隐藏、再清理、给完成状态 | §12.3 |
 //! | [`session`] | §6 的九步循环，逐步可调用 | §6 |
 //! | [`replay`] | 只读轨迹重放与自洽性检查 | §7.3 |
 //!
@@ -31,6 +32,7 @@ pub mod lifecycle;
 pub mod os;
 pub mod policy;
 pub mod replay;
+pub mod retention;
 pub mod session;
 pub mod subject;
 
@@ -41,6 +43,9 @@ pub use crate::lifecycle::{
 };
 pub use crate::os::{Attempt, AttemptOutcome, FaultPlan, ObjectState, SimulatedOs};
 pub use crate::policy::{PermitDecision, PolicyAgent, DEFAULT_PERMIT_TTL_SECONDS};
+pub use crate::retention::{
+    expire_retained, forget, purge_retained, RetentionPolicy, RetentionReport, TombstonedMemory,
+};
 pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
 pub use crate::session::{
     evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,

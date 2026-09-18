@@ -48,6 +48,9 @@ use soca_storage::Store;
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
 use crate::policy::{PermitDecision, PolicyAgent};
+use crate::retention::{
+    expire_retained, forget as forget_memory, purge_retained, RetentionPolicy, RetentionReport,
+};
 use crate::session::DispatchOutcome;
 use crate::session::{ObservationRecord, Session};
 
@@ -236,6 +239,8 @@ pub struct PublicState {
     pub ledger_records: usize,
     /// 可见记忆条数。
     pub memory_entries: usize,
+    /// 已经隐藏、等着清理的记忆条数（§12.3）。
+    pub memories_awaiting_purge: usize,
     /// 动作账条数。
     pub actions: i64,
     /// 已投递、尚未推进的动作数（§12.1 的 A2 之类）。
@@ -1032,6 +1037,40 @@ impl Subject {
             .collect())
     }
 
+    /// 执行一次保留期清理（§12.3）。
+    ///
+    /// 按策略的两步走：先让超期内容**立即不可见**，再按 `policy.purge` 决定要不要当场清掉。
+    /// 报告如实分开这两件事——用户看到的"删除完成"指的是前者，后者可能还在排队。
+    pub fn enforce_retention(
+        &mut self,
+        policy: &RetentionPolicy,
+        at: WallClock,
+    ) -> Result<RetentionReport, CoreError> {
+        let mut report = expire_retained(&mut self.store, at)?;
+        if policy.purge {
+            report.merge(purge_retained(&mut self.store, policy, at)?);
+        }
+        Ok(report)
+    }
+
+    /// 用户显式删掉一条记忆（§12.3："用户可随时删除"）。
+    ///
+    /// 只做隐藏那一步。物理清理留给下一次 [`Subject::enforce_retention`]，因为
+    /// §12.3 要的是"**异步**清理，并给用户完成状态"——把清理塞进这个调用，界面就会卡在
+    /// 一次可能很慢的传播上，而用户只是想让它别再出现。
+    pub fn forget(
+        &mut self,
+        memory_id: &MemoryId,
+        at: WallClock,
+    ) -> Result<RetentionReport, CoreError> {
+        forget_memory(&mut self.store, memory_id, "user_requested", at)
+    }
+
+    /// 当前还有多少条记忆等着被清理。
+    pub fn memories_awaiting_purge(&self) -> Result<usize, CoreError> {
+        Ok(self.store.tombstoned_memory_count()?)
+    }
+
     /// 策略代理（只读）。
     pub fn policy(&self) -> &PolicyAgent {
         &self.policy
@@ -1208,6 +1247,7 @@ impl Subject {
             observed_evidence: self.observed.len(),
             ledger_records: self.cluster.ledger().len(),
             memory_entries: self.store.memory_count(&self.owner)?,
+            memories_awaiting_purge: self.store.tombstoned_memory_count()?,
             actions: self.store.action_count()?,
             pending_actions: self.cluster.pending_actions(),
             usable_approvals: self.usable_approvals(at)?.len(),

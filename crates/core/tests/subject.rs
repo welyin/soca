@@ -11,7 +11,9 @@ use soca_contracts::{
     SelectionPolicy, SubjectId, TokenUsage, UserChannel, VerificationKind, Verdict, WallClock,
     MAX_CONTEXT_EVIDENCE,
 };
-use soca_core::{ActionBroker, AdvanceStep, RoundOutcome, SimulatedOs, Subject};
+use soca_core::{
+    ActionBroker, AdvanceStep, RetentionPolicy, RoundOutcome, SimulatedOs, Subject,
+};
 use soca_core_actors::{DesktopAndFilesCluster, Precondition};
 use soca_model_gateway::{DeterministicTransport, Transport, TransportError};
 use soca_storage::Store;
@@ -1154,6 +1156,45 @@ fn a_finished_goals_write_does_not_run_under_another_goal() {
         "旧任务那次写入不该在新任务名下被执行"
     );
     assert_eq!(subject.pending_actions_for(&second), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 保留期（§12.3）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_conclusions_the_loop_records_do_not_expire_on_their_own() {
+    // 两面都要对得上：环路写进去的确实是 `MemoryKind::Fact`（§13.2 的语义候选），
+    // 而 §12.3 给这一类的保留期是"不自动过期"。任一面反了，一条被提升的结论都会在某天
+    // 悄悄消失，而没人知道为什么。
+    let mut subject = subject_without_preconditions();
+    let goal_id = delegate_a_goal(&mut subject);
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(1))
+        .expect("观测");
+    subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A1, at(2))
+        .expect("跑一轮");
+    assert_eq!(subject.store().memory_count(&owner()).expect("计数"), 1);
+
+    let ten_years = 3_650 * 86_400;
+    let report = subject
+        .enforce_retention(&RetentionPolicy::default(), at(ten_years))
+        .expect("执行保留期");
+
+    assert!(
+        report.tombstoned.is_empty(),
+        "环路记下的结论不该被保留期清掉：{report:?}"
+    );
+    assert_eq!(subject.store().memory_count(&owner()).expect("计数"), 1);
+    assert_eq!(
+        subject
+            .public_state(at(ten_years))
+            .expect("状态")
+            .memories_awaiting_purge,
+        0
+    );
 }
 
 #[test]
