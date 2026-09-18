@@ -6,11 +6,11 @@
 
 use serde_json::{json, Value};
 use soca_contracts::{
-    ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef,
-    ExplorationQuota, GoalBudget, GoalId, GoalState, GrantScope, MemoryId, PermissionScope,
-    SelectionPolicy, Sha256Hex, UserChannel, WallClock,
+    ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, EventId,
+    EvidenceRef, ExplorationQuota, GoalBudget, GoalId, GoalState, GrantScope, MemoryId,
+    PermissionScope, SelectionPolicy, Sha256Hex, UserChannel, WallClock,
 };
-use soca_core::{CoreError, RetentionPolicy, Scheduler, Subject};
+use soca_core::{CoreError, Correction, RetentionPolicy, Scheduler, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
 use soca_storage::audit::AuditCategory;
 
@@ -60,6 +60,7 @@ pub fn handle(
         ("POST", "/api/revoke") => revoke_capability(subject, request, at),
         ("POST", "/api/retention") => enforce_retention(subject, request, at),
         ("POST", "/api/forget") => forget_memory(subject, request, at),
+        ("POST", "/api/correct") => correct(subject, request, at),
         ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
         ("POST", "/api/write") => request_write(subject, request, at),
         ("POST", "/api/approve") => grant_approval(subject, request, at),
@@ -532,6 +533,68 @@ fn enforce_retention(subject: &mut Subject, request: &Request, at: WallClock) ->
     }
 }
 
+/// 用户说"记错了"（§14）。
+///
+/// 与 `/api/forget` 分开，不是因为撤掉的东西不同——两者都会让记忆不可见——而是因为
+/// **留下的东西**不同：纠错会在事件账上留下一条带用户原话的记录（通道是 `correction`），
+/// 而删除只留一句"用户删过"。用户下次问"这条为什么不见了"，前者答得出来。
+fn correct(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let note = payload
+        .get("note")
+        .and_then(Value::as_str)
+        .unwrap_or("用户指出这条记错了")
+        .to_string();
+
+    // 两种指名方式对应**能证明的范围不一样**，所以不合并成一个字段：
+    // 指名一条记忆能确定的只有那一条；指名一条原始事件，由它派生的那些是查得出来的。
+    let correction = if let Some(memory_id) = payload.get("memory_id").and_then(Value::as_str) {
+        Correction::Conclusion {
+            memory_id: memory_id.to_string(),
+        }
+    } else if let Some(raw) = payload.get("event_id").and_then(Value::as_str) {
+        // 界面上看到的是证据引用（`obs:<uuid>`），而派生关系挂在**原始事件**上。
+        // 这个转换属于这一层：`obs:` 是给人和界面看的写法，`EventId` 是域内的标识。
+        // 让域层去认前缀，等于把展示格式塞进契约。
+        let event_id = match EvidenceRef::new(raw).ok().and_then(|r| r.origin_event_id()) {
+            Some(id) => id,
+            None => match EventId::parse(raw) {
+                Ok(id) => id,
+                Err(error) => return Response::text(400, error.to_string()),
+            },
+        };
+        Correction::Source {
+            event_id: event_id.to_string(),
+        }
+    } else {
+        return Response::text(
+            400,
+            "缺少 memory_id 或 event_id：纠错必须指名一条记忆或一条原始事件",
+        );
+    };
+
+    match subject.correct(&correction, &note, at) {
+        Ok(report) => Response::json(
+            200,
+            &json!({
+                "event_id": report.event_id,
+                "target": report.target,
+                "retracted": report.retracted,
+                // 与 `retracted.len()` 分开报：用户指名一条、系统撤掉五条时，
+                // 那四条是**系统自己判断**该撤的，必须让它自己说出来。
+                "derived": report.derived,
+                "awaiting_purge": report.awaiting_purge,
+                "note": "纠错本身也进了事件账——只在对话框里回一句「好的」的话，账上什么也没发生",
+            }),
+        ),
+        // 指名了一条已经不存在的记忆会是 404：那是用户指错了东西，值得说出来。
+        // 而那次纠错**已经记进事件账了**——顺序是先记再改。
+        Err(error) => Response::text(404, error.to_string()),
+    }
+}
+
 /// 用户显式删掉一条记忆（§12.3 的"用户可随时删除"）。
 fn forget_memory(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
     let Ok(payload) = body_json(request) else {
@@ -688,7 +751,7 @@ fn grant_approval(subject: &mut Subject, request: &Request, at: WallClock) -> Re
             &json!({
                 "approval_id": approval.approval_id.to_string(),
                 "level": level.as_str(),
-                "channel": channel_name(channel),
+                "channel": channel.as_str(),
                 "max_uses": max_uses,
                 "recorded": recorded,
             }),
@@ -727,14 +790,10 @@ fn resume_goal(subject: &mut Subject, request: &Request, at: WallClock) -> Respo
     }
 }
 
-fn channel_name(channel: UserChannel) -> &'static str {
-    match channel {
-        UserChannel::Chat => "chat",
-        UserChannel::PushToTalk => "push_to_talk",
-        UserChannel::ApprovalUi => "approval_ui",
-        UserChannel::DeviceControl => "device_control",
-    }
-}
+// 这里原来有一份自己的"通道名 → 字符串"映射。删掉它：契约层本来就有
+// [`UserChannel::as_str`]，而两份映射迟早在加新通道时分叉——分叉的那一天，界面显示的通道名
+// 与事件账里记的不是同一个，于是"这条批准是从哪个通道来的"这个问题会有两个答案。
+
 
 /// 连续跑若干轮 §6 的闭环。
 ///

@@ -137,6 +137,65 @@ pub struct RevocationReport {
     pub awaiting_purge: usize,
 }
 
+/// 一次纠错指名的对象（§14）。
+///
+/// 两种指名方式分开，是因为**能证明的范围不一样**：
+///
+/// * [`Correction::Conclusion`]："你记的这条结论是错的。" 能确定的只有那一条。
+/// * [`Correction::Source`]："你根据那条消息记下来的东西是错的。" 由那条原始事件派生的记忆
+///   是**查得出来**的——记忆的出处里就记着它依据的哪条事件（[`Provenance::Derived`]）。
+///
+/// 没有第三种"把你从这份材料推出的都撤掉"。那需要按**证据**反查，而"哪些结论是从这条观测
+/// 推出来的"与"哪些结论引用了这条观测"不是一回事：同一份文件观测里读出的"版本"和"评审日期"
+/// 是两条无关结论，按证据反查会把它们一起撤掉，而用户说的只是其中一条。
+/// 宁可少撤而准确——真正需要的那条边（记忆到记忆的派生）本版还没有生产者会使它成立。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Correction {
+    /// 指名一条记忆。
+    Conclusion {
+        /// 那条记忆。
+        memory_id: String,
+    },
+    /// 指名一条**原始事件**。
+    Source {
+        /// 那条原始事件。
+        event_id: String,
+    },
+}
+
+impl Correction {
+    /// 指名的对象是什么（用于报告与审计）。
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Conclusion { memory_id } => memory_id,
+            Self::Source { event_id } => event_id,
+        }
+    }
+}
+
+/// 一次纠错的报告（§14）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CorrectionReport {
+    /// 这次纠错本身作为一条事件被记了下来。
+    ///
+    /// §14 那句"**生成纠错事件**……不只在下一条回复中口头道歉"的前半句就是它：纠错要进事件账，
+    /// 才能被回放、被审计、被别的单元看到。只在对话框里回一句"好的，我改"的话，账上什么都没发生。
+    pub event_id: String,
+    /// 指名的是什么。
+    pub target: String,
+    /// 因此不再可见的记忆。
+    pub retracted: Vec<String>,
+    /// 其中有几条**不是**指名的那一条，而是由它派生出来的。
+    ///
+    /// 与 `retracted.len()` 分开报：用户指名一条、系统撤掉五条时，那四条是**系统自己判断**
+    /// 该撤的，必须让它自己说出来。合成一个数字的话，"按你说的撤了一条"与"顺手多撤了四条"
+    /// 看起来是一样的。
+    pub derived: usize,
+    /// 现在等着被清理的条数。
+    pub awaiting_purge: usize,
+}
+
 /// 一条读回来的用户输入。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UserInput {
@@ -1523,6 +1582,101 @@ impl Subject {
         at: WallClock,
     ) -> Result<RetentionReport, CoreError> {
         forget_memory(&mut self.store, memory_id, "user_requested", at)
+    }
+
+    /// 用户说"记错了"（§14）。
+    ///
+    /// §14 的原话是"用户说'记错了'**生成纠错事件**并失效相关派生记忆，**不只在下一条回复中
+    /// 口头道歉**"。两半都要落地，而顺序不能反：
+    ///
+    /// 1. **先把纠错本身写成事件。** 用户说的这句话是事实，它已经发生了；后面无论撤掉了几条、
+    ///    有没有撤成，这句话都该留在账上。反过来先撤再记的话，中途出错会留下一件"发生了、
+    ///    却没有任何记录"的事。
+    /// 2. **再改动状态。** 这一步才是"不只是道歉"。
+    ///
+    /// **不需要任何能力授权。** 纠错与撤回权限是两件事：§12.3 说"用户可随时删除"，
+    /// 而把它挂在某次授权上，等于说"授权一撤，你连纠正错话的权利都没有了"。
+    ///
+    /// 撤掉是**终局**的（§12.3）：同样的结论以后再被推出来一次，也不会复活——
+    /// 那条路在 [`Subject::advance`] 里被 `memory_including_hidden` 挡着。
+    pub fn correct(
+        &mut self,
+        correction: &Correction,
+        note: &str,
+        at: WallClock,
+    ) -> Result<CorrectionReport, CoreError> {
+        let target = correction.target().to_string();
+
+        // 一、纠错本身进事件账。内容与通道一起写进去：通道是 `Correction`，
+        // 所以"这条事件是一条纠错"在账上是一眼可见的，不用去解析正文。
+        let text = format!("纠错 {target}：{note}");
+        let event_id = self.record_user_input(
+            &text,
+            UserChannel::Correction,
+            &self.correction_scope(),
+            at,
+        )?;
+
+        // 二、按指名的方式撤。
+        let mut retracted: Vec<String> = Vec::new();
+        let mut derived = 0usize;
+        match correction {
+            Correction::Conclusion { memory_id } => {
+                let id = MemoryId::new(memory_id)?;
+                let report = forget_memory(&mut self.store, &id, "user_correction", at)?;
+                retracted.extend(report.tombstoned.into_iter().map(|item| item.memory_id));
+            }
+            Correction::Source { event_id } => {
+                let source = EventId::parse(event_id)?;
+                // 出处指向同一条原始事件的那些，就是"由它派生出来的"。
+                //
+                // 查的是**出处**而不是"引用了哪些证据"：后者会把同一份材料里读出的无关结论
+                // 一起带走（见 [`Correction`] 的文档）。这里的每一条，账上都写着它依据的是
+                // 那条事件——所以"该撤"这件事是**可证明**的，不是猜的。
+                for entry in self.store.recall(&self.owner, None, at)? {
+                    if entry.provenance.original_event() != Some(&source) {
+                        continue;
+                    }
+                    forget_memory(&mut self.store, &entry.memory_id, "user_correction", at)?;
+                    retracted.push(entry.memory_id.to_string());
+                    derived = derived.saturating_add(1);
+                }
+            }
+        }
+
+        self.store.audit(
+            at,
+            AuditCategory::RetentionEnforced,
+            &target,
+            "corrected",
+            &format!(
+                "用户纠错：撤回 {} 条记忆（其中 {derived} 条为派生）",
+                retracted.len()
+            ),
+        )?;
+
+        Ok(CorrectionReport {
+            event_id: event_id.to_string(),
+            target,
+            retracted,
+            derived,
+            awaiting_purge: self.store.tombstoned_memory_count()?,
+        })
+    }
+
+    /// 纠错事件挂在哪个权限范围下。
+    ///
+    /// 取当前目标的范围，没有目标就用默认范围——但**不查任何授权**。
+    /// 这是 [`Subject::correct`] 与观测、模型调用最不一样的地方：那两件事是"系统出去做事"，
+    /// 要有授权；纠错是"用户纠正自己的系统"，§12.3 说"用户可随时删除"。
+    fn correction_scope(&self) -> PermissionScope {
+        self.next_open_goal()
+            .and_then(|goal_id| {
+                self.goals
+                    .goal(&goal_id)
+                    .map(|goal| goal.permission_scope.clone())
+            })
+            .unwrap_or_else(|| self.default_scope())
     }
 
     /// 当前还有多少条记忆等着被清理。

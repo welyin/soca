@@ -170,5 +170,8 @@ fn channel_str(approval: &Approval) -> &'static str {
         soca_contracts::UserChannel::PushToTalk => "push_to_talk",
         soca_contracts::UserChannel::ApprovalUi => "approval_ui",
         soca_contracts::UserChannel::DeviceControl => "device_control",
+        // 纠错通道**不能**签发批准。这一行只是把它如实写下来——拦在别处，见
+        // `soca_contracts::Approval::new`：那里的契约是"批准只能从能表达明确目标的通道来"。
+        soca_contracts::UserChannel::Correction => "correction",
     }
 }

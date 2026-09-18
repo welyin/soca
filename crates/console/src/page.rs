@@ -304,6 +304,21 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       用户删除是<a>立即不可见</a>，物理清理留给下一次保留期执行——§12.3 要的是"异步清理"，
       把清理塞进删除请求会让界面卡在一次可能很慢的传播上。
     </div>
+    <div class="row">
+      <input id="correct-id" type="text" placeholder="记错了的那条 memory:... （或一条 obs: 事件标识）" style="flex:1">
+      <input id="correct-note" type="text" placeholder="哪里错了（会原样进事件账）" style="flex:1">
+      <button id="correct">记错了</button>
+    </div>
+    <div class="hint">
+      <b>「删除」与「记错了」不是同一件事。</b>撤掉的东西一样，<b>留下的东西不一样</b>：
+      纠错会在事件账上留下一条带用户原话的记录（通道是 <code>correction</code>），而删除只留一句
+      "用户删过"。下次问"这条为什么不见了"，前者答得出来。
+    </div>
+    <div class="hint">
+      填 <code>memory:</code> 开头 → 只撤那一条（记忆之间没有派生边，多撤会误伤同一份观测里
+      读出的无关结论）。填 <code>obs:</code> 开头 → 撤掉<b>由它派生的</b>那些，这是查得出来的：
+      每条结论的出处里就写着它依据的是哪条原始事件（§14 的"失效相关派生记忆"）。
+    </div>
     <pre id="retention-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
 
@@ -637,6 +652,29 @@ $("run-retention").onclick = async function () {
   } catch (error) {
     $("retention-out").textContent = error.message;
     log("保留期执行失败：" + error.message, "err");
+  }
+  refresh();
+};
+
+$("correct").onclick = async function () {
+  const id = $("correct-id").value.trim();
+  if (!id) { log("先填一条要纠正的标识（memory: 或 obs:）", "err"); return; }
+  const note = $("correct-note").value.trim();
+  // 两种指名方式对应能证明的范围不一样，所以界面上也按前缀分开，而不是让后端猜。
+  const payload = id.startsWith("obs:")
+    ? { event_id: id, note: note }
+    : { memory_id: id, note: note };
+  try {
+    const result = await api("correct", payload);
+    $("retention-out").textContent = JSON.stringify(result, null, 2);
+    log(
+      "已纠正，撤掉 " + result.retracted.length + " 条（其中 " + result.derived +
+      " 条是派生出来的）；纠错本身记在 " + result.event_id,
+      "ok"
+    );
+  } catch (error) {
+    $("retention-out").textContent = error.message;
+    log("纠错失败：" + error.message, "err");
   }
   refresh();
 };

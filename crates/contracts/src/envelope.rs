@@ -29,6 +29,15 @@ pub enum UserChannel {
     ApprovalUi,
     /// 设备控制开关（暂停、静音、撤销采集）。
     DeviceControl,
+    /// 记忆纠错（§14 的"用户说'记错了'"）。
+    ///
+    /// 单列一条通道，而不是并进 [`UserChannel::Chat`]，是因为它与"用户说了一句话"在**后果上**
+    /// 不是一回事：聊天产生目标，纠错**改动已经存下来的结论**。并进聊天的话，事件账上两者
+    /// 长得一样，而审计要回答的问题恰恰是"这条记忆是被谁、以什么名义撤掉的"。
+    ///
+    /// 它走的仍然是 [`Provenance::User`]，因此 [`Provenance::is_instruction_authority`] 为真——
+    /// 用户纠正自己的系统，那是最高一档的依据。
+    Correction,
 }
 
 impl UserChannel {
@@ -39,6 +48,7 @@ impl UserChannel {
             Self::PushToTalk => "push_to_talk",
             Self::ApprovalUi => "approval_ui",
             Self::DeviceControl => "device_control",
+            Self::Correction => "correction",
         }
     }
 }

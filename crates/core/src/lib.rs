@@ -54,6 +54,6 @@ pub use crate::session::{
     evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,
 };
 pub use crate::subject::{
-    AdvanceStep, GoalSummary, LoopRound, ModelConsultation, PublicState, RevocationReport,
-    RoundOutcome, Subject, UserInput, CONVERSATION_RETENTION_DAYS,
+    AdvanceStep, Correction, CorrectionReport, GoalSummary, LoopRound, ModelConsultation,
+    PublicState, RevocationReport, RoundOutcome, Subject, UserInput, CONVERSATION_RETENTION_DAYS,
 };

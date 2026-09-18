@@ -1058,6 +1058,86 @@ fn approving_does_not_by_itself_execute_anything() {
 }
 
 #[test]
+fn the_console_records_a_correction_as_an_event_and_takes_the_memory_out() {
+    // §14："用户说'记错了'**生成纠错事件**并失效相关派生记忆，**不只在下一条回复中口头道歉**。"
+    //
+    // 两半都要落地。这条测试一半看事件账（前半句），一半看状态（后半句）。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+
+    let corrected = json(&call(
+        &mut subject,
+        "POST",
+        "/api/correct",
+        &body(json!({"memory_id": memory_id, "note": "那个日期我看错了"})),
+    ));
+    assert_eq!(
+        corrected["retracted"].as_array().expect("数组").len(),
+        1,
+        "指名的那一条要撤掉：{corrected}"
+    );
+    assert_eq!(corrected["derived"], 0, "指名的就是它自己");
+    assert!(
+        corrected["event_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "纠错要留下一条事件：{corrected}"
+    );
+
+    // 后半句：状态真的变了。
+    let state = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))));
+    assert_eq!(state["memory_entries"], 0, "撤了就不该还在：{state}");
+}
+
+#[test]
+fn correcting_without_naming_anything_is_refused() {
+    // 两种指名方式对应**能证明的范围不一样**，所以不合并成一个字段，也不给默认值。
+    let mut subject = subject();
+    let refused = call(
+        &mut subject,
+        "POST",
+        "/api/correct",
+        &body(json!({"note": "你错了"})),
+    );
+    assert_eq!(refused.status, 400);
+    assert!(
+        refused.body.contains("memory_id") && refused.body.contains("event_id"),
+        "要说清两种填法各是什么意思：{}",
+        refused.body
+    );
+}
+
+#[test]
+fn correcting_by_a_source_that_nothing_was_derived_from_retracts_nothing() {
+    // 按原始事件纠错撤的是**由它派生的**那些。少了这条对照，"撤掉派生的"与
+    // "把所有记忆都撤掉"看起来是一样的。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+
+    let untouched = json(&call(
+        &mut subject,
+        "POST",
+        "/api/correct",
+        &body(json!({
+            "event_id": "obs:00000000-0000-4000-8000-0000000000ff",
+            "note": "这条观测是错的"
+        })),
+    ));
+    assert_eq!(untouched["derived"], 0, "没有结论派生自它：{untouched}");
+    assert_eq!(untouched["retracted"].as_array().expect("数组").len(), 0);
+
+    let state = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))));
+    assert_eq!(
+        state["memory_entries"], 1,
+        "那条结论不该被牵连——撤的是派生的，不是所有记忆：{state}"
+    );
+    assert!(
+        !memory_id.is_empty(),
+        "而按记忆指名仍然是指名得到那一条的"
+    );
+}
+
+#[test]
 fn the_loop_reports_why_the_scheduler_stopped() {
     // "跑一段"的返回值要说明**为什么停**。否则界面上只有"跑了 N 轮"，而"没有目标了"
     // 与"连续空转"与"被暂停"三件事看起来一模一样——而它们接下来该做的事完全不同。
