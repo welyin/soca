@@ -364,6 +364,9 @@ fn revoke_capability(subject: &mut Subject, request: &Request, at: WallClock) ->
                 "was_granted": report.was_granted,
                 "events_covered": report.events_covered,
                 "memories_invalidated": report.memories_invalidated,
+                // 撤回的第二个后果（§7.2）：簇手里"还能拿来下结论的材料"也失效了。
+                // 与上一条分开报，因为只有上一条时看起来像已经做完了。
+                "evidence_retracted": report.evidence_retracted,
                 "awaiting_purge": report.awaiting_purge,
                 "granted": subject
                     .granted_capabilities()

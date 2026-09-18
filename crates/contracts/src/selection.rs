@@ -41,6 +41,18 @@ pub enum VerificationKind {
     CounterExample,
     /// 独立来源核验：用另一条不依赖同一来源的证据交叉核对。
     IndependentSource,
+    /// 证据可用性：这条候选引用的证据**还存在且仍可访问吗**（§7.2）。
+    ///
+    /// 这一条与上面三种**不是同一类东西**，放在同一个枚举里是因为它们共用同一条上报通路。
+    /// 上面三种是 §6 第 4 步点名的**检验方法**；这一条是 §7.2 给所有引用定的**有效性前提**：
+    ///
+    /// > 引用必须能解析为存在**且仍可访问**的证据。缺失来源、过期证据、**权限变化**和数据
+    /// > 撤回都可使候选失效。
+    ///
+    /// 单列成一档，是因为它报出的问题与别的最不一样：结论与证据**完全自洽**，证据也确实
+    /// 存在过——只是它现在不能用了。和"值对不上"混在同一个判定里，看审计的人会去查推导
+    /// 过程，而真正该看的是"谁在什么时候把权限收回了"。
+    EvidenceAccess,
 }
 
 impl VerificationKind {
@@ -50,6 +62,7 @@ impl VerificationKind {
             Self::Tool => "tool",
             Self::CounterExample => "counter_example",
             Self::IndependentSource => "independent_source",
+            Self::EvidenceAccess => "evidence_access",
         }
     }
 }

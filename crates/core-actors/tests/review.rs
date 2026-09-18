@@ -1,6 +1,6 @@
 //! 证据台账与 L3 检验器的回归测试（§4.3「证据与风险评估」、§6 第 4 步）。
 //!
-//! 三组最要紧的性质：
+//! 四组最要紧的性质：
 //!
 //! * **同一段录屏转写出的两份摘要不是两次独立观测。** 用它们凑门槛，等于用一次观测的重量
 //!   压两次秤。
@@ -8,14 +8,17 @@
 //!   "没查出来"当成"没问题"。
 //! * **引用了一条真实证据、却断言别的东西，要能被抓住。** 结构校验看不出来（引用合法、
 //!   下标存在），只有把命题文本和证据值对一遍才发现得了。
+//! * **证据"存在过"与"现在还能用"是两件事。** 撤回权限之后，一份完全自洽、证据也确实
+//!   存在过的结论仍然必须出局（§7.2）。
 
 use soca_contracts::{
     ActionLevel, Candidate, CandidateSet, EvidenceRef, SelectionOutcome, SelectionPolicy, UnitId,
     VerificationKind, Verdict, select,
 };
 use soca_core_actors::{
-    ReviewPolicy, check_claim_grounding, check_source_independence, review_all, review_candidate,
-    search_counter_example, EvidenceLedger, EvidenceRecord, MAX_EVIDENCE_RECORDS,
+    ReviewPolicy, check_claim_grounding, check_evidence_access, check_source_independence,
+    review_all, review_candidate, search_counter_example, EvidenceLedger, EvidenceRecord,
+    MAX_EVIDENCE_RECORDS,
 };
 
 fn reference(name: &str) -> EvidenceRef {
@@ -40,6 +43,7 @@ fn record(
         observed_value: value.to_string(),
         derived_from: derived_from.iter().map(|name| reference(name)).collect(),
         observed_by: unit(by),
+        retracted: None,
     }
 }
 
@@ -418,6 +422,177 @@ fn reviewing_the_same_input_twice_gives_the_same_verdicts() {
     let left = select(&set, first, &selection_policy, ActionLevel::A3).expect("选择");
     let right = select(&set, second, &selection_policy, ActionLevel::A3).expect("选择");
     assert_eq!(left, right);
+}
+
+// ---------------------------------------------------------------------------
+// 证据可用性（§7.2）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_retracted_evidence_is_still_on_the_ledger_but_no_longer_material() {
+    // §7.2 要求引用"存在**且仍可访问**"。撤回删的不是记录，是它的身份：从"可以拿来下结论
+    // 的材料"变成"只在审计里看得见的历史"。
+    let mut ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
+    assert_eq!(ledger.retract(&[reference("a")], "capability_revoked"), 1);
+
+    assert!(
+        ledger.get(&reference("a")).is_none(),
+        "默认入口只给能用的东西"
+    );
+    let audit = ledger
+        .get_including_retracted(&reference("a"))
+        .expect("审计还看得见");
+    assert_eq!(audit.observed_value, "sha256:aaa", "它当时说了什么仍然可查");
+    assert_eq!(audit.retracted.as_deref(), Some("capability_revoked"));
+    assert_eq!(ledger.records().len(), 1, "记录没有被删掉");
+    assert_eq!(ledger.retracted_count(), 1);
+    assert!(ledger.about("file:x").is_empty(), "它不再在手上");
+}
+
+#[test]
+fn retracting_the_same_evidence_twice_keeps_the_first_reason() {
+    // 第一次撤回的原因才是它为什么不可用的原因。后到的只是一次重放——而同一条证据被同一次
+    // 撤回重放多次，是这套流程里最常见的情形（每个引用它的候选都会走一遍）。
+    let mut ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
+    assert_eq!(ledger.retract(&[reference("a")], "capability_revoked"), 1);
+    assert_eq!(ledger.retract(&[reference("a")], "retention_expired"), 0);
+    assert_eq!(
+        ledger
+            .get_including_retracted(&reference("a"))
+            .expect("存在")
+            .retracted
+            .as_deref(),
+        Some("capability_revoked")
+    );
+}
+
+#[test]
+fn retracting_a_reference_the_ledger_never_saw_changes_nothing() {
+    // 那是"缺失来源"，归 L2 的存在性校验管，不该在这里被算成一次生效的撤回——把两者混成
+    // 一件事，撤回报告里的条数就会把程序缺陷算成权限变化。
+    let mut ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
+    assert_eq!(
+        ledger.retract(&[reference("ghost")], "capability_revoked"),
+        0
+    );
+    assert_eq!(ledger.retracted_count(), 0);
+}
+
+#[test]
+fn a_claim_citing_retracted_evidence_is_refuted() {
+    let mut ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
+    let target = claim("file:x 的版本是 sha256:aaa", &["a"]);
+    assert!(
+        check_evidence_access(&target, &ledger).is_none(),
+        "撤回之前没有问题可报"
+    );
+
+    ledger.retract(&[reference("a")], "capability_revoked");
+
+    let outcome = check_evidence_access(&target, &ledger).expect("撤回之后要报出来");
+    assert_eq!(outcome.kind, VerificationKind::EvidenceAccess);
+    assert_eq!(outcome.verdict, Verdict::Refuted);
+    assert_eq!(outcome.evidence_refs, vec![reference("a")]);
+
+    // 而且它真的出局——不是只多了一条"注意"。
+    let review = review_candidate(
+        0,
+        &target,
+        &ledger,
+        &ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8),
+    );
+    assert!(review.is_refuted(), "被否定的候选不该再参与竞争");
+}
+
+#[test]
+fn a_claim_citing_only_available_evidence_reports_nothing() {
+    // 这条判定只在**发现问题**时上报。全部可用时它没有正面结论可报——"这些证据都能用"
+    // 是一条没有信息量的判定，写进每一份档案只会让每条候选多一行不变的话。
+    let ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
+    assert!(check_evidence_access(&claim("file:x 的版本是 sha256:aaa", &["a"]), &ledger).is_none());
+}
+
+#[test]
+fn a_retracted_observation_stops_counting_toward_independent_sources() {
+    // 撤回的证据不能拿去凑独立来源——那正是"用作废材料压下结论"最直接的一种。
+    let mut ledger = ledger_with(vec![
+        record("a", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("b", "file:x", "sha256:aaa", "reader-2", &[]),
+    ]);
+    let refs = vec![reference("a"), reference("b")];
+    assert_eq!(ledger.independent_source_count(&refs), 2);
+
+    ledger.retract(&[reference("b")], "capability_revoked");
+    assert_eq!(
+        ledger.independent_source_count(&refs),
+        1,
+        "撤回之后只剩一个来源，门槛不该还按两个算"
+    );
+}
+
+#[test]
+fn a_retracted_observation_stops_counting_as_a_counter_example() {
+    // 反例也不行。一条被撤回的观测不是"另一个观测者看到了别的东西"，它是一份作废的材料——
+    // 拿它去否定一条结论，等于用撤回掉的东西推翻撤回之后的结论。
+    let mut ledger = ledger_with(vec![
+        record("a", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("b", "file:x", "sha256:bbb", "reader-2", &[]),
+    ]);
+    let target = claim("file:x 的版本是 sha256:aaa", &["a"]);
+    assert_eq!(
+        search_counter_example(&target, &ledger)
+            .expect("有反例")
+            .verdict,
+        Verdict::Refuted
+    );
+
+    ledger.retract(&[reference("b")], "capability_revoked");
+    assert_eq!(
+        search_counter_example(&target, &ledger)
+            .expect("仍然有一份材料")
+            .verdict,
+        Verdict::Inconclusive,
+        "撤回之后没有可用的反例了"
+    );
+}
+
+#[test]
+fn a_retracted_value_is_still_recognized_so_a_claim_asserting_it_gets_caught() {
+    // `known_values` **不过滤**已撤回的值，这是一个刻意的例外。它认得出那个值，才能说清
+    // "你断言的是一条已经作废的观测里的东西"；把已撤回的值也过滤掉，同一份命题会变成
+    // "断言了一个谁也没见过的值"——那是另一个问题，而且难归因得多。
+    let mut ledger = ledger_with(vec![record("a", "file:x", "sha256:aaa", "reader-1", &[])]);
+    ledger.retract(&[reference("a")], "capability_revoked");
+
+    assert_eq!(ledger.known_values(), vec!["sha256:aaa"], "仍然认得出来");
+    let outcome = check_claim_grounding(&claim("file:x 的版本是 sha256:aaa", &["a"]), &ledger)
+        .expect("有东西可核");
+    assert_eq!(outcome.verdict, Verdict::Refuted);
+}
+
+#[test]
+fn the_access_check_runs_before_the_others() {
+    // 对一条引用了已撤回证据的候选做"结论依据核对"和"来源核对"，等于在一个已经不该存在的
+    // 问题上花两次预算——而 §4.1 L3 是有预算的。
+    let mut ledger = ledger_with(vec![
+        record("a", "file:x", "sha256:aaa", "reader-1", &[]),
+        record("b", "file:x", "sha256:aaa", "reader-2", &[]),
+    ]);
+    ledger.retract(&[reference("a"), reference("b")], "capability_revoked");
+
+    let review = review_candidate(
+        0,
+        &claim("file:x 的版本是 sha256:aaa", &["a", "b"]),
+        &ledger,
+        &ReviewPolicy::for_risk(ActionLevel::A1, ActionLevel::A2, 8),
+    );
+    assert_eq!(
+        review.outcomes[0].kind,
+        VerificationKind::EvidenceAccess,
+        "可用性排在最前面：{:?}",
+        review.outcomes
+    );
+    assert!(review.is_refuted());
 }
 
 #[test]

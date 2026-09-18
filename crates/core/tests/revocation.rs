@@ -10,10 +10,10 @@
 //! 撤回就成了一句只对将来有效的空话。而只做后一半更糟：那意味着撤回了却还能继续读。
 
 use soca_contracts::{
-    ActionLevel, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota, GoalBudget,
-    ModelBackend, ModelBudget, ModelVersion, PermissionScope, UserChannel, WallClock,
+    ActionLevel, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
+    GoalBudget, ModelBackend, ModelBudget, ModelVersion, PermissionScope, SubjectId, UserChannel,
+    VerificationKind, WallClock,
 };
-use soca_contracts::SubjectId;
 use soca_core::{ActionBroker, AdvanceStep, RoundOutcome, SimulatedOs, Subject};
 use soca_core_actors::DesktopAndFilesCluster;
 use soca_model_gateway::DeterministicTransport;
@@ -31,6 +31,10 @@ fn at(offset: i64) -> WallClock {
 
 fn cap(name: &str) -> CapabilityPolicyRef {
     CapabilityPolicyRef::new(name).expect("固定能力策略")
+}
+
+fn owner() -> SubjectId {
+    SubjectId::new("user:local").expect("固定主体")
 }
 
 fn scope(name: &str) -> PermissionScope {
@@ -259,6 +263,62 @@ fn revoking_is_idempotent() {
         "那些记忆已经不可见了，再标一次不该有新的效果"
     );
     assert_eq!(second.awaiting_purge, 1, "它们还在等着清理");
+}
+
+#[test]
+fn after_revoking_the_cluster_material_is_retracted_not_just_the_memory() {
+    // 撤回的第二个后果，也是此前漏掉的那一半（§7.2 的"仍可访问"）。
+    //
+    // 只做记忆那一半的话，撤回之后系统会**继续拿被撤回的证据下结论**——只是那些结论存不进
+    // 记忆而已。而"下出了结论但存不进去"比"下不出结论"难发现得多：界面上一切正常，
+    // 环路照常一轮一轮地跑，什么错也不报。
+    let mut subject = subject();
+    delegate_a_goal(&mut subject, CAP_A);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject
+        .run_round(&soca_contracts::SelectionPolicy::default(), ActionLevel::A1, at(3))
+        .expect("第一轮");
+    assert_eq!(subject.store().memory_count(&owner()).expect("计数"), 1);
+
+    let report = subject.revoke_capability(&cap(CAP_A), at(4)).expect("撤回");
+    assert_eq!(report.memories_invalidated, 1);
+    assert_eq!(
+        report.evidence_retracted, 1,
+        "簇手里的那条证据也要失效——它才是「还能拿来下结论的材料」"
+    );
+
+    // 簇仍然会提出那条结论（它的信念没变），但它现在必须**出局**。
+    let (candidates, selection) = subject
+        .select(&soca_contracts::SelectionPolicy::default(), ActionLevel::A1, at(5))
+        .expect("选择");
+    let claim_index = candidates
+        .candidates
+        .iter()
+        .position(|candidate| matches!(candidate, Candidate::Claim { .. }))
+        .expect("结论仍在候选里");
+    let review = selection
+        .reviews
+        .iter()
+        .find(|review| review.candidate_index == claim_index)
+        .expect("每条候选都要有档案");
+    assert!(
+        review.is_refuted(),
+        "引用了已撤回证据的结论必须出局：{review:?}"
+    );
+    assert!(
+        review
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.kind == VerificationKind::EvidenceAccess),
+        "而且要报成「证据不可用」，不是报成一个别的毛病：{review:?}"
+    );
+    assert_ne!(
+        selection.selected_index(),
+        Some(claim_index),
+        "被否定的候选不该被选中"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,9 @@
 //! [`soca_contracts::CandidateSet::conflicts`] 那一层承担，其余四个需要各自的判据，
 //! 而一个没有判据的检验器只会往审计账里塞"已检验"的标记。
 //!
+//! 还有一条**不是检验方法**的判定，但它必须走同一条通路：§7.2 的证据可用性。见
+//! [`check_evidence_access`]。
+//!
 //! 三条贯穿本模块的原则：
 //!
 //! 1. **不适用就说"不适用"，不假装核对过了。** 每个检验返回 `Option`，`None` 表示"这条
@@ -54,6 +57,44 @@ impl ReviewPolicy {
             max_checks,
         }
     }
+}
+
+/// 证据可用性（§7.2）。
+///
+/// 查的是这条候选引用的证据**还存在且仍可访问吗**。§7.2 的原话是：
+///
+/// > 引用必须能解析为存在**且仍可访问**的证据。缺失来源、过期证据、**权限变化**和数据撤回
+/// > 都可使候选失效。
+///
+/// 前半句一直有人管（L2 的存在性校验），后半句此前没有任何人管。后果很具体：撤回一项权限
+/// 之后，能力簇手里的证据引用还在，于是下一轮它照样会拿那些证据下结论——**只是那些结论
+/// 存不进记忆而已**。而"下出了结论但存不进去"比"下不出结论"难发现得多：界面上看起来
+/// 一切正常，环路照常一轮一轮地跑。
+///
+/// 只在**发现问题时**上报，全部可用时返回 `None`。理由是它没有正面结论可报——"这些证据
+/// 都能用"是一条没有信息量的判定，而把它写进每一份档案，只会让每一条候选的审计记录都多
+/// 一行不变的话。这条取舍与另外三个检验不同，写在这里免得被当成遗漏。
+pub fn check_evidence_access(
+    claim: &Candidate,
+    ledger: &EvidenceLedger,
+) -> Option<VerificationOutcome> {
+    let Candidate::Claim { evidence_refs, .. } = claim else {
+        return None;
+    };
+
+    let retracted = ledger.retracted_among(evidence_refs);
+    if retracted.is_empty() {
+        return None;
+    }
+
+    Some(VerificationOutcome {
+        kind: VerificationKind::EvidenceAccess,
+        // 判定是 `Refuted` 而不是 `Inconclusive`：这不是"核不了"，而是一条确定的结论——
+        // 这条候选建立在一份已经作废的材料上，它不该被选中。报成"无法判定"会让它继续
+        // 参与竞争，而"证据没了"恰恰是最不该靠竞争来解决的那类问题。
+        verdict: Verdict::Refuted,
+        evidence_refs: retracted,
+    })
 }
 
 /// 独立来源核验（§4.3「来源核对」）。
@@ -213,7 +254,11 @@ pub fn check_claim_grounding(
     })
 }
 
-/// 把三类检验在一条候选上跑一遍。
+/// 把四类判定在一条候选上跑一遍。
+///
+/// 可用性放在**最前面**。它是 §7.2 的有效性前提，而不是三种检验之一：对一条引用了已撤回
+/// 证据的候选做"结论依据核对"和"来源核对"，等于在一个已经不该存在的问题上花两次预算——
+/// 而 §4.1 L3 是有预算的。
 pub fn review_candidate(
     index: usize,
     candidate: &Candidate,
@@ -221,6 +266,9 @@ pub fn review_candidate(
     policy: &ReviewPolicy,
 ) -> CandidateReview {
     let mut outcomes = Vec::new();
+    if let Some(outcome) = check_evidence_access(candidate, ledger) {
+        outcomes.push(outcome);
+    }
     if let Some(outcome) = check_claim_grounding(candidate, ledger) {
         outcomes.push(outcome);
     }

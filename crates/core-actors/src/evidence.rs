@@ -32,6 +32,15 @@ pub struct EvidenceRecord {
     pub derived_from: Vec<EvidenceRef>,
     /// 记录它的单元。
     pub observed_by: UnitId,
+    /// 这条证据是否已经不再可用。`Some(reason)` 表示已撤回。
+    ///
+    /// §7.2 把"引用必须能解析为存在**且仍可访问**的证据"列成一条硬要求，并点名了让后半句
+    /// 不成立的四种原因：缺失来源、过期证据、**权限变化**和数据撤回。本字段承载后两类。
+    ///
+    /// 撤回**不删记录**。那条观测确实发生过，"它当时说了什么"是追责时要回答的问题，
+    /// 而把它删掉，账上就只剩一句"曾经有过一条证据"。变的只是它的身份：从"可以拿来下结论
+    /// 的材料"变成"只在审计里看得见的历史"。
+    pub retracted: Option<String>,
 }
 
 impl EvidenceRecord {
@@ -43,7 +52,13 @@ impl EvidenceRecord {
             observed_value: observation.value.clone(),
             derived_from: observation.derived_from.clone(),
             observed_by: observation.observed_by.clone(),
+            retracted: None,
         }
+    }
+
+    /// 是否仍然可以作为下结论的材料。
+    pub fn is_accessible(&self) -> bool {
+        self.retracted.is_none()
     }
 
     /// 这条证据的来源集合。
@@ -133,16 +148,88 @@ impl EvidenceLedger {
         }
     }
 
-    /// 读一条记录。
+    /// 读一条**仍然可用**的记录。
+    ///
+    /// 已撤回的读不到。要看它们走 [`EvidenceLedger::get_including_retracted`]——与记忆那层
+    /// 的 `memory` / `memory_including_hidden` 是同一条分工：默认入口只给能用的东西，
+    /// 而"能拿到已经不该用的材料"这件事，不该是一个默认值。
     pub fn get(&self, reference: &EvidenceRef) -> Option<&EvidenceRecord> {
+        self.get_including_retracted(reference)
+            .filter(|record| record.is_accessible())
+    }
+
+    /// 读一条记录，**不过滤是否已撤回**。只用于审计与"这条为什么不见了"。
+    pub fn get_including_retracted(&self, reference: &EvidenceRef) -> Option<&EvidenceRecord> {
         self.index
             .get(reference)
             .and_then(|position| self.records.get(*position))
     }
 
-    /// 全部记录，按写入顺序。
+    /// 全部记录，按写入顺序。**含已撤回的**——这是原始台账，由调用方自己决定怎么用。
+    ///
+    /// 需要"能用的那一批"时用 [`EvidenceLedger::accessible`]，
+    /// 而不是在这里过滤：把这个方法的语义改成"只给能用的"，会让
+    /// [`EvidenceLedger::known_values`] 之类的调用方悄悄改变行为——它恰恰**需要**看见
+    /// 已撤回的值，才能认出"这条命题断言的是那条已经作废的观测里的值"。
     pub fn records(&self) -> &[EvidenceRecord] {
         &self.records
+    }
+
+    /// 仍然可以作为下结论材料的那些记录。
+    pub fn accessible(&self) -> impl Iterator<Item = &EvidenceRecord> {
+        self.records.iter().filter(|record| record.is_accessible())
+    }
+
+    /// 撤回一批证据（§7.2 的"权限变化"与"数据撤回"）。
+    ///
+    /// 返回真正被改动的条数。已经撤回过的**保持原来的理由**：第一次撤回的原因才是它为什么
+    /// 不可用的原因，后到的只是一次重放——而同一条证据被同一次撤回重放多次，是这套流程里
+    /// 最常见的情形（每个引用它的候选都会走一遍）。
+    ///
+    /// 台账里查不到的引用被跳过，不计入改动数。那是"缺失来源"，归 L2 的存在性校验管，
+    /// 不该在这里被算成一次生效的撤回。
+    pub fn retract(&mut self, refs: &[EvidenceRef], reason: &str) -> usize {
+        let mut changed = 0;
+        for reference in refs {
+            let position = self.index.get(reference).copied();
+            let Some(position) = position else { continue };
+            let Some(record) = self.records.get_mut(position) else {
+                continue;
+            };
+            if record.retracted.is_none() {
+                record.retracted = Some(reason.to_string());
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// 一条引用是否仍然可用。
+    pub fn is_accessible(&self, reference: &EvidenceRef) -> bool {
+        self.get(reference).is_some()
+    }
+
+    /// 一组引用里那些**已撤回**的（§7.2）。
+    ///
+    /// 台账里查不到的**不算**在这里。那是"缺失来源"，与"引用了一条已撤回的证据"是两回事：
+    /// 前者说明程序写出了它不该写的引用，后者是一次权限变化的正常后果。把两者报成同一个
+    /// 原因，操作员会去查代码，而真正该看的是"谁在什么时候把权限收回了"。
+    pub fn retracted_among(&self, refs: &[EvidenceRef]) -> Vec<EvidenceRef> {
+        refs.iter()
+            .filter(|reference| {
+                self.get_including_retracted(reference)
+                    .is_some_and(|record| !record.is_accessible())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// 台账里有多少条已经撤回。
+    pub fn retracted_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| !record.is_accessible())
+            .count()
     }
 
     /// 条数。
@@ -155,10 +242,12 @@ impl EvidenceLedger {
         self.records.is_empty()
     }
 
-    /// 关于某个对象的全部观测。
+    /// 关于某个对象的**仍然可用**的观测。
+    ///
+    /// 已撤回的不在其中。它服务的是"关于这个对象，我手上现在有什么"，而一条被撤回的观测
+    /// 不在手上——它会去当反例，也会去凑独立来源，两件事都是拿一份已经作废的材料在说话。
     pub fn about(&self, subject_ref: &str) -> Vec<&EvidenceRecord> {
-        self.records
-            .iter()
+        self.accessible()
             .filter(|record| record.subject_ref == subject_ref)
             .collect()
     }

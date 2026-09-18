@@ -112,6 +112,11 @@ pub struct RevocationReport {
     pub events_covered: usize,
     /// 有多少条记忆因此**立即**不可见。
     pub memories_invalidated: usize,
+    /// 有多少条**还在能力簇手里的**证据因此不能再用来下结论（§7.2）。
+    ///
+    /// 与上一条分开报，是因为它们是撤回的两个不同后果，而只有前者时看起来像已经做完了。
+    /// 记忆是"已经下过的结论"，簇手里的证据是"还能拿来下结论的材料"。
+    pub evidence_retracted: usize,
     /// 当前等着清理的记忆条数。
     pub awaiting_purge: usize,
 }
@@ -1361,15 +1366,26 @@ impl Subject {
 
         let events = self.store.events_under_capability(capability)?;
         let mut invalidated = 0usize;
+        let mut affected: Vec<EvidenceRef> = Vec::new();
         for event_id in &events {
             let reference = EvidenceRef::for_observation(event_id)?;
-            invalidated =
-                invalidated.saturating_add(self.store.tombstone_by_evidence(
-                    &reference,
-                    "capability_revoked",
-                    at,
-                )?);
+            invalidated = invalidated.saturating_add(self.store.tombstone_by_evidence(
+                &reference,
+                "capability_revoked",
+                at,
+            )?);
+            affected.push(reference);
         }
+
+        // §7.2 的第二个后果：**簇手里的那份引用也要失效。**
+        //
+        // 只做记忆那一半是不够的。记忆是"已经下过的结论"，而簇手里还有"可以用来下结论的
+        // 材料"——撤回之后它照样会拿那些材料下出新结论，只是那些结论存不进记忆而已。
+        // 而"下出了结论但存不进去"比"下不出结论"难发现得多：界面上一切正常，
+        // 环路照常一轮一轮地跑。
+        let evidence_retracted = self
+            .cluster
+            .retract_evidence(&affected, "capability_revoked");
 
         self.store.audit(
             at,
@@ -1377,7 +1393,7 @@ impl Subject {
             capability.as_str(),
             "revoked",
             &format!(
-                "撤回授权：覆盖 {} 个事件、失效 {} 条记忆{}",
+                "撤回授权：覆盖 {} 个事件、失效 {} 条记忆、撤回 {evidence_retracted} 条在库证据{}",
                 events.len(),
                 invalidated,
                 if was_granted {
@@ -1392,6 +1408,7 @@ impl Subject {
             was_granted,
             events_covered: events.len(),
             memories_invalidated: invalidated,
+            evidence_retracted,
             awaiting_purge: self.store.tombstoned_memory_count()?,
         })
     }

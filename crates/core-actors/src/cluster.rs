@@ -89,6 +89,24 @@ impl DesktopAndFilesCluster {
         &self.workspace
     }
 
+    /// 撤回一批证据，让它们不再能作为下结论的材料（§7.2）。
+    ///
+    /// 语义方法而不是 `ledger_mut()`。理由与黑板只借出只读引用是同一条：**一个泛化的可变
+    /// 入口，等于把"谁能在什么时候改动证据"这个问题交给调用方去守**。而这里是四个字——
+    /// "撤回证据"——调用方说什么、做过什么，一看就明白。
+    ///
+    /// 撤回不删记录，也不动黑板：那条观测确实进过这个簇（§4.1 L2 的"存在性"），
+    /// 变的是它还能不能被用来下结论（§7.2 的"**仍可访问**"）。两件事分开，是因为它们的
+    /// 答案确实可以不同——而"存在"就当成"可用"，正是这条缺口此前的样子。
+    pub fn retract_evidence(&mut self, refs: &[EvidenceRef], reason: &str) -> usize {
+        self.ledger.retract(refs, reason)
+    }
+
+    /// 台账里已经撤回的证据条数。
+    pub fn retracted_evidence(&self) -> usize {
+        self.ledger.retracted_count()
+    }
+
     /// 证据台账（只读）。
     ///
     /// 只借出只读引用，簇之外没有写入入口——与黑板同一条理由：§4.1 要求
