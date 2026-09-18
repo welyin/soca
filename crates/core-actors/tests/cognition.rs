@@ -36,6 +36,8 @@ fn observation(subject: &str, value: &str, evidence_name: &str) -> Observation {
     Observation {
         subject: subject.to_string(),
         value: value.to_string(),
+        // 这些用例不关心正文：它们测的是候选与信念的变化，而正文是 §9.3 那一层的事。
+        body_ref: None,
         evidence_ref: evidence(evidence_name),
         derived_from: Vec::new(),
         observed_by: UnitId::new("unit:test").expect("固定单元"),

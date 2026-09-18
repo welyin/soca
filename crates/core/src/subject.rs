@@ -683,9 +683,15 @@ impl Subject {
         let (record, envelope) = {
             let unit = self.cluster.unit_id().clone();
             let task = self.task.clone();
-            let mut session =
-                Session::new(&mut self.store, &mut self.broker, unit, task, self.boot)
-                    .with_policy(scope, data_class);
+            let mut session = Session::new(
+                &mut self.store,
+                &mut self.broker,
+                &self.content,
+                unit,
+                task,
+                self.boot,
+            )
+            .with_policy(scope, data_class);
             session.observe_event(subject_ref, at)?
         };
 
@@ -703,6 +709,30 @@ impl Subject {
         });
         self.cluster.observe(&envelope, at)?;
         Ok(record)
+    }
+
+    /// 取回一次观测的正文（§9.3）。
+    ///
+    /// 这是"引用必须能解析"那条要求落到**正文**上的样子。三种取不回，含义各不相同：
+    ///
+    /// * 台账里查不到这条引用 → `None`。**已撤回的证据属于这一种**（§7.2）——字节可能还在
+    ///   磁盘上（撤回不做物理删除，那要等 GC），但正路上拿不到它，而正路上拿不到正是要保证的。
+    /// * 那条观测本来就没有正文 → `None`。对象不存在，或观察它的会话没有内容仓。
+    /// * 元数据不在册 → `None`，它按保留期被清理过，是约定内的消失。
+    /// * 元数据在册而字节读不出来 → **报错**。§9.3 要求"已有引用指向缺失对象时返回可诊断
+    ///   缺失，不能伪造证据"：把这一种也说成"过期了"，会让一段被悄悄破坏的内容看起来正常。
+    pub fn observed_body(&self, reference: &EvidenceRef) -> Result<Option<String>, CoreError> {
+        let Some(record) = self.cluster.ledger().get(reference) else {
+            return Ok(None);
+        };
+        let Some(body_ref) = &record.body_ref else {
+            return Ok(None);
+        };
+        if self.store.blob(body_ref)?.is_none() {
+            return Ok(None);
+        }
+        let bytes = self.store.read_content(&self.content, body_ref)?;
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     /// 把一条证据放进池子，只保留最近 [`MAX_CONTEXT_EVIDENCE`] 条。
@@ -1190,6 +1220,7 @@ impl Subject {
                 let mut session = Session::new(
                     &mut self.store,
                     &mut self.broker,
+                    &self.content,
                     intent.proposed_by.clone(),
                     self.task.clone(),
                     self.boot,

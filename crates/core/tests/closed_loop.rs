@@ -7,7 +7,7 @@
 use serde_json::json;
 use soca_contracts::*;
 use soca_core::*;
-use soca_storage::{Store, StorageError};
+use soca_storage::{ContentStore, Store, StorageError};
 use tempfile::TempDir;
 
 const SUBJECT_PATH: &str = "D:\\资料\\摘要\\summary.md";
@@ -46,10 +46,13 @@ fn subject_ref() -> String {
     format!("file:{SUBJECT_PATH}")
 }
 
-fn temp_store() -> (TempDir, Store) {
+fn temp_store() -> (TempDir, Store, ContentStore) {
     let dir = TempDir::new().expect("临时目录");
     let store = Store::open(dir.path().join("soca.db"), at(0)).expect("打开存储");
-    (dir, store)
+    // 内容仓与事务库放在同一个临时目录里。会话需要它，因为观测会把对象正文存进去——
+    // 而"存进去"这个动作发生在 `observe_event` 内部，所以内容仓必须能被它拿到。
+    let content = ContentStore::open(dir.path().join("content")).expect("内容仓");
+    (dir, store, content)
 }
 
 fn intent(action: &str, content: &str, level: ActionLevel) -> ActionIntent {
@@ -103,13 +106,13 @@ fn broker_with(content: &str) -> ActionBroker {
 
 #[test]
 fn a_write_round_keeps_request_execution_and_verification_as_separate_facts() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
 
-    let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+    let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
     let report = session
         .run_write_round(&write, &permit, at(0))
         .expect("闭环应完整跑通");
@@ -149,7 +152,7 @@ fn a_write_round_keeps_request_execution_and_verification_as_separate_facts() {
 
 #[test]
 fn a_request_that_fails_authorization_never_reaches_the_os() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let signed = intent("action:1", "新的摘要内容", ActionLevel::A2);
@@ -158,7 +161,7 @@ fn a_request_that_fails_authorization_never_reaches_the_os() {
     // 批准的是"新的摘要内容"，执行时换成了别的内容：参数摘要一变，许可立即失效。
     let tampered = intent("action:1", "被篡改的内容", ActionLevel::A2);
 
-    let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+    let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
     let result = session.run_write_round(&tampered, &permit, at(0));
 
     assert!(matches!(result, Err(CoreError::AdmissionDenied { .. })));
@@ -180,7 +183,7 @@ fn a_request_that_fails_authorization_never_reaches_the_os() {
 
 #[test]
 fn an_unavailable_broker_refuses_instead_of_degrading_to_allow() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
     // §12.2：Broker 故障、策略不可读、审计写失败、磁盘满或审批过期时，默认拒绝新副作用。
     broker.set_unavailable("策略文件不可读");
@@ -188,7 +191,7 @@ fn an_unavailable_broker_refuses_instead_of_degrading_to_allow() {
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
 
-    let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+    let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
     let report = session
         .run_write_round(&write, &permit, at(0))
         .expect("受理与投递本身应当有确定结果");
@@ -216,6 +219,7 @@ fn none_of_the_other_six_data_states_can_reach_the_os() {
     let observation = Observation {
         subject: subject_ref(),
         value: "某个版本".to_string(),
+        body_ref: None,
         evidence_ref: EvidenceRef::new("obs:1").expect("固定证据"),
         derived_from: Vec::new(),
         observed_by: unit(),
@@ -306,6 +310,7 @@ fn none_of_the_other_six_data_states_can_reach_the_os() {
 fn an_interrupted_write_is_never_silently_resent() {
     let dir = TempDir::new().expect("临时目录");
     let path = dir.path().join("soca.db");
+    let content = ContentStore::open(dir.path().join("content")).expect("内容仓");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
@@ -319,7 +324,7 @@ fn an_interrupted_write_is_never_silently_resent() {
 
     {
         let mut store = Store::open(&path, at(0)).expect("打开存储");
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         let interrupted = session
             .run_write_round(&write, &permit, at(0))
             .expect("结果未知本身是确定的结果");
@@ -362,6 +367,7 @@ fn an_interrupted_write_is_never_silently_resent() {
 fn a_crash_before_dispatch_leaves_the_action_safely_resendable() {
     let dir = TempDir::new().expect("临时目录");
     let path = dir.path().join("soca.db");
+    let content = ContentStore::open(dir.path().join("content")).expect("内容仓");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
@@ -369,7 +375,7 @@ fn a_crash_before_dispatch_leaves_the_action_safely_resendable() {
 
     {
         let mut store = Store::open(&path, at(0)).expect("打开存储");
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         // §6.3 走到动作前就停：预测已记录，动作已进入 outbox，但从未投递。
         session.observe(&subject_ref(), at(0)).expect("观测");
         assert!(
@@ -412,13 +418,13 @@ fn a_crash_before_dispatch_leaves_the_action_safely_resendable() {
 
 #[test]
 fn replay_reads_the_ledger_without_touching_the_os() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
     {
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         session
             .run_write_round(&write, &permit, at(0))
             .expect("闭环完成");
@@ -462,13 +468,13 @@ fn replay_reads_the_ledger_without_touching_the_os() {
 
 #[test]
 fn replay_reports_violations_instead_of_hiding_them() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
     {
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         session
             .run_write_round(&write, &permit, at(0))
             .expect("闭环完成");
@@ -523,13 +529,13 @@ fn replay_reports_violations_instead_of_hiding_them() {
 
 #[test]
 fn replay_can_be_scoped_to_a_single_task() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 1);
     {
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         session
             .run_write_round(&write, &permit, at(0))
             .expect("闭环完成");
@@ -548,7 +554,7 @@ fn replay_can_be_scoped_to_a_single_task() {
 
 #[test]
 fn a_prediction_that_does_not_hold_is_refuted_by_a_new_observation() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
@@ -574,7 +580,7 @@ fn a_prediction_that_does_not_hold_is_refuted_by_a_new_observation() {
     .expect("合法预测");
 
     {
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         session.observe(&subject, at(0)).expect("动作前观测");
         session.predict(&prediction, at(0)).expect("记录预测");
         session.admit(&write, &permit, at(0)).expect("受理");
@@ -589,7 +595,7 @@ fn a_prediction_that_does_not_hold_is_refuted_by_a_new_observation() {
     // 回执之后，外部世界又发生了变化：目标文件被另一个进程覆盖。
     broker.os_mut().seed(&subject, "被别人改过的内容");
 
-    let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+    let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
     let after = session.observe(&subject, at(1)).expect("动作后观测");
     let outcome = session
         .verify(
@@ -613,6 +619,7 @@ fn evaluation_is_inconclusive_when_the_observation_is_about_another_object() {
     let other_object = Observation {
         subject: "file:D:\\别的目录\\other.md".to_string(),
         value: "abc".to_string(),
+        body_ref: None,
         evidence_ref: EvidenceRef::new("obs:9").expect("固定证据"),
         derived_from: Vec::new(),
         observed_by: unit(),
@@ -623,6 +630,7 @@ fn evaluation_is_inconclusive_when_the_observation_is_about_another_object() {
     let absent = Observation {
         subject: subject_ref(),
         value: ABSENT_VALUE.to_string(),
+        body_ref: None,
         evidence_ref: EvidenceRef::new("obs:10").expect("固定证据"),
         derived_from: Vec::new(),
         observed_by: unit(),
@@ -666,13 +674,13 @@ fn the_simulated_os_applies_each_action_id_at_most_once() {
 
 #[test]
 fn a_persisted_action_id_cannot_be_reused_for_another_write() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
     let write = intent("action:1", "新的摘要内容", ActionLevel::A2);
     let permit = permit_for(&write, "permit:1", 2);
     {
-        let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+        let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
         session
             .run_write_round(&write, &permit, at(0))
             .expect("闭环完成");
@@ -680,7 +688,7 @@ fn a_persisted_action_id_cannot_be_reused_for_another_write() {
 
     // 换一份内容但沿用同一个动作 ID。
     let reused = intent("action:1", "另一份内容", ActionLevel::A2);
-    let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+    let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
     let result = session.admit(&reused, &permit, at(1));
     assert!(matches!(
         result,
@@ -694,10 +702,10 @@ fn a_persisted_action_id_cannot_be_reused_for_another_write() {
 
 #[test]
 fn observations_are_recorded_as_data_and_never_as_instructions() {
-    let (_dir, mut store) = temp_store();
+    let (_dir, mut store, content) = temp_store();
     let mut broker = broker_with("原始内容");
 
-    let mut session = Session::new(&mut store, &mut broker, unit(), task(), boot());
+    let mut session = Session::new(&mut store, &mut broker, &content, unit(), task(), boot());
     let record = session.observe(&subject_ref(), at(0)).expect("观测");
 
     let event = &store

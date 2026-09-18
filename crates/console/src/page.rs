@@ -153,11 +153,18 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
         <option value="secret">secret</option>
       </select>
       <button id="observe" class="ghost">读取一次</button>
+      <button id="read-body" class="ghost">看正文</button>
     </div>
     <div class="hint">
       一次观测会同时进入事件账与 L2 黑板。它产生的证据引用是运行时生成的，
       因此模型只能回引它——这就是"模型不能引用它没看到的证据"能成立的原因。
     </div>
+    <div class="hint">
+      <b>正文不随消息走。</b>观测带回的是版本摘要加一个内容仓引用；正文按引用取，
+      信封里没有它（§4.1 L2 的"不无限复制"）。撤回权限之后同一条引用会取不回正文——
+      字节还在磁盘上（撤回不做物理删除），但正路上拿不到它，而正路上拿不到正是要保证的事。
+    </div>
+    <pre id="body-out" style="margin-top:12px">（尚未取过）</pre>
   </section>
 
   <section>
@@ -462,9 +469,30 @@ $("observe").onclick = async function () {
   if (!target) return;
   try {
     const result = await api("observe", { subject: target, data_class: $("data-class").value });
-    log("观测到 " + result.subject + " = " + result.value + "（证据 " + result.evidence_ref + "）", "ok");
+    // 正文不跟着这条消息走——信封只带引用（§4.1 L2 的「不无限复制」）。
+    const body = result.body_ref
+      ? "，正文 " + result.body_ref
+      : "，没有正文（对象不存在）";
+    log("观测到 " + result.subject + " = " + result.value + "（证据 " + result.evidence_ref + body + "）", "ok");
+    if (result.body_ref) { lastEvidence = result.evidence_ref; }
   } catch (error) { log("观测失败：" + error.message, "err"); }
   refresh();
+};
+
+let lastEvidence = "";
+
+$("read-body").onclick = async function () {
+  if (!lastEvidence) { log("先观测一次", "err"); return; }
+  try {
+    const result = await api("body", { evidence_ref: lastEvidence });
+    if (!result.available) {
+      log("这条引用取不回正文（已撤回，或本来就没有正文）", "err");
+      $("body-out").textContent = "（取不回）";
+      return;
+    }
+    $("body-out").textContent = result.body;
+    log("取回 " + result.chars + " 字正文：" + lastEvidence, "ok");
+  } catch (error) { log("取正文失败：" + error.message, "err"); }
 };
 
 $("consult").onclick = async function () {

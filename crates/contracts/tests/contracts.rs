@@ -730,6 +730,7 @@ fn all_data_states() -> Vec<DataState> {
         DataState::Observation(Observation {
             subject: "文件版本".to_string(),
             value: "sha256:abc".to_string(),
+            body_ref: None,
             evidence_ref: EvidenceRef::new("obs:193").expect("固定证据引用"),
             derived_from: Vec::new(),
             observed_by: UnitId::new("unit:file-summary:07").expect("固定单元"),
@@ -829,6 +830,7 @@ fn trajectory_request_is_not_execution_is_not_verification() {
     let observation = DataState::Observation(Observation {
         subject: "授权目录中的目标文件".to_string(),
         value: "当前版本 sha256:abc".to_string(),
+        body_ref: None,
         evidence_ref: EvidenceRef::new("obs:193").expect("固定证据引用"),
         derived_from: Vec::new(),
         observed_by: UnitId::new("unit:file-summary:07").expect("固定单元"),

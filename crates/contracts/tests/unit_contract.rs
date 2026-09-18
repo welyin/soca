@@ -440,6 +440,7 @@ fn observation_event(event_uuid: &str, value: &str) -> Envelope {
     let observation = Observation {
         subject: WATCHED.to_string(),
         value: value.to_string(),
+        body_ref: None,
         evidence_ref: evidence(event_uuid),
         derived_from: Vec::new(),
         observed_by: unit("version-watcher"),

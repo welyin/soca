@@ -24,6 +24,12 @@ use soca_storage::Store;
 /// 启动时播进模拟环境的对象。让界面上的"读取一次"立刻有东西可读。
 const SEEDED_FILE: &str = "file:D:\\资料\\摘要\\summary.md";
 
+/// 那份文件的正文。
+///
+/// 一段像样的文字而不是 `sha256:initial` 这样的占位：观测会把正文存进内容仓，
+/// 而"点一下能看到什么"正是这个演示要回答的问题。
+const SEEDED_BODY: &str = "资料摘要\n\n- 项目代号：晨星\n- 负责团队：系统组\n- 下一次评审：2026-10-15\n";
+
 /// 默认端口。
 const DEFAULT_PORT: u16 = 4319;
 
@@ -57,8 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut broker = ActionBroker::new(SimulatedOs::new());
-    // 播一个初始版本。不播的话界面一打开就是"对象不存在"，而那看起来像故障。
-    broker.os_mut().seed(SEEDED_FILE, "sha256:initial");
+    // 播一份初始内容。不播的话界面一打开就是"对象不存在"，而那看起来像故障。
+    broker.os_mut().seed(SEEDED_FILE, SEEDED_BODY);
 
     let cluster = DesktopAndFilesCluster::new(
         SEEDED_FILE,

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validate::assert_disjoint;
 use crate::{
-    ContractError, EvidenceRef, ModelVersion, PredictionRef, TimeWindow, UnitId,
+    BlobRef, ContractError, EvidenceRef, ModelVersion, PredictionRef, TimeWindow, UnitId,
 };
 
 /// 某来源在某时刻的观测。
@@ -24,7 +24,19 @@ pub struct Observation {
     /// 观测对象。
     pub subject: String,
     /// 观测到内容的简短描述。
+    ///
+    /// 对文件对象来说这是**版本摘要**，不是正文。正文在 [`Observation::body_ref`]。
     pub value: String,
+    /// 观测到的正文（§9.3 的分段内容仓）。
+    ///
+    /// `None` 有两个来源，且都不是错误：对象不存在（`value` 是 `<absent>`），或者那次观测
+    /// 的会话没有内容仓。**正文不放进信封**——§4.1 L2 要求"不无限复制"，而事件账是长期留存
+    /// 的那一份；每轮观测都抄一遍全文，在长跑里是灾难性的。
+    ///
+    /// `default` 让这一条加进来之前写下的事件仍然解析得开。它们确实没有正文，那是它们的
+    /// 真实状态，不是需要报出来的损坏。
+    #[serde(default)]
+    pub body_ref: Option<BlobRef>,
     /// 本条观测自己的证据引用。
     pub evidence_ref: EvidenceRef,
     /// 派生观测必须指向原始观测（§7.1：派生物指向原始事件，不覆盖原始观测）。

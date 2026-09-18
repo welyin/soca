@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use soca_contracts::{EvidenceRef, Observation, UnitId};
+use soca_contracts::{BlobRef, EvidenceRef, Observation, UnitId};
 
 /// 台账允许保留的最大证据条数。
 ///
@@ -28,6 +28,13 @@ pub struct EvidenceRecord {
     pub subject_ref: String,
     /// 观测到的值。
     pub observed_value: String,
+    /// 观测到的正文（§9.3）。`None` 表示这次观测没有记下正文——对象不存在，或那次观测的
+    /// 会话没有内容仓。
+    ///
+    /// 台账记它，是因为 §15.1 第 3 步的"核验单元检查**引用存在**"要核的是**这条引用还能不能
+    /// 取回正文**，而不只是"值对不对得上"。只有值的话，一条引用了已经作废正文的结论，
+    /// 在核对时看起来和一条好的完全一样。
+    pub body_ref: Option<BlobRef>,
     /// 派生来源。空表示这是一次直接观测（来自适配器或工具，不是从别的观测推出来的）。
     pub derived_from: Vec<EvidenceRef>,
     /// 记录它的单元。
@@ -50,6 +57,7 @@ impl EvidenceRecord {
             evidence_ref: observation.evidence_ref.clone(),
             subject_ref: observation.subject.clone(),
             observed_value: observation.value.clone(),
+            body_ref: observation.body_ref.clone(),
             derived_from: observation.derived_from.clone(),
             observed_by: observation.observed_by.clone(),
             retracted: None,

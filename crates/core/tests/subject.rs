@@ -155,6 +155,37 @@ fn subject_without_preconditions() -> Subject {
     .expect("装配主体")
 }
 
+/// 装配一个能看到某份正文的主体。
+///
+/// 与 `subject_without_preconditions` 只差一件事：模拟 OS 里**种了内容**。没有它的话，
+/// 守望对象是 `<absent>`——而"对象不存在没有正文"与"对象存在、正文进了内容仓"正是这几条
+/// 测试要分开的两件事。
+fn subject_watching(content: &str) -> Subject {
+    let mut os = SimulatedOs::new();
+    os.seed(WATCHED, content);
+    let store = Store::open_in_memory(at(0)).expect("内存存储");
+    let broker = ActionBroker::new(os);
+    let cluster = DesktopAndFilesCluster::new(WATCHED, Vec::new()).expect("装配能力簇");
+
+    Subject::new(
+        store,
+        broker,
+        cluster,
+        owner(),
+        boot(),
+        Box::new(DeterministicTransport::new(Vec::new())),
+        ModelBackend::Cpu,
+        false,
+        ModelBudget {
+            max_output_tokens: 1024,
+            max_wall_millis: 30_000,
+            max_attempts: 1,
+        },
+        ModelVersion::new("sha256:test-model").expect("固定模型版本"),
+    )
+    .expect("装配主体")
+}
+
 /// 委托一个范围内含 A2 的目标。
 fn delegate_an_a2_goal(subject: &mut Subject) -> GoalId {
     let goal_id = subject
@@ -660,6 +691,123 @@ fn an_open_question_is_reported_but_does_not_freeze_the_selection() {
 // ---------------------------------------------------------------------------
 // §6 的闭环驱动
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// §9.3 的正文：观测带回来的不只是版本
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_observation_records_the_objects_body_not_just_its_version() {
+    // §15.1 的整条主线（"读取授权文件 → 生成带引用草稿 → 核验单元检查引用存在"）前提是
+    // **正文进得来**。在这一项之前，观测只带回版本摘要，正文从来没有进过系统——
+    // 也就是说"检查引用存在"没有可检查的东西。
+    let body = "这是一份摘要的正文。\n第二行有一个数字：42。";
+    let mut subject = subject_watching(body);
+    delegate_an_a2_goal(&mut subject);
+    let record = subject.observe(WATCHED, DataClass::Personal, at(2)).expect("观测");
+
+    let body_ref = record
+        .observation
+        .body_ref
+        .clone()
+        .expect("对象存在，正文应当进仓");
+    assert!(
+        body_ref.as_str().starts_with("blob:personal:"),
+        "引用要带上数据类别（§9.3 的隔离）：{body_ref}"
+    );
+
+    // 取回来的是**逐字**的正文。
+    assert_eq!(
+        subject
+            .observed_body(&record.observation.evidence_ref)
+            .expect("读正文")
+            .as_deref(),
+        Some(body)
+    );
+
+    // 而**信封里没有正文**。§4.1 L2 要求"不无限复制"，而事件账是长期留存的那一份：
+    // 每轮观测都抄一遍全文，在长跑里是灾难性的。
+    let events = subject.store().read_events_after(0, 8).expect("读事件");
+    let payload = serde_json::to_string(&events[0].envelope.payload_ref).expect("序列化");
+    assert!(
+        !payload.contains("第二行有一个数字"),
+        "正文不该出现在事件载荷里：{payload}"
+    );
+    assert!(payload.contains("blob:"), "但它应当带引用：{payload}");
+}
+
+#[test]
+fn observing_the_same_body_twice_stores_one_object() {
+    // 内容按摘要寻址，所以同一份正文反复被观测只存一份。这里**不需要额外的去重逻辑**——
+    // 那是寻址方式本身给的，而"每轮观测都抄一遍"正是没有它时会发生的事。
+    let mut subject = subject_watching("同一份正文");
+    delegate_an_a2_goal(&mut subject);
+
+    let first = subject.observe(WATCHED, DataClass::Personal, at(2)).expect("第一次");
+    let second = subject.observe(WATCHED, DataClass::Personal, at(3)).expect("第二次");
+
+    assert_ne!(
+        first.observation.evidence_ref, second.observation.evidence_ref,
+        "两次观测是两条证据：第二次发生在另一个时刻，它证明的是那一刻的事实"
+    );
+    assert_eq!(
+        first.observation.body_ref, second.observation.body_ref,
+        "但它们指向同一份正文——正文没有变，变的只是「我又看了一遍」"
+    );
+}
+
+#[test]
+fn an_absent_object_has_a_version_and_no_body() {
+    // `<absent>` 与"文件存在但为空"是两件事。版本值那边已经分开了，正文这边必须跟着分开：
+    // 一个不存在的对象没有正文，而不是有一段空正文。
+    let mut subject = subject_watching("种了内容");
+    delegate_an_a2_goal(&mut subject);
+    subject.observe(WATCHED, DataClass::Personal, at(2)).expect("先看一次真的");
+
+    let missing = "file:D:\\资料\\摘要\\不存在.md";
+    let record = subject
+        .observe(missing, DataClass::Personal, at(3))
+        .expect("观测");
+
+    assert_eq!(record.observation.value, "<absent>");
+    assert!(record.observation.body_ref.is_none());
+    assert_eq!(
+        subject
+            .observed_body(&record.observation.evidence_ref)
+            .expect("读正文"),
+        None
+    );
+}
+
+#[test]
+fn revoking_the_capability_takes_the_body_with_it() {
+    // §7.2 的"仍可访问"落到正文上的样子。字节可能还在磁盘上（撤回不做物理删除，那要等 GC），
+    // 但**正路上拿不到它**——而正路上拿不到正是要保证的那件事。
+    //
+    // 这条与"记忆失效"是一对：那一半管的是"已经下过的结论"，这一半管的是"还能拿来下结论的
+    // 材料，以及材料本身"。
+    let mut subject = subject_watching("撤回之后就不该再读得到");
+    delegate_an_a2_goal(&mut subject);
+    let record = subject.observe(WATCHED, DataClass::Personal, at(2)).expect("观测");
+    let reference = record.observation.evidence_ref.clone();
+    assert!(
+        subject.observed_body(&reference).expect("读正文").is_some(),
+        "撤回之前读得到"
+    );
+
+    subject
+        .revoke_capability(
+            &CapabilityPolicyRef::new(CAPABILITY).expect("固定能力策略"),
+            at(3),
+        )
+        .expect("撤回");
+
+    assert_eq!(
+        subject.observed_body(&reference).expect("读正文"),
+        None,
+        "撤回之后同一条引用取不回正文了"
+    );
+}
 
 #[test]
 fn a_round_turns_current_evidence_into_a_recorded_conclusion() {

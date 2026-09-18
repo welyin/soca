@@ -6,9 +6,9 @@
 
 use serde_json::{json, Value};
 use soca_contracts::{
-    ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota,
-    GoalBudget, GoalId, GoalState, GrantScope, MemoryId, PermissionScope, SelectionPolicy,
-    Sha256Hex, UserChannel, WallClock,
+    ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef,
+    ExplorationQuota, GoalBudget, GoalId, GoalState, GrantScope, MemoryId, PermissionScope,
+    SelectionPolicy, Sha256Hex, UserChannel, WallClock,
 };
 use soca_core::{CoreError, RetentionPolicy, RoundOutcome, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
@@ -63,6 +63,7 @@ pub fn handle(
         ("POST", "/api/write") => request_write(subject, request, at),
         ("POST", "/api/approve") => grant_approval(subject, request, at),
         ("POST", "/api/resume") => resume_goal(subject, request, at),
+        ("POST", "/api/body") => body(subject, request, at),
         ("POST", "/api/loop") => run_loop(subject, request, at),
         ("POST", "/api/select") => select_ladder(subject, request, at),
         ("POST", "/api/chat") => chat(subject, request, at),
@@ -222,6 +223,10 @@ fn observe(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
                 "value": record.observation.value,
                 "evidence_ref": record.observation.evidence_ref.to_string(),
                 "sequence": record.sequence,
+                // 正文**不放进这个响应**，只报引用与长度。它不是这条消息的一部分——
+                // 每轮观测都把全文抄进消息里，正是 §4.1 L2 那句"不无限复制"要挡的事。
+                // 要看正文走 `/api/body`，按引用取。
+                "body_ref": record.observation.body_ref.as_ref().map(ToString::to_string),
             }),
         ),
         // 授权被撤回不是"服务器出错了"。返回 500 会让界面显示一个故障，而用户需要知道的
@@ -229,6 +234,37 @@ fn observe(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
         Err(CoreError::CapabilityRevoked { capability }) => Response::json(
             403,
             &json!({"error": "capability_revoked", "capability": capability}),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 按引用取回一次观测的正文（§9.3）。
+///
+/// 单独一个接口，是因为正文**不是**随每条消息一起走的东西：信封只带引用，要用的时候才去取。
+/// 而"取不回"本身是有信息量的——证据被撤回、内容被按保留期清理，都表现在这里。
+fn body(subject: &mut Subject, request: &Request, _at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let Some(raw) = payload.get("evidence_ref").and_then(Value::as_str) else {
+        return Response::text(400, "缺少 evidence_ref 字段");
+    };
+    let Ok(reference) = EvidenceRef::new(raw) else {
+        return Response::text(400, "evidence_ref 形状不合法（只接受 obs:/tool-result:/receipt:）");
+    };
+
+    match subject.observed_body(&reference) {
+        // `None` 不是错误。三种取不回（已撤回、本来就没有正文、按保留期清理过）在这里
+        // 都是"没有"，而把它们报成 500 会让界面显示一个故障，掩盖掉真正的原因。
+        Ok(body) => Response::json(
+            200,
+            &json!({
+                "evidence_ref": raw,
+                "available": body.is_some(),
+                "chars": body.as_ref().map(|text| text.chars().count()),
+                "body": body,
+            }),
         ),
         Err(error) => internal(error.to_string()),
     }

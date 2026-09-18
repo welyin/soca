@@ -15,12 +15,12 @@
 //! 都能停在半路。只有每一步都是独立可调用的，崩溃点才能被精确表达，而不是靠注入假异常。
 
 use soca_contracts::{
-    ActionId, ActionIntent, ActionReceipt, ActionLevel, BootId, CapabilityPolicyRef, DataClass,
-    DataState, Envelope, EventId, EvidenceRef, ExecutionPermit, Expectation, IdempotencyKey,
-    Monotonic, Observation, PermissionScope, Prediction, PredictionRef, Provenance, Sha256Hex,
-    SourceId, TaskId, TimeWindow, Uncertainty, UnitId, Verdict, WallClock,
+    ActionId, ActionIntent, ActionReceipt, ActionLevel, BlobRef, BootId, CapabilityPolicyRef,
+    DataClass, DataState, Envelope, EventId, EvidenceRef, ExecutionPermit, Expectation,
+    IdempotencyKey, MediaType, Monotonic, Observation, PermissionScope, Prediction, PredictionRef,
+    Provenance, Sha256Hex, SourceId, TaskId, TimeWindow, Uncertainty, UnitId, Verdict, WallClock,
 };
-use soca_storage::{Admission, AppendOutcome, Store};
+use soca_storage::{Admission, AppendOutcome, ContentRetention, ContentStore, Store};
 
 use crate::broker::{ActionBroker, BrokerOutcome};
 use crate::error::CoreError;
@@ -96,6 +96,14 @@ pub struct RoundReport {
 pub struct Session<'a> {
     store: &'a mut Store,
     broker: &'a mut ActionBroker,
+    /// 分段内容仓（§9.3）。
+    ///
+    /// 会话需要它，是因为**观测要把对象的正文存进去**。正文不能塞进事件信封——
+    /// §4.1 L2 要求"不无限复制"，而事件账是长期留存的那一份；信封只带引用，字节进内容仓。
+    ///
+    /// 不做成可选：少了它就变成"有些观测有正文、有些没有，原因看不出来"，而那种状态
+    /// 会在很久以后以一个无法归因的核验失败冒出来。
+    content: &'a ContentStore,
     unit: UnitId,
     task: TaskId,
     source: SourceId,
@@ -114,6 +122,7 @@ impl<'a> Session<'a> {
     pub fn new(
         store: &'a mut Store,
         broker: &'a mut ActionBroker,
+        content: &'a ContentStore,
         unit: UnitId,
         task: TaskId,
         boot: BootId,
@@ -121,6 +130,7 @@ impl<'a> Session<'a> {
         Self {
             store,
             broker,
+            content,
             unit,
             task,
             source: SourceId::new("device:simulated-fs").expect("固定来源"),
@@ -152,6 +162,46 @@ impl<'a> Session<'a> {
         &self.task
     }
 
+    /// 把观测对象的正文存进内容仓并登记元数据，返回引用。
+    ///
+    /// 顺序是 §9.3 那条："先写临时文件、完成校验和耐久化，**再**提交数据库引用"。
+    /// `ContentStore::put` 内部就是"写临时文件 → `sync_all` → 改名"，所以它返回时磁盘上
+    /// 已经有完整字节了；`record_blob` 才把引用登记进册。反过来做的话，会留下一行指向
+    /// 不存在字节的元数据——而那条引用在读取时**报得出来**（可诊断缺失），代价是每次读
+    /// 都要报一次，而它本可以根本不发生。
+    ///
+    /// 保留期取 `Keep`：正文靠**证据撤回**失效（§7.2 的"仍可访问"），而不是靠一个我们编出来
+    /// 的天数。§12.3 那张表给"事件与不可变内容大块"的说明是"跟随任务保留期"，而任务保留期
+    /// 目前还没有定义——给它填一个数字，等于假装知道它该活多久。
+    fn observe_body(
+        &mut self,
+        subject_ref: &str,
+        at: WallClock,
+    ) -> Result<Option<BlobRef>, CoreError> {
+        let stored = {
+            let state = self
+                .broker
+                .os()
+                .read(subject_ref)
+                .filter(|state| state.exists);
+            let Some(state) = state else {
+                return Ok(None);
+            };
+            self.content.put(state.content.as_bytes(), self.data_class)?
+        };
+
+        let media_type = MediaType::new("text/plain")?;
+        self.store.record_blob(
+            &stored.blob_ref,
+            &stored.sha256,
+            media_type.as_str(),
+            stored.bytes,
+            ContentRetention::Keep,
+            at,
+        )?;
+        Ok(Some(stored.blob_ref))
+    }
+
     /// §6.1：读取环境状态并写成事件。
     pub fn observe(
         &mut self,
@@ -178,6 +228,14 @@ impl<'a> Session<'a> {
             .version_of(subject_ref)
             .unwrap_or(ABSENT_VALUE)
             .to_string();
+        // 对象正文进内容仓，信封只带引用（§4.1 L2 的"不无限复制"）。
+        //
+        // 内容按**摘要寻址**，所以同一份正文反复被观测只会存一份——"每轮观测都抄一遍全文"
+        // 在长跑里是灾难性的，而这里不需要额外的去重逻辑，那是寻址方式本身给的。
+        //
+        // 对象不存在时是 `None`，而不是一段空正文：`<absent>` 与"文件存在但为空"是两件事，
+        // 前面的版本值已经分开了它们，正文这里必须跟着分开。
+        let body_ref = self.observe_body(subject_ref, at)?;
 
         let event_id = EventId::generate();
         // 正向构造在契约层，因为撤回权限时要靠它从事件反查该失效的记忆（§12.1）。
@@ -186,6 +244,7 @@ impl<'a> Session<'a> {
         let observation = Observation {
             subject: subject_ref.to_string(),
             value,
+            body_ref,
             evidence_ref,
             derived_from: Vec::new(),
             observed_by: self.unit.clone(),

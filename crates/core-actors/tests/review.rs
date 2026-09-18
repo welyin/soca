@@ -41,6 +41,8 @@ fn record(
         evidence_ref: reference(evidence),
         subject_ref: subject.to_string(),
         observed_value: value.to_string(),
+        // 这些用例不关心正文；正文能不能取回由 `soca-core` 那一边测。
+        body_ref: None,
         derived_from: derived_from.iter().map(|name| reference(name)).collect(),
         observed_by: unit(by),
         retracted: None,
