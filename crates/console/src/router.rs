@@ -312,6 +312,10 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
                 &json!({
                     "goal_id": consultation.goal_id.to_string(),
                     "attempts": consultation.attempts,
+                    // §6 第 3 步：草稿要成为候选。这两个数与 `proposals` 的长度一起看，
+                    // 才知道"模型提的话有没有真的参与竞争"。
+                    "queued_candidates": consultation.queued_candidates,
+                    "unbacked_proposals": consultation.unbacked_proposals,
                     "goal": consultation.context.goal,
                     "evidence_given": consultation.context.evidence.len(),
                     // 模型**实际看到**的证据，含正文。

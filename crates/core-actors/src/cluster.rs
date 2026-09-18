@@ -21,7 +21,7 @@ use soca_contracts::{
 use crate::evidence::{EvidenceLedger, EvidenceRecord};
 use crate::leaves::{
     observation_of, ActionPrecondition, FileVersion, PendingAction, PostconditionVerify,
-    Precondition,
+    Precondition, ProposedCandidates,
 };
 
 /// §4.3"桌面与文件"能力簇。
@@ -86,6 +86,7 @@ impl DesktopAndFilesCluster {
                 Box::new(ActionPrecondition::new(preconditions)?),
                 Box::new(PostconditionVerify::new()?),
                 Box::new(PendingAction::new()?),
+                Box::new(ProposedCandidates::new()?),
             ],
             workspace: Workspace::new(),
             ledger: EvidenceLedger::new(),
@@ -177,14 +178,62 @@ impl DesktopAndFilesCluster {
         })
     }
 
-    /// 丢掉某个目标名下尚未推进的动作（§6 第 9 步）。
-    pub fn release_goal(&mut self, goal_ref: &GoalId) -> usize {
+    /// 投递一条模型提案（§6 第 3 步）。
+    ///
+    /// 预期与对象由调用方给出，理由见 [`ProposedCandidates`]：那个叶单元手上没有台账，
+    /// 编不出"再观测一次会看到什么"。
+    pub fn queue_model_proposal(
+        &mut self,
+        goal_ref: GoalId,
+        candidate: Candidate,
+        subject_ref: impl Into<String>,
+        expectation: Expectation,
+    ) -> Result<(), ContractError> {
         for leaf in &mut self.leaves {
-            if let Some(pending) = leaf.as_any_mut().downcast_mut::<PendingAction>() {
-                return pending.release_goal(goal_ref);
+            if let Some(proposals) = leaf.as_any_mut().downcast_mut::<ProposedCandidates>() {
+                return proposals.queue(goal_ref, candidate, subject_ref, expectation);
             }
         }
-        0
+        Err(ContractError::MissingRefs {
+            field: "cluster.leaves.proposed-candidates",
+        })
+    }
+
+    /// 取走一条已经推进过的模型提案。
+    pub fn release_proposal(&mut self, candidate: &Candidate) -> bool {
+        for leaf in &mut self.leaves {
+            if let Some(proposals) = leaf.as_any_mut().downcast_mut::<ProposedCandidates>() {
+                return proposals.release(candidate);
+            }
+        }
+        false
+    }
+
+    /// 挂着几条模型提案。
+    pub fn pending_proposals(&self) -> usize {
+        self.leaves
+            .iter()
+            .filter_map(|leaf| leaf.as_any().downcast_ref::<ProposedCandidates>())
+            .map(ProposedCandidates::pending)
+            .sum()
+    }
+
+    /// 丢掉某个目标名下尚未推进的动作与提案（§6 第 9 步）。
+    ///
+    /// **累加，不在第一个匹配的叶单元上返回。** 这里有两个叶单元各存各的待办；早期写法是
+    /// "找到就 `return`"，多一个持有者就会让另一个的待办静静地留着——而留下来的那些会在
+    /// 下一轮重新进入候选竞争，表现为"已经结束的目标还在往外冒动作"。
+    pub fn release_goal(&mut self, goal_ref: &GoalId) -> usize {
+        let mut dropped = 0;
+        for leaf in &mut self.leaves {
+            if let Some(pending) = leaf.as_any_mut().downcast_mut::<PendingAction>() {
+                dropped += pending.release_goal(goal_ref);
+            }
+            if let Some(proposals) = leaf.as_any_mut().downcast_mut::<ProposedCandidates>() {
+                dropped += proposals.release_goal(goal_ref);
+            }
+        }
+        dropped
     }
 
     /// 某个目标名下还有几个待推进的动作。

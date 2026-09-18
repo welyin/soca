@@ -161,6 +161,18 @@ fn subject_without_preconditions() -> Subject {
 /// 守望对象是 `<absent>`——而"对象不存在没有正文"与"对象存在、正文进了内容仓"正是这几条
 /// 测试要分开的两件事。
 fn subject_watching(content: &str) -> Subject {
+    // 返回空提案的应答源。这几条测试要看的是**送出去的上下文**，不是模型回了什么；
+    // 用空脚本的话咨询会以"没有可返回的响应"失败，那反而看不到上下文。
+    subject_watching_with_transport(
+        content,
+        Box::new(DeterministicTransport::from_fn(|_| {
+            Ok(output_with(Vec::new()))
+        })),
+    )
+}
+
+/// 同上，但模型的应答由调用方给出。
+fn subject_watching_with_transport(content: &str, transport: Box<dyn Transport>) -> Subject {
     let mut os = SimulatedOs::new();
     os.seed(WATCHED, content);
     let store = Store::open_in_memory(at(0)).expect("内存存储");
@@ -173,11 +185,7 @@ fn subject_watching(content: &str) -> Subject {
         cluster,
         owner(),
         boot(),
-        // 返回空提案的应答源。这几条测试要看的是**送出去的上下文**，不是模型回了什么；
-        // 用空脚本的话咨询会以"没有可返回的响应"失败，那反而看不到上下文。
-        Box::new(DeterministicTransport::from_fn(|_| {
-            Ok(output_with(Vec::new()))
-        })),
+        transport,
         ModelBackend::Cpu,
         false,
         ModelBudget {
@@ -551,6 +559,163 @@ fn a_model_claim_citing_real_evidence_passes_end_to_end() {
     // 上下文里如实写着模型看到了什么，界面与审计据此复盘。
     assert_eq!(consultation.context.evidence.len(), 1);
     assert_eq!(consultation.context.evidence[0].subject_ref, WATCHED);
+}
+
+// ---------------------------------------------------------------------------
+// §6 第 3 步：草稿要成为候选
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_model_draft_becomes_a_candidate() {
+    // §15.1 第 3–4 步："LLM生成带引用草稿 → 预测单元记录…；Executive提交ActionIntent。"
+    // **草稿要成为候选**——没有这一步，咨询的产出物只有界面看得到，而检验器再准也没有
+    // 东西可核："模型说了什么"与"系统接下来做什么"之间断了一环。
+    let mut subject = subject_responding(|request| {
+        let evidence = request.context.evidence.first().expect("有证据").clone();
+        Ok(output_with(vec![ModelProposal {
+            candidate: Candidate::Claim {
+                statement: "摘要里说下一次评审是 2026-10-15".to_string(),
+                evidence_refs: vec![evidence.evidence_ref],
+            },
+            self_report: self_report(),
+            rationale: "按正文".to_string(),
+        }]))
+    });
+    let goal_id = delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+
+    let consultation = subject
+        .consult_model(&goal_id, OutputSchema::read_only(), at(3))
+        .expect("咨询");
+    assert_eq!(consultation.queued_candidates, 1);
+    assert_eq!(consultation.unbacked_proposals, 0);
+    assert_eq!(
+        subject.public_state(at(3)).expect("状态").proposed_candidates,
+        1,
+        "提案要挂在候选集合里，而不只是躺在返回值里"
+    );
+
+    let (candidates, _) = subject
+        .select(&SelectionPolicy::default(), ActionLevel::A1, at(4))
+        .expect("选择");
+    assert!(
+        candidates.candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Claim { statement, .. } if statement.contains("下一次评审")
+        )),
+        "模型那条草稿要真的参与竞争：{:?}",
+        candidates
+            .candidates
+            .iter()
+            .map(|c| c.kind().as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_model_draft_quoting_a_date_the_body_does_not_have_is_refuted() {
+    // 整条链的端到端：正文 → 上下文 → 模型回引 → 候选 → 核对 → 出局。
+    //
+    // 这一条把每一段都串起来了。在此之前每一段都在，但没有一条线把它们连起来：
+    // 正文进不了上下文、模型提案进不了候选、核对器看不到正文——于是"草稿里的日期
+    // 在原文里根本没有"这件事，没有任何一处会发现。
+    let body = "资料摘要\n- 项目代号：晨星\n- 下一次评审：2026-10-15\n";
+    let mut subject = subject_watching_with_transport(
+        body,
+        Box::new(DeterministicTransport::from_fn(|request| {
+            let evidence = request.context.evidence.first().expect("有证据").clone();
+            Ok(output_with(vec![ModelProposal {
+                candidate: Candidate::Claim {
+                    statement: "摘要里说下一次评审是 2026-12-01".to_string(),
+                    evidence_refs: vec![evidence.evidence_ref],
+                },
+                self_report: self_report(),
+                rationale: "按正文".to_string(),
+            }]))
+        })),
+    );
+    let goal_id = delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject
+        .consult_model(&goal_id, OutputSchema::read_only(), at(3))
+        .expect("咨询");
+
+    let (candidates, selection) = subject
+        .select(&SelectionPolicy::default(), ActionLevel::A1, at(4))
+        .expect("选择");
+
+    let drafted = candidates
+        .candidates
+        .iter()
+        .position(|candidate| {
+            matches!(candidate, Candidate::Claim { statement, .. } if statement.contains("2026-12-01"))
+        })
+        .expect("草稿在候选里");
+    let review = selection
+        .reviews
+        .iter()
+        .find(|review| review.candidate_index == drafted)
+        .expect("每条候选都要有档案");
+
+    assert!(
+        review.is_refuted(),
+        "日期在正文里找不到出处，应当被否定：{review:?}"
+    );
+    assert!(
+        review.outcomes.iter().any(|outcome| {
+            outcome.kind == VerificationKind::Tool && outcome.verdict == Verdict::Refuted
+        }),
+        "而且报的应当是依据核对这一条：{review:?}"
+    );
+    assert_ne!(selection.selected_index(), Some(drafted));
+}
+
+#[test]
+fn an_advanced_proposal_leaves_the_competition() {
+    // 推进过的提案要取走。簇自己提的候选有 `handled_claims` 挡着，**提案没有**——
+    // 它是外面递进来的，不在那条去重名单上。留着它，L3 每一轮都会重新提议同一条。
+    let mut subject = subject_responding(|_| {
+        Ok(output_with(vec![ModelProposal {
+            candidate: Candidate::RequestObservation {
+                subject_ref: "cap:read-selected-folder".to_string(),
+                reason: "想再看一眼授权目录".to_string(),
+            },
+            self_report: self_report(),
+            rationale: "按需".to_string(),
+        }]))
+    });
+    let goal_id = delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    let consultation = subject
+        .consult_model(&goal_id, OutputSchema::read_only(), at(3))
+        .expect("咨询");
+    assert_eq!(consultation.queued_candidates, 1, "申请观测也要能进候选");
+
+    // 风险等级取 A2：门口的结论只有一条证据，够不到三条的门槛，于是轮到这条提案。
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(4))
+        .expect("跑一轮");
+    assert!(
+        matches!(
+            report.outcome,
+            RoundOutcome::Advanced {
+                step: AdvanceStep::Observation { .. }
+            }
+        ),
+        "实际：{:?}",
+        report.outcome
+    );
+    assert_eq!(
+        subject.public_state(at(5)).expect("状态").proposed_candidates,
+        0,
+        "推进过就该取走"
+    );
 }
 
 #[test]

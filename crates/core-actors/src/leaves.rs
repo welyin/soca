@@ -802,3 +802,246 @@ impl CognitiveUnit for PendingAction {
         self
     }
 }
+
+// ---------------------------------------------------------------------------
+// 模型提出的候选
+// ---------------------------------------------------------------------------
+
+/// 同时挂在候选集合里的模型提案数上限（§13.1："对候选数设上限"）。
+///
+/// §13.1 那句的原话是"压缩候选集合规模，**对候选数设上限**，允许合并低价值重复提案"。
+/// 这里只做前一半：超了就淘汰最早的那条，而不是合并——合并要先判"哪两条是一回事"，
+/// 而两条引用了不同证据的命题合成一条之后，**它引用的到底是哪一批**就说不清了，
+/// 那恰好是这一层最不能弄丢的东西。
+pub const MAX_PROPOSED_CANDIDATES: usize = 32;
+
+/// 一条候选的**稳定键**：判断"是不是同一条提案"。
+///
+/// 不能用整条候选的相等来判断，原因是**簇会合并候选**：同一个对象的多个观测请求会被并成
+/// 一条，理由是拼起来的（§13.1："允许合并低价值重复提案"）。于是"我投进去的那条"与
+/// "竞争之后被选中的那条"不是同一个值——按值取走会取不掉，表现为**提案永远留在集合里**，
+/// 每一轮都被重新提议一次。
+///
+/// 键取的是"这条提案在说什么"，而不是"它这次附带的是什么说法"：理由（`reason`、
+/// `rationale`）会被合并、会被改写，它不是提案的身份。
+fn proposal_key(candidate: &Candidate) -> String {
+    /// 用单元分隔符连接，避免 `"ab" + "c"` 与 `"a" + "bc"` 撞成同一个键。
+    const SEP: char = '\u{1f}';
+
+    match candidate {
+        Candidate::Claim {
+            statement,
+            evidence_refs,
+        } => {
+            let mut refs: Vec<String> = evidence_refs.iter().map(ToString::to_string).collect();
+            refs.sort_unstable();
+            format!("claim:{statement}{SEP}{}", refs.join(&SEP.to_string()))
+        }
+        Candidate::RequestObservation { subject_ref, .. } => format!("observe:{subject_ref}"),
+        Candidate::RequestTool { tool_id, .. } => format!("tool:{tool_id}"),
+        Candidate::RequestAction { intent } => format!("action:{}", intent.action_id),
+    }
+}
+
+/// 一条被投递进来的模型提案。
+#[derive(Debug)]
+struct QueuedProposal {
+    goal_ref: GoalId,
+    candidate: Candidate,
+    /// 命题所依据的对象。预测对它是可检查的。
+    subject_ref: String,
+    /// 再观测一次会看到什么。
+    expectation: Expectation,
+}
+
+/// §6 第 3 步的"模型提出候选"。
+///
+/// **它不是一个计划单元。** 计划单元要能在没有模型的时候从目标与局部信念里生成候选；
+/// 本单元只做一件窄得多的事：把**模型已经提出的**那些收进候选集合，让它们和簇自己提的
+/// 候选一起竞争。
+///
+/// 为什么必须有这一步：§15.1 第 3–4 步是"LLM生成带引用草稿 → 预测单元记录…；Executive
+/// 提交ActionIntent"——**草稿要成为候选**。没有它，`consult_model` 的产出物只有界面看得到，
+/// 而检验器再准也没有东西可核："模型说了什么"与"系统接下来做什么"之间断了一环。
+///
+/// 引用由网关解析：模型只能按**下标**引用它上下文里的证据（`resolve_proposal` 把下标换成
+/// 引用）。所以流到这里来的每条候选，它引用的证据都是它**真的看过**的那些（§8）。
+///
+/// 它**不**自己编预期，也不放宽任何东西。预期与对象由投递方给出——本单元手上没有台账，
+/// 编不出"再观测一次会看到什么"；而 §6 第 3 步要求候选在推进之前有一条**可检查**的预测，
+/// 让它空着等于让模型说的话直接进入执行路径，而没有任何东西说过"如果它是错的，我们会看到
+/// 什么"。
+#[derive(Debug)]
+pub struct ProposedCandidates {
+    core: LeafCore,
+    queued: Vec<QueuedProposal>,
+}
+
+impl ProposedCandidates {
+    /// 构造。
+    pub fn new() -> Result<Self, ContractError> {
+        Ok(Self {
+            core: LeafCore::new(
+                "unit:leaf:proposed-candidates",
+                "desktop-and-files",
+                "file-write-v1",
+                "proposed-candidates-v1",
+            )?,
+            queued: Vec::new(),
+        })
+    }
+
+    /// 投递一条模型提案。
+    ///
+    /// 幂等按**整条候选**判：同一次咨询重复投递不该让集合里出现两条一样的。
+    pub fn queue(
+        &mut self,
+        goal_ref: GoalId,
+        candidate: Candidate,
+        subject_ref: impl Into<String>,
+        expectation: Expectation,
+    ) -> Result<(), ContractError> {
+        if self
+            .queued
+            .iter()
+            .any(|queued| proposal_key(&queued.candidate) == proposal_key(&candidate))
+        {
+            return Ok(());
+        }
+        if self.queued.len() >= MAX_PROPOSED_CANDIDATES {
+            self.queued.remove(0);
+        }
+        self.queued.push(QueuedProposal {
+            goal_ref,
+            candidate,
+            subject_ref: subject_ref.into(),
+            expectation,
+        });
+        self.core.note_belief_change();
+        Ok(())
+    }
+
+    /// 还有几条提案挂着。
+    pub fn pending(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// 某个目标名下还有几条。
+    pub fn pending_for(&self, goal_ref: &GoalId) -> usize {
+        self.queued
+            .iter()
+            .filter(|queued| &queued.goal_ref == goal_ref)
+            .count()
+    }
+
+    /// 丢掉某个目标名下的提案，返回丢掉几条（§6 第 9 步）。
+    pub fn release_goal(&mut self, goal_ref: &GoalId) -> usize {
+        let before = self.queued.len();
+        self.queued.retain(|queued| &queued.goal_ref != goal_ref);
+        let dropped = before - self.queued.len();
+        if dropped > 0 {
+            self.core.note_belief_change();
+        }
+        dropped
+    }
+
+    /// 取走一条提案（它已经被推进过）。
+    ///
+    /// **按 [`proposal_key`] 取，不按整条候选取。** 竞争里被选中的那条通常不是投进来的
+    /// 那一条：簇会把同一个对象的多个观测请求并成一条、把理由拼起来。按值取会取不掉，
+    /// 而那种失败看起来像"提案没被消费"，实际是"没认出来是它"。
+    ///
+    /// 推进之后取走，理由与 [`PendingAction::release`] 相同：留着它，L3 每一轮都会重新提议
+    /// 同一条已经用过的提案——而那看起来像"系统一直在工作"，实际上什么也没变。
+    pub fn release(&mut self, candidate: &Candidate) -> bool {
+        let key = proposal_key(candidate);
+        let before = self.queued.len();
+        self.queued
+            .retain(|queued| proposal_key(&queued.candidate) != key);
+        let removed = self.queued.len() != before;
+        if removed {
+            self.core.note_belief_change();
+        }
+        removed
+    }
+}
+
+impl CognitiveUnit for ProposedCandidates {
+    fn unit_id(&self) -> &UnitId {
+        &self.core.unit_id
+    }
+
+    fn kind(&self) -> UnitKind {
+        UnitKind::Leaf
+    }
+
+    /// 提案不是从事件里来的。收到事件时本单元不做任何事——把事件内容当成提案，
+    /// 等于让任何一条消息都能直接往候选集合里塞东西，而那正是 §11.1 要挡的那条路。
+    fn observe(&mut self, _event: &Envelope, _at: WallClock) -> Result<(), ContractError> {
+        Ok(())
+    }
+
+    fn propose(&self, _at: WallClock) -> Result<CandidateSet, ContractError> {
+        let mut set = CandidateSet::empty();
+        for queued in &self.queued {
+            set.candidates.push(queued.candidate.clone());
+        }
+        Ok(set)
+    }
+
+    fn predict(&self, candidate: &Candidate, at: WallClock) -> Result<Prediction, ContractError> {
+        let queued = self
+            .queued
+            .iter()
+            .find(|queued| &queued.candidate == candidate)
+            .ok_or(ContractError::MissingRefs {
+                field: "prediction.subject",
+            })?;
+
+        prediction_about(
+            "prediction:proposed-candidate",
+            &queued.subject_ref,
+            format!("再观测一次，{} 仍然满足这条命题的依据", queued.subject_ref),
+            queued.expectation.clone(),
+            format!("重新观测 {} 看到的与命题所依据的不一致", queued.subject_ref),
+            at,
+        )
+    }
+
+    fn handle_result(
+        &mut self,
+        outcome: &OutcomeVerified,
+        _at: WallClock,
+    ) -> Result<(), ContractError> {
+        // 结果只带动作标识，而提案里只有动作类的那几种对得上。对不上的（结论、申请观测）
+        // 不是"没处理"——它们各自走完自己的路，取走它们的是推进那一步。
+        let by_action: Vec<Candidate> = self
+            .queued
+            .iter()
+            .filter(|queued| match &queued.candidate {
+                Candidate::RequestAction { intent } => intent.action_id == outcome.action_id,
+                _ => false,
+            })
+            .map(|queued| queued.candidate.clone())
+            .collect();
+        for candidate in by_action {
+            self.release(&candidate);
+        }
+        for reference in &outcome.observation_refs {
+            self.core.note_evidence(reference);
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> UnitSnapshot {
+        self.core.snapshot()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}

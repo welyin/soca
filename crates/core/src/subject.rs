@@ -73,6 +73,16 @@ pub struct ModelConsultation {
     pub output: ModelOutput,
     /// 尝试了几次。
     pub attempts: u8,
+    /// 有几条提案被投进了 L3 候选集合（§6 第 3 步）。
+    ///
+    /// 与 `output.proposals.len()` 分开报：两者不相等时，"模型提了但没进候选"这件事必须
+    /// 看得见——否则一次咨询看起来"有产出"，而实际上那些产出根本没有参与竞争。
+    pub queued_candidates: usize,
+    /// 有几条提案因为**引用的证据一条都解析不出来**而被丢掉。
+    ///
+    /// 它是上面那个差值的解释。把它归进"没通过校验"会让它看起来像检验器的判断，
+    /// 而检验器根本没看到它——它在进入候选集合之前就被丢掉了。
+    pub unbacked_proposals: usize,
 }
 
 /// 供界面读取的目标摘要。
@@ -291,6 +301,11 @@ pub struct PublicState {
     pub observed_evidence: usize,
     /// 能力簇证据台账里的条数。核对结论时手边有多少材料，看的是这个数。
     pub ledger_records: usize,
+    /// 挂着几条**模型提案**（§6 第 3 步）。
+    ///
+    /// 单独报出来，是因为它和"簇自己提出了几条候选"是两件事：前者是外面递进来的，
+    /// 后者是簇从证据里推出来的。合成一个数字的话，"模型提了一条但没进候选"看不出来。
+    pub proposed_candidates: usize,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 已经隐藏、等着清理的记忆条数（§12.3）。
@@ -897,12 +912,78 @@ impl Subject {
             .budget
             .spend_tokens(validated.output.total_tokens())?;
 
+        // §6 第 3 步的"模型提出候选"。**草稿要成为候选。**
+        //
+        // 没有这一步，咨询的产出物只有界面看得到——而检验器再准也没有东西可核：
+        // "模型说了什么"与"系统接下来做什么"之间断了一环。
+        let mut queued_candidates = 0usize;
+        let mut unbacked_proposals = 0usize;
+        for proposal in &validated.output.proposals {
+            let Some((subject_ref, expectation)) = self.proposal_expectation(&proposal.candidate)
+            else {
+                // 连一条可检查的预期都编不出来。它不该进候选集合：§6 第 3 步要求候选在推进
+                // 之前有一条可检查的预测，而"进不去"与"进去之后被拒"对调用方的含义也不同
+                // ——前者是"这条提案没有依据"，后者是"它通过了结构校验、被别的检查否定了"。
+                unbacked_proposals = unbacked_proposals.saturating_add(1);
+                continue;
+            };
+            self.cluster.queue_model_proposal(
+                goal_id.clone(),
+                proposal.candidate.clone(),
+                subject_ref,
+                expectation,
+            )?;
+            queued_candidates = queued_candidates.saturating_add(1);
+        }
+
         Ok(ModelConsultation {
             goal_id: goal_id.clone(),
             context,
             output: validated.output,
             attempts: validated.attempts,
+            queued_candidates,
+            unbacked_proposals,
         })
+    }
+
+    /// 一条模型提案的可检查预期（§6 第 3 步）。
+    ///
+    /// 两类候选的"注"不一样，因此分开取：
+    ///
+    /// * **申请观测**：对象就写在候选里，押注"它确实能被观测到"。这是这类候选**唯一**能下的
+    ///   注——与同簇的 `ActionPrecondition` 对同一类候选的做法一致。
+    /// * **结论类**：取它引用的、**按引用排序后的第一条**能解析出来的证据。那条证据说
+    ///   "这个对象当时是这个值"，于是可以押注"再观测一次还是这个值"。
+    ///
+    /// 取第一条而不是全部，是因为一条预测只能押一个对象。而"押哪一条"必须是**确定的**：
+    /// 按引用排序，运行两遍得到同一份预测（§13）。用"第一条能解析的"而不排序，会让结果
+    /// 取决于引用在候选里出现的顺序——那是模型给的顺序，不是我们能复现的东西。
+    fn proposal_expectation(&self, candidate: &Candidate) -> Option<(String, Expectation)> {
+        if let Candidate::RequestObservation { subject_ref, .. } = candidate {
+            return Some((
+                subject_ref.clone(),
+                Expectation::Present {
+                    subject_ref: subject_ref.clone(),
+                },
+            ));
+        }
+
+        let mut refs: Vec<&EvidenceRef> = candidate.evidence_refs().iter().collect();
+        refs.sort_unstable();
+        for reference in refs {
+            if let Some(record) = self.cluster.ledger().get(reference) {
+                let subject_ref = record.subject_ref.clone();
+                let expected = record.observed_value.clone();
+                return Some((
+                    subject_ref.clone(),
+                    Expectation::VersionEquals {
+                        subject_ref,
+                        expected,
+                    },
+                ));
+            }
+        }
+        None
     }
 
     /// §4.1 L3、§6 第 4–5 步：在当前候选上做检验，然后选一条推进。
@@ -1063,6 +1144,10 @@ impl Subject {
                 {
                     self.remember_handled(derivation_seed(statement, evidence_refs));
                 }
+                // 推进过的**模型提案**取走。留着它，L3 每一轮都会重新提议同一条已经用过的
+                // 提案——而簇自己提的候选有 `handled_claims` 挡着，提案没有，它是外面递进来的。
+                // 对非提案的候选这是一次空操作（返回 `false`），不会误伤。
+                self.cluster.release_proposal(&candidates.candidates[index]);
                 RoundOutcome::Advanced { step }
             }
             SelectionOutcome::NeedsMoreInformation { ref missing } => RoundOutcome::NeedsInput {
@@ -1727,6 +1812,7 @@ impl Subject {
             workspace_evidence: workspace.evidence().len(),
             observed_evidence: self.observed.len(),
             ledger_records: self.cluster.ledger().len(),
+            proposed_candidates: self.cluster.pending_proposals(),
             memory_entries: self.store.memory_count(&self.owner)?,
             memories_awaiting_purge: self.store.tombstoned_memory_count()?,
             actions: self.store.action_count()?,
