@@ -33,6 +33,7 @@ pub mod learning;
 pub mod lifecycle;
 pub mod os;
 pub mod policy;
+pub mod reconciler;
 pub mod replay;
 pub mod resources;
 pub mod schedule;
@@ -51,6 +52,7 @@ pub use crate::retention::{
     expire_retained, forget, purge_retained, RetentionPolicy, RetentionReport, TombstonedMemory,
 };
 pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
+pub use crate::reconciler::{ScaleRun, begin_scaling, commit_scaling, rollback_scaling};
 pub use crate::resources::{Metric, ResourceLedger, Resources};
 pub use crate::schedule::{ScheduleOutcome, ScheduleReport, Scheduler};
 pub use crate::session::{

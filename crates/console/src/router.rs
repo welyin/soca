@@ -71,6 +71,8 @@ pub fn handle(
         ("POST", "/api/resources/reset") => reset_resource_peaks(subject, request, at),
         // §9.2 的降温与唤醒。分开两条路径：一个是"把状态收起来"，一个是"把它读回来"——
         // 而 §17 要计时的正是后者（且只有后者）。
+        // §6.2 的迁移。与 `/api/loop` 共用 `envelope` 的形状：同一个输入的两种用法。
+        ("POST", "/api/scale") => scale_topology(subject, request, at),
         ("POST", "/api/unit/sleep") => sleep_unit(subject, request, at),
         ("POST", "/api/unit/wake") => wake_unit(subject, request, at),
         ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
@@ -1043,6 +1045,101 @@ fn wake_unit(subject: &mut Subject, _request: &Request, at: WallClock) -> Respon
         ),
         Err(error) => Response::text(409, error.to_string()),
     }
+}
+
+/// 按一份资源包络算出的计划迁移一次（§6.2；§17 的"拓扑数量"那一行）。
+///
+/// 与 `/api/loop` 共用 `envelope` 的形状，因为它们是同一个输入的两种用法：
+/// 那一条问"现在该不该干活"，这一条问"要不要换个拓扑"。
+fn scale_topology(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let Some(envelope) = payload.get("envelope") else {
+        return Response::text(
+            400,
+            "缺少 envelope：迁移要有一个**目标**，而目标由一份资源包络算出来",
+        );
+    };
+
+    // 计划的算法与 `resources_from` 共用一份（同一个规划器、同一份策略），
+    // 只是那一条只取"能不能跑"这一个结论，这一条要整份计划。
+    let plan = match plan_from(envelope) {
+        Ok(plan) => plan,
+        Err(message) => return Response::text(400, message),
+    };
+
+    match subject.scale(&plan, at) {
+        Ok(run) => Response::json(
+            200,
+            &json!({
+                "run": run,
+                "route_epoch": subject.route_epoch().ok().flatten().map(|epoch| epoch.get()),
+                "unit_awake": subject.is_awake(),
+                "note": "回滚的意思是**什么也没换**——路由还停在原来的世代上。\
+                         提交点之后失败则只能补偿，那时报告是 recovering 而不是 committed。",
+            }),
+        ),
+        Err(error) => Response::text(409, error.to_string()),
+    }
+}
+
+/// 从一份包络算出拓扑计划。
+///
+/// 与 [`resources_from`] 共用同一个规划器与同一份策略，只是那一条只取"能不能跑"这个结论。
+/// 两处各写一份的话，"停不停"与"迁到哪"会在某次改动之后说不到一起。
+fn plan_from(envelope: &Value) -> Result<soca_contracts::TopologyPlan, String> {
+    if envelope.get("emergency").and_then(Value::as_bool) == Some(true) {
+        return Err("压力事件不是一份计划：迁移要的是目标拓扑，不是一次告警".to_string());
+    }
+    let ram_limit_mib = envelope
+        .get("ram_limit_mib")
+        .and_then(Value::as_u64)
+        .ok_or("envelope 缺少 ram_limit_mib")?;
+    let cpu_slots = envelope
+        .get("cpu_slots")
+        .and_then(Value::as_u64)
+        .ok_or("envelope 缺少 cpu_slots")?;
+    let typed = ResourceEnvelope {
+        ram_limit_mib,
+        cpu_slots: cpu_slots.min(u64::from(u32::MAX)) as u32,
+        gpu_allocatable_mib: envelope
+            .get("gpu_allocatable_mib")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        telemetry_age_seconds: envelope
+            .get("telemetry_age_seconds")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+    };
+    let mut model = ModelReservation::default();
+    if let Some(declared) = envelope.get("model") {
+        model.ram_mib = declared
+            .get("ram_mib")
+            .and_then(Value::as_u64)
+            .unwrap_or(model.ram_mib);
+        model.vram_mib = declared
+            .get("vram_mib")
+            .and_then(Value::as_u64)
+            .unwrap_or(model.vram_mib);
+        model.backend = match declared.get("backend").and_then(Value::as_str) {
+            None => model.backend,
+            Some("cpu") => ModelBackend::Cpu,
+            Some("gpu") => ModelBackend::Gpu,
+            Some("remote") => ModelBackend::Remote,
+            Some(other) => return Err(format!("model.backend 只能是 cpu/gpu/remote，收到 {other}")),
+        };
+    }
+
+    // 需求取**最大档**：§17 那一行的前半句是"**同需求**异资源输出不同叶/簇/协调数"，
+    // 所以需求要固定住，让它成为资源的上限而不是目标（§2："不因空闲 RAM 多就生成无任务角色"）。
+    soca_core_topology::plan_topology(
+        &typed,
+        &model,
+        u64::from(*soca_contracts::LEAF_PROFILES.last().expect("至少有一档")),
+        &PlannerPolicy::default(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// 开一段新的资源计量窗口（§17 的"先 8 小时后 24 小时试运行"）。

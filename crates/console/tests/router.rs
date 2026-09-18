@@ -1313,6 +1313,79 @@ fn correcting_by_a_source_that_nothing_was_derived_from_retracts_nothing() {
 }
 
 #[test]
+fn the_console_can_migrate_to_a_new_topology_epoch() {
+    // §17 的"拓扑数量"那一行，从界面上走一遍：迁移有 **epoch**、状态恢复和回滚。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        &body(json!({"message": "整理摘要"})),
+    );
+    // 迁移要搬状态，所以单元得先醒着。
+    call(&mut subject, "POST", "/api/unit/wake", &body(json!({})));
+
+    let scaled = json(&call(
+        &mut subject,
+        "POST",
+        "/api/scale",
+        &body(json!({
+            "envelope": {"ram_limit_mib": 65_536, "cpu_slots": 4}
+        })),
+    ));
+    assert_eq!(scaled["run"]["kind"], "committed", "{scaled}");
+    assert_eq!(scaled["run"]["old_epoch"], 1);
+    assert_eq!(scaled["run"]["new_epoch"], 2);
+    assert_eq!(scaled["route_epoch"], 2, "世代要真的换了：{scaled}");
+    assert_eq!(scaled["unit_awake"], true, "搬过去之后单元要醒着");
+
+    // 再迁一次：**世代只能往上走**。
+    let again = json(&call(
+        &mut subject,
+        "POST",
+        "/api/scale",
+        &body(json!({"envelope": {"ram_limit_mib": 8_192, "cpu_slots": 4}})),
+    ));
+    assert_eq!(again["run"]["new_epoch"], 3, "{again}");
+
+    // 而资源不足的计划**在开事务之前**就被挡住了。
+    let refused = call(
+        &mut subject,
+        "POST",
+        "/api/scale",
+        &body(json!({"envelope": {"ram_limit_mib": 64, "cpu_slots": 1}})),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(
+        refused.body.contains("暂停"),
+        "理由要说清是计划的问题：{}",
+        refused.body
+    );
+    assert_eq!(
+        json(&call(&mut subject, "GET", "/api/state", &body(json!({}))))["unit_awake"],
+        true,
+        "拒绝不该把单元弄冷"
+    );
+}
+
+#[test]
+fn a_migration_without_a_target_is_refused() {
+    // 迁移要有一个**目标**，而目标由一份资源包络算出来。不带包络地"迁移"没有意义，
+    // 而给它一个默认值（"就用现在这份"）会造出一种什么都不改的迁移——
+    // 它照样会把世代推上去，于是账上多了一次假的扩容。
+    let mut subject = subject();
+    call(&mut subject, "POST", "/api/unit/wake", &body(json!({})));
+
+    let refused = call(&mut subject, "POST", "/api/scale", &body(json!({})));
+    assert_eq!(refused.status, 400);
+    assert!(
+        refused.body.contains("envelope"),
+        "要说清缺什么：{}",
+        refused.body
+    );
+}
+
+#[test]
 fn the_console_can_sleep_and_wake_a_unit_and_measures_the_restore_separately() {
     // §17 的"冷恢复"那一行，从界面上走一遍。
     //

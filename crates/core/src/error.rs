@@ -75,4 +75,7 @@ pub enum CoreError {
          （§12.1：暂停应先撤销尚未消费的执行授权、停止采集和外发，再取消模型任务）"
     )]
     Paused { reason: String },
+
+    #[error("迁移不能开始：{reason}")]
+    ScaleRefused { reason: String },
 }

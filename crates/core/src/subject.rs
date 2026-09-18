@@ -43,7 +43,9 @@ use soca_contracts::{
     StrategyAdmission, StrategyCandidate, StrategyVersion, TaskId,
     ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
-use soca_contracts::{PartitionKey, TemplateId, UnitInstance, UnitState};
+use soca_contracts::{
+    PartitionKey, TemplateId, TopologyEpoch, TopologyPlan, UnitInstance, UnitState,
+};
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
 use soca_storage::audit::AuditCategory;
@@ -53,6 +55,7 @@ use crate::broker::ActionBroker;
 use crate::error::CoreError;
 use crate::lifecycle::{CheckpointOutcome, UnitRegistry, WakeOutcome, WakePolicy};
 use crate::policy::{PermitDecision, PolicyAgent};
+use crate::reconciler::ScaleRun;
 use crate::resources::ResourceLedger;
 use crate::retention::{
     expire_retained, forget as forget_memory, purge_retained, RetentionPolicy, RetentionReport,
@@ -400,6 +403,8 @@ pub struct PublicState {
     /// 与 `unit_awake` **分开报**，因为它们可以不一致，而那个不一致本身是信息：
     /// 库里写着热的、热表里却没有，说明上一次运行留下了没结清的东西。
     pub unit_state: Option<String>,
+    /// 当前路由的拓扑世代（§6.3）。`None` 表示还没迁移过。
+    pub route_epoch: Option<u64>,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 已经隐藏、等着清理的记忆条数（§12.3）。
@@ -602,6 +607,84 @@ impl Subject {
             PartitionKey::new("partition:local")?,
         );
         Ok(self.store.register_instance(&cold, &instance, at)?)
+    }
+
+    /// 当前路由的拓扑世代（§6.3）。
+    ///
+    /// `None` 表示还没有登记过路由——那意味着这个主体从来没迁移过。
+    pub fn route_epoch(&self) -> Result<Option<TopologyEpoch>, CoreError> {
+        Ok(crate::reconciler::current_route(&self.store, &self.owner)?
+            .map(|route| route.current_epoch))
+    }
+
+    /// 按一份拓扑计划迁移一次（§6.2；§17 的"拓扑数量"那一行）。
+    ///
+    /// §17 那一行要的是"**迁移有 epoch、fencing、状态恢复和回滚**"。这个方法是前两样与
+    /// 最后一样的落点（第三样就是 [`Subject::sleep`] 与 [`Subject::wake`]）。
+    ///
+    /// 顺序照着 §6.2 的状态机走，而其中"把状态搬过去"那两档，对单主体来说**正好是
+    /// 降温再唤醒**：
+    ///
+    /// ```text
+    /// begin_scaling  → PLANNED → RESERVED → DRAINING      ← 停止新租约
+    /// self.sleep     → SNAPSHOTTED                        ← "将 pending 动作、游标、状态提交"
+    /// self.wake      → SHADOW_READY                       ← "影子已恢复"
+    /// commit_scaling → ROUTE_COMMITTED → RETIRING → DONE  ← 路由 CAS 切换
+    /// ```
+    ///
+    /// **降温失败就回滚**，而且那是一条真实的路：一个没在跑的单元没有状态可搬，
+    /// 于是这次迁移什么也没换。让它在没有快照的情况下照样提交，等于把"移位"变成"丢东西"。
+    pub fn scale(&mut self, plan: &TopologyPlan, at: WallClock) -> Result<ScaleRun, CoreError> {
+        let transaction = crate::reconciler::begin_scaling(&mut self.store, &self.owner, plan, at)?;
+
+        // 把状态搬过去：降温写快照，唤醒把它读回来（顺带计时，§17 的"冷恢复"）。
+        let state_moved = self.sleep(at).is_ok() && self.wake(at).is_ok();
+        if !state_moved {
+            // 搬不动就别提交。这里**不**把失败原因细化：真正的原因在 `sleep`/`wake` 各自的
+            // 报错里，而回滚报告要说的是"这次迁移没换任何东西"。
+            return crate::reconciler::rollback_scaling(
+                &mut self.store,
+                &transaction,
+                "状态搬不过去",
+                at,
+            );
+        }
+
+        let run = crate::reconciler::commit_scaling(&mut self.store, &transaction, true, at)?;
+        self.sample_resources(at)?;
+        Ok(run)
+    }
+
+    /// 开一次迁移，**不**替调用方搬状态。
+    ///
+    /// 与 [`Subject::scale`] 的分工：`scale` 是"一次完整的迁移"，这两个是它的两半。
+    /// 分开是必要的，不只是为了好测——§6.2 给迁移定了 `deadline`，正因为"开"与"收"
+    /// 之间**可以很长**（要等纯计算到安全点、要等人看）。把两半并成一个方法，
+    /// 就等于假定那一等是瞬时的。
+    pub fn begin_migration(
+        &mut self,
+        plan: &TopologyPlan,
+        at: WallClock,
+    ) -> Result<soca_contracts::ScaleTransaction, CoreError> {
+        crate::reconciler::begin_scaling(&mut self.store, &self.owner, plan, at)
+    }
+
+    /// 收尾一次迁移：搬状态、提交。与 [`Subject::begin_migration`] 配对。
+    pub fn finish_migration(
+        &mut self,
+        transaction: soca_contracts::ScaleTransaction,
+        at: WallClock,
+    ) -> Result<ScaleRun, CoreError> {
+        let state_moved = self.sleep(at).is_ok() && self.wake(at).is_ok();
+        if !state_moved {
+            return crate::reconciler::rollback_scaling(
+                &mut self.store,
+                &transaction,
+                "状态搬不过去",
+                at,
+            );
+        }
+        crate::reconciler::commit_scaling(&mut self.store, &transaction, true, at)
     }
 
     /// 单元现在是不是热的（§9.2）。
@@ -2395,6 +2478,7 @@ impl Subject {
             strategy: self.strategy,
             resources: self.resources.clone(),
             unit_awake: self.is_awake(),
+            route_epoch: self.route_epoch()?.map(|epoch| epoch.get()),
             unit_state: self
                 .store
                 .unit(self.cluster.unit_id())?

@@ -137,6 +137,28 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       能力被撤回之后，那个单元唤不醒。
     </div>
     <pre id="unit-out" style="margin-top:14px">（尚未运行）</pre>
+
+    <h2 style="margin-top:22px">拓扑迁移（§6.2 / §17）</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §17：「同需求异资源输出不同叶/簇/协调数；迁移有 <b>epoch</b>、fencing、
+      <b>状态恢复和回滚</b>，主体身份不因压力被合并。」用「跑一段」那一格的 MiB 上限当目标资源。
+    </div>
+    <div class="row">
+      <button id="run-scale" class="ghost">按当前 MiB 上限迁移一次</button>
+      <span class="hint" id="epoch-now">世代：—</span>
+    </div>
+    <div class="hint">
+      <b>回滚的意思是"什么也没换"</b>，不是"把路由删掉"——路由还停在原来的世代上。
+      而提交点之后失败只能<b>补偿</b>（报告是 <code>recovering</code> 而不是
+      <code>committed</code>），因为 §6.3 的世代<b>只能往上走</b>：回退要创建更大的世代，
+      不能重新启用旧的 fencing token。
+    </div>
+    <div class="hint">
+      <b>三道闸在开事务之前过一遍</b>：主体数不许变（压力下的自动合并会把两个记忆域并成一个，
+      而那不可逆）、计划必须是可行的、世代必须由当前路由派生（让调用方指定的话，
+      "回退"就有了一条路：填一个更小的数）。
+    </div>
+    <pre id="scale-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
 
   <section>
@@ -471,6 +493,7 @@ function renderState(state) {
   renderResources(state.resources);
   $("unit-now").textContent = "单元状态：" +
     (state.unit_state || "未登记") + (state.unit_awake ? "（热）" : "（冷）");
+  $("epoch-now").textContent = "世代：" + (state.route_epoch === null ? "（还没迁移过）" : state.route_epoch);
 
   const tbody = $("goals");
   if (state.goals.length === 0) {
@@ -719,6 +742,29 @@ function renderRejections(candidates, rejections) {
 // 上一次提的建议。**必须由用户显式提交回来**——"提了就等于启用了"是 §13.2 那句话最容易
 // 落空的地方，而落空之后看不出来。
 let pendingStrategy = null;
+
+$("run-scale").onclick = async function () {
+  try {
+    const result = await api("scale", {
+      envelope: {
+        ram_limit_mib: parseInt($("loop-ram").value, 10) || 4096,
+        cpu_slots: 4,
+      },
+    });
+    $("scale-out").textContent = JSON.stringify(result, null, 2);
+    if (result.run.kind === "committed") {
+      log("已迁移：世代 " + result.run.old_epoch + " → " + result.run.new_epoch, "ok");
+    } else if (result.run.kind === "rolled_back") {
+      log("回滚（停在 " + result.run.reached + "）：" + result.run.reason, "err");
+    } else {
+      log("提交点之后出问题，正在补偿：" + result.run.reason, "err");
+    }
+  } catch (error) {
+    $("scale-out").textContent = error.message;
+    log("迁移失败：" + error.message, "err");
+  }
+  refresh();
+};
 
 $("unit-sleep").onclick = async function () {
   try {
