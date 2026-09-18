@@ -13,9 +13,9 @@
 
 use soca_contracts::{
     ActionIntent, BlobRef, BudgetRef, Candidate, CandidateSet, CapabilityPolicyRef, CognitiveUnit,
-    ContractError, DomainId, Envelope, EvidenceRef, Expectation, ModelProfileRef, OutcomeVerified,
-    Prediction, Scope, Sha256Hex, StrategyVersion, TaskContractVersion, UnitId, UnitKind,
-    UnitSnapshot, UnitState, WallClock, Workspace, WorkspaceNote, SCHEMA_VERSION,
+    ContractError, DomainId, Envelope, EvidenceRef, Expectation, GoalId, ModelProfileRef,
+    OutcomeVerified, Prediction, Scope, Sha256Hex, StrategyVersion, TaskContractVersion, UnitId,
+    UnitKind, UnitSnapshot, UnitState, WallClock, Workspace, WorkspaceNote, SCHEMA_VERSION,
 };
 
 use crate::evidence::{EvidenceLedger, EvidenceRecord};
@@ -121,17 +121,37 @@ impl DesktopAndFilesCluster {
     /// 让外面按下标去摸第 4 个叶单元，等价于把列表顺序变成公开接口。
     pub fn queue_action(
         &mut self,
+        goal_ref: GoalId,
         intent: ActionIntent,
         expectation: Expectation,
     ) -> Result<(), ContractError> {
         for leaf in &mut self.leaves {
             if let Some(pending) = leaf.as_any_mut().downcast_mut::<PendingAction>() {
-                return pending.queue(intent, expectation);
+                return pending.queue(goal_ref, intent, expectation);
             }
         }
         Err(ContractError::MissingRefs {
             field: "cluster.leaves.pending-action",
         })
+    }
+
+    /// 丢掉某个目标名下尚未推进的动作（§6 第 9 步）。
+    pub fn release_goal(&mut self, goal_ref: &GoalId) -> usize {
+        for leaf in &mut self.leaves {
+            if let Some(pending) = leaf.as_any_mut().downcast_mut::<PendingAction>() {
+                return pending.release_goal(goal_ref);
+            }
+        }
+        0
+    }
+
+    /// 某个目标名下还有几个待推进的动作。
+    pub fn pending_actions_for(&self, goal_ref: &GoalId) -> usize {
+        self.leaves
+            .iter()
+            .filter_map(|leaf| leaf.as_any().downcast_ref::<PendingAction>())
+            .map(|pending| pending.pending_for(goal_ref))
+            .sum()
     }
 
     /// 取走一个已经有过结论的动作。
@@ -155,6 +175,51 @@ impl DesktopAndFilesCluster {
             .filter_map(|leaf| leaf.as_any().downcast_ref::<PendingAction>())
             .map(PendingAction::pending)
             .sum()
+    }
+}
+
+/// 候选在簇内的合并键（§13.1）。
+///
+/// 判据是"是不是同一件事"：同一个对象的观测请求、同一个工具配同一份参数、同一条命题配
+/// 同一批证据、同一次动作。分隔符用 `\u{1f}` 而不是逗号，免得 `"ab" + "c"` 与 `"a" + "bc"`
+/// 撞在一起。
+fn merge_key(candidate: &Candidate) -> String {
+    match candidate {
+        Candidate::RequestObservation { subject_ref, .. } => {
+            format!("observation\u{1f}{subject_ref}")
+        }
+        Candidate::Claim {
+            statement,
+            evidence_refs,
+        } => {
+            let mut refs: Vec<String> = evidence_refs.iter().map(ToString::to_string).collect();
+            refs.sort_unstable();
+            format!("claim\u{1f}{statement}\u{1f}{}", refs.join("\u{1f}"))
+        }
+        Candidate::RequestTool {
+            tool_id,
+            parameters,
+        } => format!("tool\u{1f}{tool_id}\u{1f}{parameters}"),
+        Candidate::RequestAction { intent } => format!("action\u{1f}{}", intent.action_id),
+    }
+}
+
+/// 把一条重复候选并进已有那条。
+///
+/// 观测请求的**理由并起来**而不是丢掉。§13.1 说"低价值重复提案可合并"，但"为什么要它"
+/// 是判断价值时唯一有内容的东西——把它丢了，合并之后就只剩一条光秃秃的请求，而两个子单元
+/// 各自看到的缺口也不见了。
+fn merge_into(existing: &mut Candidate, incoming: &Candidate) {
+    if let (
+        Candidate::RequestObservation { reason, .. },
+        Candidate::RequestObservation {
+            reason: extra, ..
+        },
+    ) = (&mut *existing, incoming)
+        && !reason.contains(extra.as_str())
+    {
+        reason.push('；');
+        reason.push_str(extra);
     }
 }
 
@@ -197,10 +262,30 @@ impl CognitiveUnit for DesktopAndFilesCluster {
         let mut merged = CandidateSet::empty();
         for leaf in &self.leaves {
             let set = leaf.propose(at)?;
-            // §4.2：逐类**原样合并**。尤其是冲突与未决——它们必须原封不动地出现在父单元的
-            // 输出里。在这里挑一个胜者、或者丢掉重复的未决问题，就是那句"不能只拼接子摘要
-            // 或用多数意见覆盖矛盾"要禁的事。
-            merged.candidates.extend(set.candidates);
+            // §13.1："每个能力簇**先合并重复来源**，再向上提交。"
+            //
+            // 合并的判据是"是不是同一件事"，而不是"两条候选是不是逐字节相同"。后者在当前这些
+            // 叶子上永远不会命中——两个子单元就算要的是同一个对象的观测，理由的措辞也不同——
+            // 于是一段永远不会执行的去重代码，看起来和没有去重一模一样。
+            //
+            // 证据类的候选**不**归并到一条上。把不同来源的证据并到一条候选里，会让它看起来
+            // 得到了更多支持，而"到底是谁找到的"就说不清了；§4.2 要求父单元的输出里带着那份
+            // 归属，而现在的 `Candidate` 还没有承载它。所以只有命题与证据集合都一致时才合并。
+            for candidate in set.candidates {
+                let key = merge_key(&candidate);
+                match merged
+                    .candidates
+                    .iter_mut()
+                    .find(|existing| merge_key(existing) == key)
+                {
+                    None => merged.candidates.push(candidate),
+                    Some(existing) => merge_into(existing, &candidate),
+                }
+            }
+            // §4.2：冲突与未决**原样合并**。它们必须原封不动地出现在父单元的输出里——
+            // 在这里挑一个胜者、或者丢掉重复的未决问题，就是那句"不能只拼接子摘要或用多数
+            // 意见覆盖矛盾"要禁的事。注意它们连去重都不做：两个子单元对同一对象提出同一个
+            // 未决问题，恰恰说明那个缺口是共通的。
             merged.conflicts.extend(set.conflicts);
             merged.unresolved.extend(set.unresolved);
         }

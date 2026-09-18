@@ -1073,6 +1073,89 @@ fn every_refusal_and_issuance_lands_in_the_audit_ledger() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// §6 第 9 步的收尾
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_write_without_a_goal_is_refused() {
+    // 动作必须归属于一个目标——既因为那是它的存在理由，也因为那是核对权限范围的依据。
+    // 没有目标就没有依据，而没有依据不等于没有风险。
+    let mut subject = subject_without_preconditions();
+    assert!(
+        subject.request_write(WATCHED, "没人要的内容", at(2)).is_err(),
+        "没有目标时不该收下这次写入"
+    );
+    assert_eq!(subject.pending_actions(), 0);
+}
+
+#[test]
+fn abandoning_a_goal_drops_the_writes_it_was_waiting_on() {
+    // §6 第 9 步："结束后能力簇解散临时队伍，单元转温/冷态，**计划外动作不继续后台执行**。"
+    //
+    // 这在动作没有绑定目标的时候是真的会发生：它留在队列里，下一轮换一个目标照样能被选中、
+    // 核对、执行。而"用户改主意了"正是最不该让一个写入继续发生的场合。
+    let mut subject = subject_without_preconditions();
+    let goal_id = delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject.request_write(WATCHED, "摘要内容", at(2)).expect("投递");
+    grant_approval(&mut subject, "approval:drop", ActionLevel::A2, 1, at(2));
+    assert_eq!(subject.pending_actions_for(&goal_id), 1);
+
+    subject.abandon(&goal_id, at(3)).expect("放弃目标");
+
+    assert_eq!(
+        subject.pending_actions(),
+        0,
+        "放弃目标应当连同它的待推进动作一起清掉"
+    );
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(4))
+        .expect("跑一轮");
+    assert!(
+        matches!(report.outcome, RoundOutcome::Finished { .. }),
+        "没有目标了，那次写入也不该再被执行：{:?}",
+        report.outcome
+    );
+    assert_eq!(
+        subject.store().action_count().expect("动作账"),
+        0,
+        "那次写入不该发生"
+    );
+}
+
+#[test]
+fn a_finished_goals_write_does_not_run_under_another_goal() {
+    // 更贴近现实的一种：用户改了主意去做别的事，而旧目标名下那次写入还挂在队列里。
+    // 新任务照常推进，但不该顺手把旧任务的写入做掉。
+    let mut subject = subject_without_preconditions();
+    let first = delegate_an_a2_goal(&mut subject);
+    subject.request_write(WATCHED, "旧任务的内容", at(2)).expect("投递");
+    grant_approval(&mut subject, "approval:crosstalk", ActionLevel::A2, 1, at(2));
+    subject.abandon(&first, at(3)).expect("改变主意");
+
+    let second = delegate_an_a2_goal(&mut subject);
+    assert_ne!(first, second, "这是另一个任务");
+
+    // 新任务自己有事可做（它对守望对象还一无所知，会去观测），而旧任务的写入不在其中。
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(4))
+        .expect("跑一轮");
+    assert!(
+        report.selected.is_some(),
+        "新任务应当照常推进：{:?}",
+        report.outcome
+    );
+    assert_eq!(
+        subject.store().action_count().expect("动作账"),
+        0,
+        "旧任务那次写入不该在新任务名下被执行"
+    );
+    assert_eq!(subject.pending_actions_for(&second), 0);
+}
+
 #[test]
 fn the_verdict_pattern_does_not_depend_on_which_run_it_is() {
     // §13：固定策略与相同动作序列的引擎可复现。

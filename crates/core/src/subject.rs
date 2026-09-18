@@ -28,6 +28,8 @@
 //! 3. **咨询模型产出的是候选，不是动作。** §3.1："它提出假设和动作，不独占信念、记忆、
 //!    权限、预算或执行权。" 从候选到副作用之间还有 L4 与执行许可两道关。
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use soca_contracts::{
     ActionId, ActionIntent, ActionLevel, ActionOutcomeSlice, Approval, BeliefSummary, BudgetRef,
@@ -274,6 +276,12 @@ pub struct Subject {
     observed: Vec<EvidenceSlice>,
     /// 已经跑过的轮数（§6 的闭环计数）。
     rounds: u64,
+    /// 每个待推进动作归属于哪个目标。
+    ///
+    /// 没有它的话，为 A 目标投递的写入会在 B 目标下被核对与执行——权限范围按**当前**目标
+    /// 算，而当前目标是 B。两者的检查都会通过，但结果仍然是错的：B 这个任务不该执行 A 的动作，
+    /// 而用户放弃 A 的意图更不该在别处生效。
+    action_goals: BTreeMap<String, GoalId>,
     /// 本次会话里已经写进记忆的结论，键是 [`derivation_seed`]。
     ///
     /// 这是 §6 第 2 步那个"路由器"的雏形。那句话是"按任务、权限、来源和预算**选择少数
@@ -334,6 +342,7 @@ impl Subject {
             egress: EgressPolicy::Strict,
             observed: Vec::new(),
             rounds: 0,
+            action_goals: BTreeMap::new(),
             handled_claims: Vec::new(),
             policy: PolicyAgent::default(),
         })
@@ -412,7 +421,28 @@ impl Subject {
     pub fn abandon(&mut self, goal_id: &GoalId, at: WallClock) -> Result<usize, CoreError> {
         let abandoned = self.goals.abandon(goal_id)?;
         self.store.save_goal_stack(&self.goals, at)?;
+        // §6 第 9 步：结束之后，这个目标名下尚未推进的动作不该继续等着——一次已经不被想要的
+        // 写入不该在下一个任务里悄悄发生。`abandon` 可能连带放弃了子目标，所以按"所有已结束的
+        // 目标"扫一遍，而不是只清传入的那一个。
+        self.drop_actions_for_finished_goals();
         Ok(abandoned)
+    }
+
+    /// 清掉所有已结束目标名下的待推进动作。
+    ///
+    /// 这是**急切**的一侧。[`Subject::select_filtered`] 里的那道过滤是**兜底**的一侧：
+    /// 目标可能因为别的原因进入终态（主目标达成、用户撤回），而那些路径不一定经过本方法。
+    /// 两处都做，是因为漏掉一次急切清理的后果是"一个不该发生的写悄悄发生了"。
+    fn drop_actions_for_finished_goals(&mut self) {
+        let finished: Vec<GoalId> = self
+            .goals
+            .iter()
+            .filter(|goal| goal.state.is_terminal())
+            .map(|goal| goal.goal_id.clone())
+            .collect();
+        for goal_id in finished {
+            self.drop_actions_for(&goal_id);
+        }
     }
 
     /// §6 第 1–3 步：读取环境状态，写成事件，并喂给能力簇。
@@ -602,6 +632,15 @@ impl Subject {
         content: &str,
         _at: WallClock,
     ) -> Result<ActionId, CoreError> {
+        // 动作必须归属于一个目标。这既是它的存在理由（没有目标就不会有人要写这份东西），
+        // 也是它被核对权限范围时的依据——用的是**它自己那个目标**的范围，而不是碰巧轮到的
+        // 那个目标的范围。
+        let Some(goal_id) = self.next_open_goal() else {
+            return Err(CoreError::UnresolvedSubject(
+                "没有可推进的目标，这次动作无处归属".to_string(),
+            ));
+        };
+
         let path = subject_ref
             .strip_prefix("file:")
             .ok_or_else(|| CoreError::UnresolvedSubject(subject_ref.to_string()))?;
@@ -630,13 +669,30 @@ impl Subject {
         )?;
 
         self.cluster.queue_action(
+            goal_id.clone(),
             intent,
             Expectation::VersionEquals {
                 subject_ref: subject_ref.to_string(),
                 expected: Sha256Hex::of_bytes(content.as_bytes()).to_string(),
             },
         )?;
+        self.action_goals.insert(action_id.to_string(), goal_id);
         Ok(action_id)
+    }
+
+    /// 某个目标名下还有几个待推进的动作。
+    pub fn pending_actions_for(&self, goal_id: &GoalId) -> usize {
+        self.cluster.pending_actions_for(goal_id)
+    }
+
+    /// 丢掉某个目标名下尚未推进的动作。返回丢掉几个。
+    ///
+    /// §6 第 9 步的"计划外动作不继续后台执行"。放弃一个目标时调用它——一次已经不被想要的
+    /// 写入不该在下一个任务里悄悄发生。
+    pub fn drop_actions_for(&mut self, goal_id: &GoalId) -> usize {
+        self.action_goals
+            .retain(|_, bound| bound != goal_id);
+        self.cluster.release_goal(goal_id)
     }
 
     /// 还有几个动作等待推进。
@@ -684,7 +740,7 @@ impl Subject {
 
         let outcome = match selection.outcome {
             SelectionOutcome::Selected { index } => {
-                let step = self.advance(&candidates.candidates[index], &goal_id, at)?;
+                let step = self.advance(&candidates.candidates[index], at)?;
                 // 推进过的结论记下来，下一轮不再重复推它（§6 第 2 步的路由雏形）。
                 if let Candidate::Claim {
                     statement,
@@ -712,12 +768,7 @@ impl Subject {
     }
 
     /// 把选中的一条候选推进一步。
-    fn advance(
-        &mut self,
-        candidate: &Candidate,
-        goal_id: &GoalId,
-        at: WallClock,
-    ) -> Result<AdvanceStep, CoreError> {
+    fn advance(&mut self, candidate: &Candidate, at: WallClock) -> Result<AdvanceStep, CoreError> {
         match candidate {
             Candidate::RequestObservation { subject_ref, .. } => {
                 // 观测的数据类别取 personal：**保守的那一档**。低估类别会让本该留在本地的
@@ -780,7 +831,7 @@ impl Subject {
                     recorded,
                 })
             }
-            Candidate::RequestAction { intent } => self.request_action(intent, goal_id, at),
+            Candidate::RequestAction { intent } => self.request_action(intent, at),
             other => Ok(AdvanceStep::Unsupported {
                 candidate_kind: other.kind().as_str().to_string(),
                 reason: "这条通路尚未实现".to_string(),
@@ -796,10 +847,24 @@ impl Subject {
     fn request_action(
         &mut self,
         intent: &ActionIntent,
-        goal_id: &GoalId,
         at: WallClock,
     ) -> Result<AdvanceStep, CoreError> {
-        let Some(goal) = self.goals.goal(goal_id).cloned() else {
+        // 用**动作自己那个目标**的范围与预算，而不是碰巧轮到的那个目标。
+        //
+        // 差别不是形式上的：拿当前目标的范围去核对别的目标名下的动作，在两者范围不同时
+        // 会得出错误结论——宽的那个会放行本该被拒的动作，窄的那个会拒掉本可执行的动作。
+        // `select_filtered` 保证了这里能查到，查不到就说明有别的路径绕过了归属登记。
+        let Some(goal_id) = self
+            .action_goals
+            .get(intent.action_id.as_str())
+            .cloned()
+        else {
+            return Ok(AdvanceStep::Unsupported {
+                candidate_kind: "request_action".to_string(),
+                reason: "这次动作没有归属的目标，无法核对权限范围".to_string(),
+            });
+        };
+        let Some(goal) = self.goals.goal(&goal_id).cloned() else {
             return Ok(AdvanceStep::Unsupported {
                 candidate_kind: "request_action".to_string(),
                 reason: format!("目标 {goal_id} 不在栈上，无法核对权限范围"),
@@ -851,10 +916,11 @@ impl Subject {
                 // 去"绕路"，而绕路正是审批要挡住的东西。
                 if self
                     .goals
-                    .goal(goal_id)
+                    .goal(&goal_id)
                     .is_some_and(|goal| goal.state == GoalState::Active)
                 {
-                    self.goals.transition(goal_id, GoalState::WaitingApproval)?;
+                    self.goals
+                        .transition(&goal_id, GoalState::WaitingApproval)?;
                 }
                 Ok(AdvanceStep::NeedsApproval {
                     level: level.as_str().to_string(),
@@ -1047,6 +1113,19 @@ impl Subject {
             } => !self
                 .handled_claims
                 .contains(&derivation_seed(statement, evidence_refs)),
+            // 动作只属于提出它的那个目标，而且那个目标必须还活着。
+            //
+            // 这是第二道闸：第一道在目标结束时的 `drop_actions_for`。两处都做，是因为
+            // "清掉队列"发生在目标迁移的那一刻，"不提议"发生在之后的每一轮——只做第一道的话，
+            // 任何一次漏掉的迁移都会变成一个悄无声息的执行。
+            //
+            // 认不出归属的动作同样被挡下。**失败关闭**：一个不知道属于哪个任务的动作，
+            // 我们没有依据核对它的权限范围，而没有依据不等于没有风险。
+            Candidate::RequestAction { intent } => self
+                .action_goals
+                .get(intent.action_id.as_str())
+                .and_then(|goal_id| self.goals.goal(goal_id))
+                .is_some_and(|goal| !goal.state.is_terminal()),
             _ => true,
         });
 

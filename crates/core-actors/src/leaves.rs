@@ -20,10 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use soca_contracts::{
     ActionId, ActionIntent, BlobRef, BudgetRef, Candidate, CandidateSet, CapabilityPolicyRef,
-    CognitiveUnit, ContractError, DomainId, Envelope, EvidenceRef, Expectation, ModelProfileRef,
-    Observation, OutcomeVerified, PayloadRef, Prediction, PredictionRef, Scope, Sha256Hex,
-    StrategyVersion, TaskContractVersion, TimeWindow, Uncertainty, UnitId, UnitKind, UnitSnapshot,
-    UnitState, Unresolved, Verdict, WallClock, SCHEMA_VERSION,
+    CognitiveUnit, ContractError, DomainId, Envelope, EvidenceRef, Expectation, GoalId,
+    ModelProfileRef, Observation, OutcomeVerified, PayloadRef, Prediction, PredictionRef, Scope,
+    Sha256Hex, StrategyVersion, TaskContractVersion, TimeWindow, Uncertainty, UnitId, UnitKind,
+    UnitSnapshot, UnitState, Unresolved, Verdict, WallClock, SCHEMA_VERSION,
 };
 
 /// 从 §7.1 公共信封中取出公开观测。
@@ -598,9 +598,15 @@ impl CognitiveUnit for PostconditionVerify {
 // 待推进的动作
 // ---------------------------------------------------------------------------
 
-/// 一个待推进的动作，连同它预期的后果。
+/// 一个待推进的动作，连同它预期的后果与它所属的目标。
 #[derive(Debug)]
 struct QueuedAction {
+    /// 提出这次动作的目标。
+    ///
+    /// 没有它的话，一个为 A 目标投递的写入会在 B 目标下被执行——因为权限范围是按**当前**
+    /// 目标核对的，而不是按提出它的那个目标。两者都能通过检查，但后者是错的：B 这个任务
+    /// 不该执行 A 的动作，而用户放弃 A 的意图更不该在别处生效。
+    goal_ref: GoalId,
     intent: ActionIntent,
     expectation: Expectation,
 }
@@ -648,6 +654,7 @@ impl PendingAction {
     /// 那一次具体动作，改期望说明改的其实是另一次动作，那应该用一个新的标识。
     pub fn queue(
         &mut self,
+        goal_ref: GoalId,
         intent: ActionIntent,
         expectation: Expectation,
     ) -> Result<(), ContractError> {
@@ -659,11 +666,35 @@ impl PendingAction {
             return Ok(());
         }
         self.queued.push(QueuedAction {
+            goal_ref,
             intent,
             expectation,
         });
         self.core.note_belief_change();
         Ok(())
+    }
+
+    /// 丢掉某个目标名下尚未推进的动作。返回丢掉几个。
+    ///
+    /// §6 第 9 步："结束后能力簇解散临时队伍，单元转温/冷态，**计划外动作不继续后台执行**。"
+    /// 目标结束（达成或放弃）之后，它名下那些还没来得及做的动作就不该再等了——它们的存在
+    /// 理由是那个目标，而那个目标已经不在了。
+    pub fn release_goal(&mut self, goal_ref: &GoalId) -> usize {
+        let before = self.queued.len();
+        self.queued.retain(|queued| &queued.goal_ref != goal_ref);
+        let dropped = before - self.queued.len();
+        if dropped > 0 {
+            self.core.note_belief_change();
+        }
+        dropped
+    }
+
+    /// 某个目标名下还有几个待推进的动作。
+    pub fn pending_for(&self, goal_ref: &GoalId) -> usize {
+        self.queued
+            .iter()
+            .filter(|queued| &queued.goal_ref == goal_ref)
+            .count()
     }
 
     /// 还有几个待推进。

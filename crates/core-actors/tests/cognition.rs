@@ -348,6 +348,43 @@ fn a_cluster_is_a_cognitive_unit_like_a_leaf() {
 }
 
 #[test]
+fn a_cluster_merges_duplicate_observation_requests_before_reporting_up() {
+    // §13.1："每个能力簇**先合并重复来源**，再向上提交。"
+    //
+    // 让两条前提都指向同一个对象：文件版本那个槽在没观测过时会请求观测它，动作前提那个槽
+    // 也会。去一次就够了——两次请求同一个对象，不会把世界问出两个答案来。
+    let cluster = DesktopAndFilesCluster::new(
+        WATCHED,
+        vec![Precondition::new("这个文件已经看过", WATCHED)],
+    )
+    .expect("装配能力簇");
+
+    let set = cluster.propose(at(0)).expect("提出候选");
+    let requests: Vec<&Candidate> = set
+        .candidates
+        .iter()
+        .filter(|candidate| matches!(candidate, Candidate::RequestObservation { .. }))
+        .collect();
+    assert_eq!(
+        requests.len(),
+        1,
+        "同一个对象的观测请求只该提一次：{:?}",
+        set.candidates
+    );
+
+    // 理由是**并起来**的，不是丢掉的：§13.1 允许合并低价值重复提案，但"为什么要它"
+    // 恰恰是判断价值时唯一有内容的东西。
+    let Candidate::RequestObservation { reason, .. } = requests[0] else {
+        unreachable!("上面已经筛过");
+    };
+    assert!(reason.contains("前提"), "动作前提槽的理由应当保留：{reason}");
+    assert!(
+        reason.contains("尚无该对象的任何观测"),
+        "文件版本槽的理由也应当保留：{reason}"
+    );
+}
+
+#[test]
 fn a_cluster_asks_for_observations_before_it_has_evidence() {
     let cluster = cluster();
     let set = cluster.propose(at(0)).expect("提出候选");
