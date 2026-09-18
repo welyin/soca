@@ -89,7 +89,7 @@ pub use crate::ids::{
 };
 pub use crate::memory::{MemoryEntry, MemoryKind, MemoryStatus};
 pub use crate::policy::{
-    ActionLevel, Approval, ApprovalRequirement, DataClass, EgressPolicy, EgressVerdict,
+    ActionLevel, Approval, ApprovalRequirement, DataClass, EgressPolicy, EgressVerdict, GrantScope,
     PermissionScope,
 };
 pub use crate::selection::{

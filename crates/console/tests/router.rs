@@ -795,11 +795,23 @@ fn the_console_walks_a_revocation_from_grant_to_invalidation() {
     );
     assert_eq!(refused.status, 403, "{}", refused.body);
 
-    let granted = json(&call(
+    // 授予时必须给出范围（§12.1 的范围限定授权）。
+    let missing_scope = call(
         &mut subject,
         "POST",
         "/api/grant",
         &body(json!({"capability": "cap:read-selected-folder"})),
+    );
+    assert_eq!(missing_scope.status, 400, "范围是必填的：{}", missing_scope.body);
+
+    let granted = json(&call(
+        &mut subject,
+        "POST",
+        "/api/grant",
+        &body(json!({
+            "capability": "cap:read-selected-folder",
+            "prefix": "file:D:\\资料\\摘要"
+        })),
     ));
     assert_eq!(granted["was_new"], true);
     assert_eq!(

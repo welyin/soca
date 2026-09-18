@@ -220,6 +220,90 @@ impl PermissionScope {
     }
 }
 
+/// 一项能力授权的**范围**（§12.1）。
+///
+/// §12.1 给 A1 的放行要求是"**范围限定**授权"，给 A2 的是"在**指定目录**生成/重命名文件"。
+/// 两句都指着一件事：授权不只是"允许哪一类动作"，还包括"允许在哪些对象上"。
+///
+/// 没有它的话，`cap:read-selected-folder` 只是一个**名字**——它能表达"读文件是允许的"，
+/// 却表达不出"只允许读那一个目录"。而 §17 的执行边界验收里明确列着"路径逃逸"必须被挡住。
+///
+/// 匹配是**逐段的**，不是字符串前缀：`D:\资料\摘要-backup\a.txt` 以 `D:\资料\摘要` 开头，
+/// 但它是另一个目录。只做字符串前缀比较会把它放进来，而那是这类判定最经典的错法。
+///
+/// 含 `..` 段的对象引用一律拒绝。这是一条**词法**检查，它不解析符号链接与目录联接——
+/// 在模拟 OS 里这就够了（那里没有链接），而在真实文件系统上绕过它的办法确实存在。
+/// 这一点写在这里，而不是留着让人以为它是完整的。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantScope {
+    /// 允许触及的资源前缀。空表示不按路径限定。
+    ///
+    /// 空不是"忘了填"，它有一个正当用途：**"对外发送"那一类动作的对象不是一个路径**，
+    /// 它的范围由审批划定，而不是由前缀划定（§12.1 的 A3）。给这类能力硬塞一个路径前缀，
+    /// 只会让真正该看的审批变成配角。
+    pub prefixes: Vec<ResourceScope>,
+}
+
+impl GrantScope {
+    /// 不按路径限定。
+    pub fn anywhere() -> Self {
+        Self {
+            prefixes: Vec::new(),
+        }
+    }
+
+    /// 限定在某个前缀之下。
+    pub fn under(prefix: impl Into<String>) -> Result<Self, ContractError> {
+        Ok(Self {
+            prefixes: vec![ResourceScope::new(prefix)?],
+        })
+    }
+
+    /// 再放开一层（多给一个可触及的前缀）。
+    pub fn and_under(mut self, prefix: impl Into<String>) -> Result<Self, ContractError> {
+        self.prefixes.push(ResourceScope::new(prefix)?);
+        Ok(self)
+    }
+
+    /// 是否不按路径限定。
+    pub fn is_unbounded(&self) -> bool {
+        self.prefixes.is_empty()
+    }
+
+    /// 这个对象是否落在范围内。
+    pub fn covers(&self, object_scope: &ResourceScope) -> bool {
+        if self.is_unbounded() {
+            return true;
+        }
+        let candidate = object_scope.as_str();
+        if has_traversal(candidate) {
+            return false;
+        }
+        self.prefixes
+            .iter()
+            .any(|prefix| is_under(candidate, prefix.as_str()))
+    }
+}
+
+/// 路径里是否有一个 `..` 段。
+fn has_traversal(raw: &str) -> bool {
+    raw.split(['\\', '/']).any(|segment| segment == "..")
+}
+
+/// `candidate` 是否就在 `prefix` 之下（含它自己）。
+fn is_under(candidate: &str, prefix: &str) -> bool {
+    if candidate == prefix {
+        return true;
+    }
+    let Some(rest) = candidate.strip_prefix(prefix) else {
+        return false;
+    };
+    // 前缀之后必须紧跟一个分隔符。少了这一条，`D:\资料\摘要-backup` 会被 `D:\资料\摘要` 放行，
+    // 而它是另一个目录——这一行就是"逐段匹配"与"字符串前缀比较"的全部差别。
+    rest.starts_with('\\') || rest.starts_with('/')
+}
+
 /// 一次明确的人工批准（§12.1、§12.2）。
 ///
 /// §12.1 对 A2 要求"预览、目标版本核对、备份/撤销**或**每任务明确批准"，对 A3 要求

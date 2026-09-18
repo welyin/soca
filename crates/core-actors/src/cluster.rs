@@ -32,6 +32,13 @@ use crate::leaves::{
 pub struct DesktopAndFilesCluster {
     unit_id: UnitId,
     scope: Scope,
+    /// 守望的对象。
+    ///
+    /// 存下来而不是只传给 `FileVersion`，是因为它同时还是**授权范围的来源**：
+    /// §12.1 给 A2 的原文是"在**指定目录**生成/重命名文件"，而那个"指定目录"就是它所在的那一层。
+    /// 让簇记住它，`authorized_root` 才有依据；否则授权范围只能由调用方另给一份，
+    /// 而两份东西迟早在某次改动里分叉——分叉的表现是"授权的是这个目录，写的是那个目录"。
+    watched: String,
     strategy_version: StrategyVersion,
     leaves: Vec<Box<dyn CognitiveUnit>>,
     workspace: Workspace,
@@ -65,12 +72,14 @@ impl DesktopAndFilesCluster {
         watched: impl Into<String>,
         preconditions: Vec<Precondition>,
     ) -> Result<Self, ContractError> {
+        let watched = watched.into();
         Ok(Self {
             unit_id: UnitId::new("unit:cluster:desktop-and-files")?,
             scope: Scope {
                 domain: DomainId::new("desktop-and-files")?,
                 task_contract: TaskContractVersion::new("file-write-v1")?,
             },
+            watched: watched.clone(),
             strategy_version: StrategyVersion::new("cluster-aggregate-v1")?,
             leaves: vec![
                 Box::new(FileVersion::new(watched)?),
@@ -105,6 +114,21 @@ impl DesktopAndFilesCluster {
     /// 台账里已经撤回的证据条数。
     pub fn retracted_evidence(&self) -> usize {
         self.ledger.retracted_count()
+    }
+
+    /// 授权根目录：守望对象所在的那一层（§12.1 的"指定目录"）。
+    ///
+    /// 守望对象本身是一个 `file:` 引用；它的父路径就是这次任务被授权触及的那一层。
+    /// 切不出来时返回 `None`——那意味着守望对象是一个不带路径的引用，此时**没有**可推断的
+    /// 授权范围，调用方应当按"不限定"处理而不是按"随便哪个目录"处理。
+    pub fn authorized_root(&self) -> Option<String> {
+        let (directory, _) = self.watched.rsplit_once(['\\', '/'])?;
+        // 只留下一个盘符或一个根斜杠时不算"某一层"：那等于授权整个磁盘。
+        // 切到这里说明守望对象的粒度不对，而不是说明授权范围很大。
+        if directory.is_empty() || directory.ends_with(':') {
+            return None;
+        }
+        Some(directory.to_string())
     }
 
     /// 证据台账（只读）。

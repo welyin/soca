@@ -245,13 +245,19 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
     </div>
     <div class="row">
       <input id="capability" type="text" value="cap:read-selected-folder" style="flex:1">
+      <input id="capability-prefix" type="text" placeholder="授权范围前缀，例如 file:D:\资料\摘要" style="flex:1">
       <button id="grant-cap" class="ghost">授予</button>
       <button id="revoke-cap">撤回</button>
     </div>
     <div class="hint">
-      撤回走的是「事件 → 证据引用 → 记忆」这条链：只有**引用**了该授权下事件的那些记忆会失效，
-      别的授权名下的记忆不受影响。内容对象不在撤回范围内——它们不携带能力归属，
-      而猜一个归属然后删掉比不删更糟。
+      <b>范围是必填的。</b>§12.1 给 A1 的放行要求是"<b>范围限定</b>授权"——只填能力名，
+      表达不出"只允许那一个目录"。匹配是逐段的：<code>D:\资料\摘要-backup</code> 以
+      <code>D:\资料\摘要</code> 开头，但它是另一个目录，不该被放行。
+    </div>
+    <div class="hint">
+      撤回走的是「事件 → 证据引用 → 记忆」这条链：引用该授权下事件的记忆会失效，同时
+      能力簇手里那些证据也**不能再用来下结论**（§7.2 的"仍可访问"）。别的授权名下的记忆
+      不受影响。内容对象不在撤回范围内——它们不携带能力归属，而猜一个归属然后删掉比不删更糟。
     </div>
     <pre id="revoke-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
@@ -549,8 +555,14 @@ $("revoke-cap").onclick = async function () {
 async function capabilityAction(path, label) {
   const capability = $("capability").value.trim();
   if (!capability) { log("先填一个能力策略标识", "err"); return; }
+  const prefix = $("capability-prefix").value.trim();
+  // 授予时必须给出范围：给默认值会让最省事的那次调用恰好拿到最宽的授权。
+  if (path === "grant" && !prefix) {
+    log("授予时必须填范围前缀（§12.1 的范围限定授权）", "err");
+    return;
+  }
   try {
-    const result = await api(path, { capability: capability });
+    const result = await api(path, { capability: capability, prefix: prefix });
     $("revoke-out").textContent = JSON.stringify(result, null, 2);
     if (path === "revoke") {
       log(

@@ -11,8 +11,8 @@
 
 use soca_contracts::{
     ActionLevel, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
-    GoalBudget, ModelBackend, ModelBudget, ModelVersion, PermissionScope, SubjectId, UserChannel,
-    VerificationKind, WallClock,
+    GoalBudget, GrantScope, ModelBackend, ModelBudget, ModelVersion, PermissionScope, SubjectId,
+    UserChannel, VerificationKind, WallClock,
 };
 use soca_core::{ActionBroker, AdvanceStep, RoundOutcome, SimulatedOs, Subject};
 use soca_core_actors::DesktopAndFilesCluster;
@@ -122,7 +122,9 @@ fn regranting_lets_observations_resume() {
     assert!(subject.observe(WATCHED, DataClass::Personal, at(3)).is_err());
 
     assert!(
-        subject.grant_capability(cap(CAP_A), at(3)).expect("重新授予"),
+        subject
+            .grant_capability(cap(CAP_A), GrantScope::anywhere(), at(3))
+            .expect("重新授予"),
         "这是一次新的授予"
     );
     subject
@@ -201,7 +203,7 @@ fn revoking_one_capability_leaves_another_capabilitys_memories_alone() {
     let mut subject = subject();
     assert!(
         subject
-            .grant_capability(cap(CAP_B), at(0))
+            .grant_capability(cap(CAP_B), GrantScope::anywhere(), at(0))
             .expect("授予 B")
     );
 

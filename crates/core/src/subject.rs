@@ -35,8 +35,8 @@ use soca_contracts::{
     ActionId, ActionIntent, ActionLevel, ActionOutcomeSlice, Approval, BeliefSummary, BudgetRef,
     Candidate, CandidateSet, CapabilityPolicyRef, CapabilitySlice, CognitiveUnit, ContextBundle,
     ContractError, DataClass, DerivationKind, EgressPolicy, Envelope, EventId, EvidenceRef,
-    EvidenceSlice, Expectation, ExplorationQuota,
-    GoalBudget, GoalId, GoalStack, GoalState, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
+    EvidenceSlice, Expectation, ExplorationQuota, GrantScope, GoalBudget, GoalId, GoalStack,
+    GoalState, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
     MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
     OutputSchema, PayloadRef, PermitId, PermissionScope, PredictionRef, Provenance, ResourceCost,
     ResourceScope, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId, TaskId,
@@ -395,6 +395,19 @@ impl Subject {
             Some(path) => ContentStore::open(path.with_extension("content"))?,
             None => ContentStore::temporary()?,
         };
+
+        // §12.1 的"范围限定授权"。把默认能力收窄到守望对象所在的那一层。
+        //
+        // 为什么由主体来收窄而不是 `PolicyAgent::default()` 自己带一个范围：策略代理不知道
+        // 这次任务守望哪个目录，而替它猜一个（"当前目录"？"用户主目录"？）会猜出一次
+        // **比调用方以为的更宽**的授权——那正是最难发现的一类越权。
+        // 收窄是一次显式的、有依据的动作，它属于知道守望对象是谁的那一层。
+        let mut policy = PolicyAgent::default();
+        if let Some(root) = cluster.authorized_root() {
+            let capability = policy.default_capability().clone();
+            policy.grant(capability, GrantScope::under(root)?);
+        }
+
         Ok(Self {
             store,
             broker,
@@ -413,7 +426,7 @@ impl Subject {
             content,
             conversation_retention: ContentRetention::Days(CONVERSATION_RETENTION_DAYS),
             handled_claims: Vec::new(),
-            policy: PolicyAgent::default(),
+            policy,
         })
     }
 
@@ -1327,22 +1340,34 @@ impl Subject {
         }
     }
 
-    /// 授予一项能力策略（§12.1）。
+    /// 授予一项能力策略，并给出它的范围（§12.1）。
+    ///
+    /// 范围是**必填**的。给一个默认值（比如"不限定"）会让最省事的那次调用恰好拿到最宽的
+    /// 授权，而"省事"和"更宽"之间不该有这种关系。
     pub fn grant_capability(
         &mut self,
         capability: CapabilityPolicyRef,
+        scope: GrantScope,
         at: WallClock,
     ) -> Result<bool, CoreError> {
-        let was_new = self.policy.grant(capability.clone());
-        if was_new {
-            self.store.audit(
-                at,
-                AuditCategory::CapabilityGranted,
-                capability.as_str(),
-                "granted",
-                "授予能力授权",
-            )?;
-        }
+        let describe = if scope.is_unbounded() {
+            "不按路径限定".to_string()
+        } else {
+            scope
+                .prefixes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        let was_new = self.policy.grant(capability.clone(), scope);
+        self.store.audit(
+            at,
+            AuditCategory::CapabilityGranted,
+            capability.as_str(),
+            "granted",
+            &format!("授予能力授权，范围：{describe}"),
+        )?;
         Ok(was_new)
     }
 

@@ -7,8 +7,8 @@
 use serde_json::{json, Value};
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota,
-    GoalBudget, GoalId, GoalState, MemoryId, PermissionScope, SelectionPolicy, Sha256Hex,
-    UserChannel, WallClock,
+    GoalBudget, GoalId, GoalState, GrantScope, MemoryId, PermissionScope, SelectionPolicy,
+    Sha256Hex, UserChannel, WallClock,
 };
 use soca_core::{CoreError, RetentionPolicy, RoundOutcome, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
@@ -323,11 +323,40 @@ fn grant_capability(subject: &mut Subject, request: &Request, at: WallClock) -> 
         Err(error) => return Response::text(400, error.to_string()),
     };
 
-    match subject.grant_capability(capability, at) {
+    // 范围是**必填**的。给一个默认值会让最省事的那次调用恰好拿到最宽的授权，而"省事"和
+    // "更宽"之间不该有这种关系——§12.1 那句"范围限定授权"里的范围，正是这里要填的东西。
+    let scope = match payload.get("prefix").and_then(Value::as_str) {
+        Some(prefix) => match GrantScope::under(prefix) {
+            Ok(scope) => scope,
+            Err(error) => return Response::text(400, error.to_string()),
+        },
+        None if payload.get("anywhere").and_then(Value::as_bool) == Some(true) => {
+            GrantScope::anywhere()
+        }
+        None => {
+            return Response::text(
+                400,
+                "缺少 prefix；要授予不按路径限定的授权，显式传 anywhere: true",
+            );
+        }
+    };
+    let described = if scope.is_unbounded() {
+        "不按路径限定".to_string()
+    } else {
+        scope
+            .prefixes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+
+    match subject.grant_capability(capability, scope, at) {
         Ok(was_new) => Response::json(
             200,
             &json!({
                 "capability": name,
+                "scope": described,
                 "was_new": was_new,
                 "granted": subject
                     .granted_capabilities()

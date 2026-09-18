@@ -24,11 +24,11 @@
 //! `Approval::covers` 那些错误全部归入 `NeedsApproval` 的原因：批准过期、次数用尽、
 //! 绑定了别的动作——它们的正确下一步都是"请针对这一次动作再批一次"。
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use soca_contracts::{
     ActionIntent, ActionLevel, Approval, ApprovalRequirement, BudgetRef, CapabilityPolicyRef,
-    ExecutionPermit, PermissionScope, PermitId, PolicyVersion, SubjectId, WallClock,
+    ExecutionPermit, GrantScope, PermissionScope, PermitId, PolicyVersion, SubjectId, WallClock,
 };
 
 /// 一份许可的默认有效期（秒）。
@@ -43,6 +43,19 @@ pub const DEFAULT_PERMIT_TTL_SECONDS: i64 = 60;
 /// 恒为 1。同一次动作的重复投递由动作账的去重负责（§7.3），不是靠许可的多次使用——
 /// 让许可可以用两次，等于把"重试"合法化成一条不需要核对目标状态的路径。
 const PERMIT_MAX_USES: u8 = 1;
+
+/// 把一份授权范围写成一句人能读的话。
+fn describe_scope(scope: &GrantScope) -> String {
+    if scope.is_unbounded() {
+        return "不按路径限定".to_string();
+    }
+    scope
+        .prefixes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("、")
+}
 
 /// 许可签发的判定结果（§12.1、§12.2）。
 #[derive(Clone, Debug, PartialEq)]
@@ -93,12 +106,16 @@ pub struct PolicyAgent {
     policy_version: PolicyVersion,
     /// 默认能力策略。用于"当前没有具体目标"时的观测——L0 总得有一个范围可依（§6 第 1 步）。
     default_capability: CapabilityPolicyRef,
-    /// 当前生效的能力授权（§12.1："范围限定授权，**撤回立即生效**"）。
+    /// 当前生效的能力授权（§12.1："范围限定授权，**撤回立即生效**"），以及各自的范围。
     ///
-    /// 用**集合**而不是一个布尔值，是因为授权的粒度是能力：撤回"读已选目录"不该连带撤掉
+    /// 用**映射**而不是一个布尔值，是因为授权的粒度是能力：撤回"读已选目录"不该连带撤掉
     /// "看授权窗口"。一个全局开关做不到这件事，而它最可能的后果是用户因为怕误伤而不敢撤回——
     /// 一个不敢用的撤回，等于没有撤回。
-    granted: BTreeSet<CapabilityPolicyRef>,
+    ///
+    /// 值是 [`GrantScope`] 而不是空，因为**光有"允许哪一类动作"还不是授权**。§12.1 给 A1 的
+    /// 放行要求是"**范围限定**授权"，给 A2 的是"在**指定目录**生成文件"——两句话里的范围
+    /// 都不是能力名能表达的。少了它，`cap:read-selected-folder` 就只是一个名字。
+    granted: BTreeMap<CapabilityPolicyRef, GrantScope>,
     permit_ttl_seconds: i64,
     /// `Some(reason)` 表示全局暂停。§12.1 末段要求暂停时先撤销尚未消费的执行授权
     /// 并停止外发；对**尚未签发**的许可，表现就是这里一律拒绝。
@@ -112,7 +129,12 @@ impl Default for PolicyAgent {
         Self {
             policy_version: PolicyVersion::new("policy-v1").expect("固定策略版本"),
             default_capability: default_capability.clone(),
-            granted: [default_capability].into_iter().collect(),
+            // 默认**不按路径限定**。这是一个刻意的初始状态：`PolicyAgent::default()` 不知道
+            // 这次任务守望的是哪个目录，而替它猜一个（比如"当前目录"）会猜出一次**比调用方
+            // 以为的更宽**的授权。收窄是调用方的事，见 `Subject::new`。
+            granted: [(default_capability, GrantScope::anywhere())]
+                .into_iter()
+                .collect(),
             permit_ttl_seconds: DEFAULT_PERMIT_TTL_SECONDS,
             paused: None,
         }
@@ -124,11 +146,15 @@ impl PolicyAgent {
     ///
     /// 初始授权就是**全部**生效的授权：给一个集合再让调用方自己往里加，会留下一个
     /// "构造完但还没授权"的窗口，而那个窗口里的拒绝看起来像故障。
-    pub fn new(policy_version: PolicyVersion, capability_policy_ref: CapabilityPolicyRef) -> Self {
+    pub fn new(
+        policy_version: PolicyVersion,
+        capability_policy_ref: CapabilityPolicyRef,
+        scope: GrantScope,
+    ) -> Self {
         Self {
             policy_version,
             default_capability: capability_policy_ref.clone(),
-            granted: [capability_policy_ref].into_iter().collect(),
+            granted: [(capability_policy_ref, scope)].into_iter().collect(),
             permit_ttl_seconds: DEFAULT_PERMIT_TTL_SECONDS,
             paused: None,
         }
@@ -146,29 +172,35 @@ impl PolicyAgent {
 
     /// 当前生效的全部授权，按标识排序。
     pub fn granted(&self) -> Vec<&CapabilityPolicyRef> {
-        self.granted.iter().collect()
+        self.granted.keys().collect()
     }
 
     /// 某项能力当前是否生效（§12.1）。
     pub fn is_granted(&self, capability: &CapabilityPolicyRef) -> bool {
-        self.granted.contains(capability)
+        self.granted.contains_key(capability)
     }
 
-    /// 授予一项能力。返回 `false` 表示此前已经授过。
+    /// 某项能力当前的范围。
+    pub fn grant_scope(&self, capability: &CapabilityPolicyRef) -> Option<&GrantScope> {
+        self.granted.get(capability)
+    }
+
+    /// 授予一项能力，并给出它的范围。返回 `false` 表示此前已经授过。
     ///
-    /// 授予是幂等的：重复授予不该被理解成"又批了一次"，而额度那类东西是靠次数算的，
-    /// 靠重复授予累加会让"用户点了两次"变成"可以两次"。
-    pub fn grant(&mut self, capability: CapabilityPolicyRef) -> bool {
-        self.granted.insert(capability)
+    /// 已经授过时**范围按新的来**：那不是"又批了一次"，而是"这次批的范围和上次不一样"——
+    /// 收窄或放宽都是调用方明确做出的动作。把旧范围留着，会让一次明确的范围调整毫无效果，
+    /// 而那种失败看不出来（授权看起来生效了，只是范围还是老的）。
+    pub fn grant(&mut self, capability: CapabilityPolicyRef, scope: GrantScope) -> bool {
+        self.granted.insert(capability, scope).is_none()
     }
 
     /// 撤回一项能力。返回 `false` 表示此前就不在授权内（幂等）。
     ///
     /// 撤回**只影响之后**。已经发生的观测不会因此消失——它们已经写在事件账上了，
-    /// 而"抹掉历史"不是撤回，那是篡改。让过去产生的记忆失效是另一件事，走
+    /// 而"抹掉历史"不是撤回，那是篡改。让过去产生的证据与记忆失效是另一件事，走
     /// `Subject::revoke_capability` 的失效传播。
     pub fn revoke(&mut self, capability: &CapabilityPolicyRef) -> bool {
-        self.granted.remove(capability)
+        self.granted.remove(capability).is_some()
     }
 
     /// 撤回全部授权。§12.1 末段的"全局暂停"之外，这是更强的一档。
@@ -258,12 +290,31 @@ impl PolicyAgent {
         // §12.1 的"范围限定授权，撤回立即生效"。撤回之后，这个能力名下不再签发任何许可——
         // 而这不是"运气不好"，它和等级超范围一样属于"再多批准也没用"的那一类：
         // 要恢复得先重新授予，不是就地补一次同意。
-        if !self.is_granted(&scope.capability_policy_ref) {
+        let Some(grant) = self.grant_scope(&scope.capability_policy_ref) else {
             return PermitDecision::Refused {
                 reason: format!(
                     "能力策略 {} 当前不在生效授权内（已撤回或从未授予）；\
                      范围限定授权撤回立即生效（§12.1）",
                     scope.capability_policy_ref
+                ),
+            };
+        };
+
+        // §12.1 那句"**范围限定**授权"的后半句。上一步回答"这一类动作允许吗"，
+        // 这一步回答"允许在哪些对象上"。
+        //
+        // 归入 `Refused` 而不是 `NeedsApproval`，与等级超范围同一个理由：范围是授权本身的
+        // 属性，再多的人工批准也改不了它。如果补一次"同意"就能换来写系统目录的权限，
+        // 那么用户点的那个同意就不是他以为的那件事——而这类判定的全部价值，恰恰在于
+        // 它挡住的是**用户以为自己没批准的事**。
+        if !grant.covers(&intent.object_scope) {
+            return PermitDecision::Refused {
+                reason: format!(
+                    "动作对象 {} 超出能力 {} 的授权范围（{}）；要触及别处必须重新授权，\
+                     不是就地补一次同意（§12.1）",
+                    intent.object_scope,
+                    scope.capability_policy_ref,
+                    describe_scope(grant)
                 ),
             };
         }
