@@ -1,8 +1,15 @@
 //! SoCA 存储层（实施路线 P0 的第二个工作包）。
 //!
-//! 职责范围严格限定在架构文档 §9.3 的第一行：
-//! **单元目录、目标、权限引用、动作状态、游标、事件元数据 → SQLite WAL，单机一个逻辑
-//! 写入者，事务 outbox**。内容仓、模型仓与凭据存储不在本 crate 内。
+//! 职责范围是架构文档 §9.3 那张表的前两行：
+//!
+//! * **单元目录、目标、权限引用、动作状态、游标、事件元数据 → SQLite WAL，单机一个逻辑
+//!   写入者，事务 outbox。**
+//! * **事件与不可变内容大块 → 分段内容仓，按租户和数据类别隔离，元数据存内容引用、校验和
+//!   与保留期。** 元数据在 [`crate::blobs`]，字节在 [`crate::content::ContentStore`]。
+//!
+//! 内容仓放进本 crate 而不是单开一个，是因为那两半必须一起改：§9.3 的"先写临时文件、完成
+//! 校验和耐久化，**再**提交数据库引用"是一条关于**顺序**的要求，拆到两个 crate 里，顺序就会
+//! 落到第三个地方去。模型仓与凭据存储仍然不在本 crate 内。
 //!
 //! 三条本 crate 负责保证、且有回归测试覆盖的语义：
 //!
@@ -19,12 +26,14 @@
 #![warn(missing_docs)]
 
 pub mod actions;
+pub mod approvals;
 pub mod audit;
+pub mod blobs;
+pub mod content;
 pub mod error;
 pub mod events;
 pub mod game_ledger;
 pub mod goals;
-pub mod approvals;
 pub mod instances;
 pub mod memory;
 pub mod predictions;
@@ -36,6 +45,8 @@ pub use crate::actions::{
     Resolution, UnknownCommit,
 };
 pub use crate::audit::{AuditCategory, AuditEntry, MAX_DETAIL_LEN};
+pub use crate::blobs::StoredBlob;
+pub use crate::content::{ContentGc, ContentStore, StoredContent};
 pub use crate::error::StorageError;
 pub use crate::events::{AppendOutcome, StoredEvent};
 pub use crate::game_ledger::{GameLedgerEntry, LedgerDecision};

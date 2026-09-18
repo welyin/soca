@@ -58,6 +58,19 @@ impl DataClass {
             Self::Secret => "secret",
         }
     }
+
+    /// 全部类别，按敏感度升序。
+    pub const ALL: [Self; 4] = [Self::Public, Self::Personal, Self::Sensitive, Self::Secret];
+
+    /// 从稳定名称解析。
+    ///
+    /// 有它的理由不是"方便"：内容仓按数据类别分目录存放（§9.3：按租户和数据类别隔离），
+    /// 而那条路径是从引用字符串里解出来的。**凡是从外部字符串解出安全相关的枚举，都必须
+    /// 走这张唯一的对照表**——散落各处的字符串字面量迟早在某一处漏掉一个分支，而漏掉的那个
+    /// 分支会把内容放进错误的目录里。
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.as_str() == raw)
+    }
 }
 
 /// 出站策略（§8）。

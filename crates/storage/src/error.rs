@@ -21,6 +21,21 @@ pub enum StorageError {
     #[error("I/O 错误：{0}")]
     Io(#[from] std::io::Error),
 
+    #[error(
+        "内容引用 {blob_ref} 形状非法，拒绝把它当路径用\
+         （类别必须是已知数据类别、摘要必须是 64 位小写十六进制）"
+    )]
+    MalformedBlobRef { blob_ref: String },
+
+    #[error(
+        "内容对象 {blob_ref} 的字节与它声明的摘要不一致，拒绝交出内容\
+         （§9.3：不能伪造证据——被替换过的内容比缺失更糟，它看起来是好的）"
+    )]
+    ContentCorrupted { blob_ref: String },
+
+    #[error("找不到内容对象 {blob_ref}；它有元数据却没有字节，属于可诊断缺失，不是可修好的状态")]
+    ContentMissing { blob_ref: String },
+
     #[error("数据库 schema 版本 {found} 高于本程序支持的 {supported}，拒绝打开")]
     SchemaTooNew { found: u32, supported: u32 },
 
