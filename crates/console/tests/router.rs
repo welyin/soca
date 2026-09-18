@@ -1313,6 +1313,68 @@ fn correcting_by_a_source_that_nothing_was_derived_from_retracts_nothing() {
 }
 
 #[test]
+fn the_console_can_sleep_and_wake_a_unit_and_measures_the_restore_separately() {
+    // §17 的"冷恢复"那一行，从界面上走一遍。
+    //
+    // 要的是**可测量**：恢复耗时与状态字节数单独报出来，而它们不和别的计时混在一起。
+    // （那一行的数值是"首轮建议门槛，不是已经达到的成绩"，所以这里不断言它跑得多快。）
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/chat",
+        &body(json!({"message": "整理摘要"})),
+    );
+    call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+
+    // 先唤醒：醒着才干得了活，也才降得了温。
+    let woken = json(&call(
+        &mut subject,
+        "POST",
+        "/api/unit/wake",
+        &body(json!({})),
+    ));
+    assert_eq!(woken["outcome"]["kind"], "ready", "{woken}");
+
+    // 睡下去。
+    let slept = json(&call(
+        &mut subject,
+        "POST",
+        "/api/unit/sleep",
+        &body(json!({})),
+    ));
+    assert_eq!(slept["state"], "COLD", "{slept}");
+
+    let state = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))));
+    assert_eq!(state["unit_awake"], false, "{state}");
+    assert_eq!(state["unit_state"], "COLD", "{state}");
+
+    // 再醒过来。
+    let again = json(&call(
+        &mut subject,
+        "POST",
+        "/api/unit/wake",
+        &body(json!({})),
+    ));
+    assert_eq!(again["outcome"]["kind"], "ready", "{again}");
+    assert!(
+        again["restore_ms"]["peak"].as_u64().is_some(),
+        "恢复耗时要被单独报出来：{again}"
+    );
+    let bytes = again["state_bytes"]["current"].as_u64().expect("数字");
+    assert!(bytes > 0, "一份单元状态不可能是 0 字节：{again}");
+    assert!(
+        bytes < 64 * 1024,
+        "§17 的门槛是 64 KiB，这一份是 {bytes} 字节"
+    );
+}
+
+#[test]
 fn the_console_reports_peaks_not_just_current_values() {
     // §17 那半句："记录**峰值**私有提交及工作集，**不只看平均值**。"
     //

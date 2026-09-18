@@ -12,7 +12,9 @@ use soca_contracts::{
     SelectionPolicy, Sha256Hex,
     StrategyCandidate, StrategyVersion, UserChannel, WallClock,
 };
-use soca_core::{CoreError, Correction, Resources, RetentionPolicy, Scheduler, Subject};
+use soca_core::{
+    CoreError, Correction, Resources, RetentionPolicy, Scheduler, Subject, WakeOutcome,
+};
 use soca_model_gateway::{GatewayError, ModelCredentials};
 use soca_storage::audit::AuditCategory;
 
@@ -67,6 +69,10 @@ pub fn handle(
         // 而"提了就等于启用了"正是那句话最容易落空的地方。
         ("POST", "/api/learning") => propose_strategy(subject, request, at),
         ("POST", "/api/resources/reset") => reset_resource_peaks(subject, request, at),
+        // §9.2 的降温与唤醒。分开两条路径：一个是"把状态收起来"，一个是"把它读回来"——
+        // 而 §17 要计时的正是后者（且只有后者）。
+        ("POST", "/api/unit/sleep") => sleep_unit(subject, request, at),
+        ("POST", "/api/unit/wake") => wake_unit(subject, request, at),
         ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
         ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
         ("POST", "/api/write") => request_write(subject, request, at),
@@ -976,6 +982,66 @@ fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response
             500,
             &json!({"error": "round_failed", "detail": error.to_string()}),
         ),
+    }
+}
+
+/// 让单元降温（§9.2）。
+///
+/// 与"全局暂停"（`/api/policy/pause`）分开：暂停是"**现在别干活**"，降温和它的差别是
+/// **释放**——它把状态写进库、把未决动作移交给在线动作账、然后把这个单元从热表里拿掉。
+/// 合成一条路径的话，"我按了暂停"与"系统把它的状态收起来了"会是同一句话，
+/// 而后者才是 [§17 的冷恢复](../design) 要计时的那个动作。
+fn sleep_unit(subject: &mut Subject, _request: &Request, at: WallClock) -> Response {
+    match subject.sleep(at) {
+        Ok(outcome) => Response::json(
+            200,
+            &json!({
+                "handed_over": outcome.handed_over,
+                "state": outcome.snapshot.state.as_str(),
+                "note": "未决动作被**移交**给在线动作账，不是被丢掉——\
+                         §9.2 明说「不以卸载单元解决它」。",
+            }),
+        ),
+        Err(error) => Response::text(409, error.to_string()),
+    }
+}
+
+/// 唤醒单元（§9.2），并把恢复耗时单独记一笔（§17 的"冷恢复"）。
+fn wake_unit(subject: &mut Subject, _request: &Request, at: WallClock) -> Response {
+    match subject.wake(at) {
+        Ok(outcome) => Response::json(
+            200,
+            &json!({
+                // 手写而不是直接序列化 `WakeOutcome`：它带着整份快照，而界面要的是
+                // "回来了没有、错过了多少事件、状态有多大"这三件——把整份快照塞进响应，
+                // 只会让读的人去翻一串他不关心的字段。
+                "outcome": match &outcome {
+                    WakeOutcome::Ready {
+                        snapshot,
+                        missed_events,
+                    } => json!({
+                        "kind": "ready",
+                        "state": snapshot.state.as_str(),
+                        "evidence_refs": snapshot.evidence_refs.len(),
+                        "cursor": snapshot.last_applied_sequence,
+                        "missed_events": missed_events.len(),
+                    }),
+                    WakeOutcome::AlreadyHot { snapshot } => json!({
+                        "kind": "already_hot",
+                        "state": snapshot.state.as_str(),
+                    }),
+                    WakeOutcome::Refused { reason } => {
+                        json!({"kind": "refused", "reason": reason})
+                    }
+                },
+                // 恢复耗时**单独**报出来，不和别的计时混在一起。
+                "restore_ms": subject.resource_ledger().metric("unit_restore_ms"),
+                "state_bytes": subject.resource_ledger().metric("unit_state_bytes"),
+                "note": "§17 的门槛（64 KiB / 200 ms）是**首轮建议门槛，不是已经达到的成绩**——\
+                         所以这里交的是可测量，不是达标声明。被拒的唤醒不计时。",
+            }),
+        ),
+        Err(error) => Response::text(409, error.to_string()),
     }
 }
 

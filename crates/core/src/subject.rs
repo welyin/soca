@@ -43,6 +43,7 @@ use soca_contracts::{
     StrategyAdmission, StrategyCandidate, StrategyVersion, TaskId,
     ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
+use soca_contracts::{PartitionKey, TemplateId, UnitInstance, UnitState};
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
 use soca_storage::audit::AuditCategory;
@@ -50,6 +51,7 @@ use soca_storage::{ContentRetention, ContentStore, Store};
 
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
+use crate::lifecycle::{CheckpointOutcome, UnitRegistry, WakeOutcome, WakePolicy};
 use crate::policy::{PermitDecision, PolicyAgent};
 use crate::resources::ResourceLedger;
 use crate::retention::{
@@ -391,6 +393,13 @@ pub struct PublicState {
     /// 给的是**当前值与峰值成对**的东西，而不是一个数：§17 要的正是这个成对关系——
     /// "不只看平均值"的意思是，一个当下很轻的进程可能刚刚才被撑到过边上。
     pub resources: ResourceLedger,
+    /// 单元现在是不是热的（§9.2）。
+    pub unit_awake: bool,
+    /// 单元在库里的状态（§9.2 的状态机）。`None` 表示还没有登记过。
+    ///
+    /// 与 `unit_awake` **分开报**，因为它们可以不一致，而那个不一致本身是信息：
+    /// 库里写着热的、热表里却没有，说明上一次运行留下了没结清的东西。
+    pub unit_state: Option<String>,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 已经隐藏、等着清理的记忆条数（§12.3）。
@@ -479,6 +488,13 @@ pub struct Subject {
     /// 现算一个当前值"：那样记下的峰值只反映**有人来看过的那几个时刻**，而把一台机器压垮的
     /// 那一下恰恰通常发生在没人看的时候。
     resources: ResourceLedger,
+    /// 热单元驻留表（§9.2）。
+    ///
+    /// 它记的是"这个单元现在是热的还是冷的、在不在加载中"。单元的状态另有持久的一份
+    /// （`units` 表的 `state` 列），两者**必须一致**：热表里没有而库里是热的，
+    /// 说明上一次运行留下了没结清的东西——[`UnitRegistry::wake`] 会拒绝直接覆盖它，
+    /// 而不是假装一切正常。
+    registry: UnitRegistry,
 }
 
 impl std::fmt::Debug for Subject {
@@ -558,7 +574,111 @@ impl Subject {
             strategy: SelectionPolicy::default(),
             strategy_version: soca_contracts::strategy_version_of(&SelectionPolicy::default())?,
             resources: ResourceLedger::default(),
+            registry: UnitRegistry::new(1),
         })
+    }
+
+    /// 把单元登记成一个**冷的**实例（§9.2："冷态只在注册表和持久邮箱中存在"）。
+    ///
+    /// 登记是一份**可恢复的状态**，不是一个空壳——所以它要同时给出初始快照。这一步必须在
+    /// 降温之前先做过一次：没有登记过的单元，`save_unit` 会拒绝写快照（"这个槽是谁的"无从
+    /// 回答）。
+    ///
+    /// 幂等：已经登记过时返回 `false`。**不覆盖**已有的快照——把它盖掉等于把上一段运行的
+    /// 状态抹掉，而那正是重启后要恢复的东西。
+    pub fn register_unit(&mut self, at: WallClock) -> Result<bool, CoreError> {
+        let snapshot = self.cluster.snapshot();
+        // 登记的必须是冷态（§9.2），所以先把它标成冷——`register_instance` 也会检查这一点。
+        let mut cold = snapshot;
+        cold.state = UnitState::Cold;
+        // 冷态快照不允许残留未决动作，而这一次登记发生在还没有任何动作之前。
+        cold.pending_action_ids.clear();
+
+        let instance = UnitInstance::new(
+            cold.unit_id.clone(),
+            self.owner.clone(),
+            None,
+            TemplateId::new("template:desktop-and-files")?,
+            PartitionKey::new("partition:local")?,
+        );
+        Ok(self.store.register_instance(&cold, &instance, at)?)
+    }
+
+    /// 单元现在是不是热的（§9.2）。
+    pub fn is_awake(&self) -> bool {
+        self.registry.is_hot(self.cluster.unit_id())
+    }
+
+    /// 让单元降温（§9.2）。
+    ///
+    /// §9.2 的降温步骤是："停止新租约→等待纯计算到安全点或取消→**将 pending 动作、游标、
+    /// 状态和 outbox 事务提交**→释放模型会话/KV 及大对象→保留轻量路由元数据。
+    /// **存在不明副作用时由持久在线动作账继续核对，不以卸载单元'解决'它。**"
+    ///
+    /// 那一长串的实现就是 [`UnitRegistry::checkpoint`]，而它对最后一句是认真的：
+    /// 未决动作会被**移交**出去并如实报出来，而不是被丢掉。台账里没有对应记录的动作
+    /// 会让降温**失败**——因为"卸载"不能解决一个不知道结没结的副作用。
+    ///
+    /// 返回移交出去的动作清单：调用方要能回答"降温时还有几件事没了结"。
+    pub fn sleep(&mut self, at: WallClock) -> Result<CheckpointOutcome, CoreError> {
+        // 登记是懒做的：它要写一行带时刻的记录，而构造时没有时刻可给（`new` 不收 `WallClock`）。
+        // 随手编一个时间会更糟——一条"登记于某年某月"的假记录看起来像个事实。
+        // 幂等，而且不覆盖已有状态，所以每次都调它是安全的。
+        self.register_unit(at)?;
+        let unit = self.cluster.unit_id().clone();
+        // §9.2 要提交的是"**状态**"——而热表里那份是唤醒时读进来的。先把它换成簇**现在**
+        // 的样子，否则写进库的是一份还没干过这轮活的快照（见 [`UnitRegistry::refresh`]）。
+        self.registry.refresh(self.cluster.snapshot())?;
+        let outcome = self.registry.checkpoint(&mut self.store, &unit, at)?;
+
+        // 降温和观测一样会改变量（状态列、快照大小），所以它也要采样。
+        self.sample_resources(at)?;
+        Ok(outcome)
+    }
+
+    /// 唤醒单元（§9.2），并**把恢复耗时单独记一笔**（§17 的"冷恢复"）。
+    ///
+    /// §17 那一行是：
+    ///
+    /// > 目标 NVMe 机器上 64 KiB 轻量单元状态的 p95 恢复 ≤ 200 ms；**模型冷加载单独计时且
+    /// > 可取消，不混入此指标**。
+    ///
+    /// 而那一节开头还有一句，它在读这一行时同样要紧：
+    ///
+    /// > 以下数字是**首轮建议门槛，不是已经达到的成绩**。
+    ///
+    /// 所以这里交的是**可测量**：计时只包住**单元状态本身的恢复**（读快照、迁移版本、
+    /// 重验权限、追平游标），并且和单元状态的**字节数**一起记进峰值账。模型冷加载不在其中——
+    /// 本版没有权重要加载（走的是确定性桩），所以那条计时至今没有生产者；把它混进来充数
+    /// 会让这个指标从第一天起就答非所问。
+    ///
+    /// 拒绝唤醒时**不记时**：一次被拒的唤醒不是"恢复花了很久"，它是"根本没有恢复"。
+    /// 把它记进去会让 p95 被一堆瞬间失败拉低——而那正是这个指标最不该出现的样子。
+    pub fn wake(&mut self, at: WallClock) -> Result<WakeOutcome, CoreError> {
+        self.register_unit(at)?;
+        let unit = self.cluster.unit_id().clone();
+        // §9.2 的"权限重验"要用的门槛，从**当前**状态里取：已生效的能力 + 快照声明的模型画像。
+        // 拿一份写死的清单去验，等于把"撤回立即生效"这句话在降温/唤醒这条路上取消掉。
+        let snapshot = self.cluster.snapshot();
+        let policy = WakePolicy::allowing(
+            self.policy.granted().into_iter().map(|cap| cap.to_string()),
+            [snapshot.model_profile_ref.to_string()],
+        );
+
+        let started = std::time::Instant::now();
+        let outcome = self.registry.wake(&mut self.store, &unit, &policy, at)?;
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+
+        if outcome.is_ready() {
+            self.resources.record("unit_restore_ms", elapsed_ms, at);
+            // 被恢复的那份状态有多大。§17 的门槛是 64 KiB，而它得先是个能被读出来的数。
+            if let Ok(Some(snapshot)) = self.store.unit(&unit) {
+                let bytes = serde_json::to_vec(&snapshot).map(|raw| raw.len() as u64);
+                self.resources
+                    .record("unit_state_bytes", bytes.unwrap_or(0), at);
+            }
+        }
+        Ok(outcome)
     }
 
     /// 记一次资源采样（§17 的"记录峰值……不只看平均值"）。
@@ -2274,6 +2394,11 @@ impl Subject {
             strategy_version: self.strategy_version.to_string(),
             strategy: self.strategy,
             resources: self.resources.clone(),
+            unit_awake: self.is_awake(),
+            unit_state: self
+                .store
+                .unit(self.cluster.unit_id())?
+                .map(|snapshot| snapshot.state.as_str().to_string()),
             memory_entries: self.store.memory_count(&self.owner)?,
             memories_awaiting_purge: self.store.tombstoned_memory_count()?,
             actions: self.store.action_count()?,

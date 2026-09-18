@@ -239,6 +239,31 @@ impl UnitRegistry {
         })
     }
 
+    /// 用单元**当前**的状态更新热态快照。
+    ///
+    /// 为什么需要它：热表里那份快照是**唤醒时读进来的**，而单元在运行期间会派生出热表
+    /// 看不见的东西——证据的并集、信念修订号、子单元的状态。§9.2 的降温步骤要提交的是
+    /// "**状态**"，而"状态"指的是**当前**那份，不是唤醒时那份。
+    ///
+    /// 不这么做的后果很安静：降温成功、账上一切正常，而写进库里的是**一份还没有干过那轮活**
+    /// 的快照。重启之后恢复出来的单元比它实际的样子年轻——而它没有任何报错，
+    /// 只是"记得少了一点"。
+    ///
+    /// **只换内容，不换状态**：状态由 [`UnitRegistry::checkpoint`] 按 §9.2 的顺序自己迁。
+    /// 让调用方连状态一起给，就等于把那条状态机交给每个调用点各守一遍。
+    pub fn refresh(&mut self, snapshot: UnitSnapshot) -> Result<(), CoreError> {
+        let unit_id = snapshot.unit_id.clone();
+        let Some(hot) = self.hot.get_mut(unit_id.as_str()) else {
+            return Err(CoreError::UnitNotHot {
+                unit_id: unit_id.to_string(),
+            });
+        };
+        let state = hot.state;
+        *hot = snapshot;
+        hot.state = state;
+        Ok(())
+    }
+
     /// 把热单元迁到指定状态。
     ///
     /// 迁移合法性由契约层的状态机判定（§9.2 的状态图），这里只负责落库与热表同步。

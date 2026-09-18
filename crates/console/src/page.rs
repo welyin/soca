@@ -115,6 +115,28 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       <button id="reset-peaks" class="ghost">开一段新的计量窗口</button>
       <span class="hint">把峰值压到<b>当前值</b>，不是 0——压到 0 会让新窗口的峰值偏低，而一个偏低的峰值比没有峰值更糟：它看起来是个答案</span>
     </div>
+
+    <h2 style="margin-top:22px">单元生命周期与冷恢复（§9.2 / §17）</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §17 那一行：「64 KiB 轻量单元状态的 p95 恢复 ≤ 200 ms；模型冷加载<b>单独计时</b>且可取消，
+      <b>不混入此指标</b>。」而那一节开头还有一句：「以下数字是<b>首轮建议门槛，不是已经达到的
+      成绩</b>。」所以这里交的是<b>可测量</b>，不是达标声明。
+    </div>
+    <div class="row">
+      <span class="hint" id="unit-now">单元状态：—</span>
+      <button id="unit-sleep" class="ghost">降温（写状态、移交未决动作）</button>
+      <button id="unit-wake">唤醒（计时恢复）</button>
+    </div>
+    <div class="hint">
+      <b>降温不是放弃。</b>§9.2：「存在不明副作用时由持久在线动作账继续核对，<b>不以卸载单元
+      「解决」它</b>」——所以未决动作是<b>移交</b>出去的，台账里带着它们的名字。
+    </div>
+    <div class="hint">
+      <b>被拒的唤醒不计时。</b>那不是"恢复花了很久"，是"根本没有恢复"——算进去会让 p95
+      被一堆瞬间失败拉低，而它看起来像变快了。拒绝的来源之一正是 §9.2 的<b>权限重验</b>：
+      能力被撤回之后，那个单元唤不醒。
+    </div>
+    <pre id="unit-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
 
   <section>
@@ -447,6 +469,8 @@ function renderState(state) {
   }).join("");
 
   renderResources(state.resources);
+  $("unit-now").textContent = "单元状态：" +
+    (state.unit_state || "未登记") + (state.unit_awake ? "（热）" : "（冷）");
 
   const tbody = $("goals");
   if (state.goals.length === 0) {
@@ -695,6 +719,48 @@ function renderRejections(candidates, rejections) {
 // 上一次提的建议。**必须由用户显式提交回来**——"提了就等于启用了"是 §13.2 那句话最容易
 // 落空的地方，而落空之后看不出来。
 let pendingStrategy = null;
+
+$("unit-sleep").onclick = async function () {
+  try {
+    const result = await api("unit/sleep", {});
+    $("unit-out").textContent = JSON.stringify(result, null, 2);
+    log(
+      "已降温，状态 " + result.state +
+      (result.handed_over.length > 0
+        ? "；移交了 " + result.handed_over.length + " 个未决动作"
+        : "；没有未决动作"),
+      "ok"
+    );
+  } catch (error) {
+    $("unit-out").textContent = error.message;
+    log("降温失败：" + error.message, "err");
+  }
+  refresh();
+};
+
+$("unit-wake").onclick = async function () {
+  try {
+    const result = await api("unit/wake", {});
+    $("unit-out").textContent = JSON.stringify(result, null, 2);
+    if (result.outcome.kind === "ready") {
+      log(
+        "已唤醒：" + result.outcome.evidence_refs + " 条证据、游标 " + result.outcome.cursor +
+        "、错过 " + result.outcome.missed_events + " 个事件；" +
+        "恢复 " + result.restore_ms.current + " ms（峰值 " + result.restore_ms.peak + " ms），" +
+        "状态 " + result.state_bytes.current + " 字节",
+        "ok"
+      );
+    } else if (result.outcome.kind === "refused") {
+      log("唤醒被拒：" + result.outcome.reason + "（这一笔**不计入**恢复耗时）", "err");
+    } else {
+      log("它已经是醒着的", "ok");
+    }
+  } catch (error) {
+    $("unit-out").textContent = error.message;
+    log("唤醒失败：" + error.message, "err");
+  }
+  refresh();
+};
 
 $("reset-peaks").onclick = async function () {
   try {
