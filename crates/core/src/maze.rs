@@ -306,6 +306,12 @@ pub struct MazeRun {
     /// 取不到时是 `None`，而不是一张空图：空图会被读成"这局没有墙"，
     /// 而真相是"我们没能问出真值"。两者在页面上必须长得不一样。
     pub truth: Option<TrueMap>,
+    /// 这一局**为什么停下**。`None` 表示它是被规则结束的。
+    ///
+    /// 它要单列一栏，而不是并进 `outcome`：`outcome` 是**游戏相位**（赢／输／超时），
+    /// 而"预算用完了"不属于相位——那一局既没赢也没超时，它只是**没走完**。
+    /// 把两者挤进一个字段，会让"它输了"与"我们给的钱不够"看起来是同一件事。
+    pub stopped: Option<String>,
     /// 这一局往 L1 里记了多少条格子记忆。
     ///
     /// 与 `map.len()` 分开：那是**这一局认得多少格**，这是**记进长期记忆多少条**。
@@ -428,24 +434,27 @@ impl Explorer {
         view: &MazeView,
         last_action: Option<GameAction>,
     ) -> LearnedCells {
-        // "这一步到底动没动"。
+        // "这一步到底动没动"：**按的是前进，就是动了。**
         //
-        // 判据是**两个条件同时成立**：刚才走的是前进，**而且**视图变了。
+        // 这里试过三种判据，前两种都是错的，而错法不一样：
         //
-        // * 只看"视图变了"：转身、拾取、开门都会让视图变，于是每转一次身位置就凭空挪一格。
-        // * 只看"按的是前进"：撞墙的前进也是一步，而它不移动（§10.1："撞墙也消费一步并
-        //   返回真实未移动结果"）。把它当成移动，位置就开始漂。
+        // * 只看"视图变了"：**转身、拾取、开门都会让视图变**，于是每转一次身位置就凭空挪一格，
+        //   地图整体碎掉。
+        // * "前进 **而且** 视图变了"：堵住了上一条，却在**一模一样的走廊里前进**时判错——
+        //   那时视图确实一个字节都没变，而它**真的走了一步**。位置于是滞后一格，此后每一次
+        //   观测都落在错的地方。四房间那一关把它逼了出来：19×19 的长走廊正好是这种地形，
+        //   跑完攒下 5 处矛盾（DoorKey 的屋子比视野小，所以一直没撞上）。
         //
-        // 两个条件合起来只在一种情形下会判错：**在一模一样的地形里前进**——那时视图确实
-        // 不变。DoorKey 的房间比 7×7 的视野小，所以这种情况在这里近乎不出现；
-        // 而它一旦出现，`contradictions` 会涨起来，不会静悄悄地漂。
-        let moved = matches!(
+        // 现在回到最简单的那一条，因为**它成立的前提已经补上了**：探索器的每一条路线都只
+        // 经过已知可通的格子（"拾取"与"开门"改成了"站到旁边、转身按一下"，不再走上钥匙和门），
+        // 所以凡是它按下的前进，都是一次走得成的前进。而撞墙那些前进不会再被规划出来——
+        // 挤不出来的情况由 `contradictions` 兜底，不会静悄悄地漂。
+        if matches!(
             last_action,
             Some(GameAction::Move(MoveAction {
                 op: MoveOp::Forward
             }))
-        ) && self.last_view.as_ref().is_none_or(|previous| previous != &view.view);
-        if moved {
+        ) {
             let (dx, dy) = forward_vector(view.direction);
             self.position = (self.position.0 + dx, self.position.1 + dy);
         }
@@ -963,6 +972,7 @@ pub fn run_episode(
         // 评估器通路没有"开局那一眼"这一步：起点那一次感知被并进第一步的 `learned` 里。
         initial_cells: 0,
         memories: 0,
+        stopped: None,
         // 真值两条路都要：它是**操作员的参照物**，与这一局走的是哪条路无关。
         // 取不到就算了（`None`），而不是让整个请求失败——它是参照物，不是这一局的一部分。
         truth: true_map(seed, variant).ok(),
@@ -1061,6 +1071,8 @@ pub fn play_through_actions(
     let mut explorer = Explorer::default();
     let mut steps: Vec<MazeStep> = Vec::new();
     let mut mission = String::new();
+    // 为什么停下。`None` 表示它是被规则结束的（赢了／输了／引擎截断）。
+    let mut stopped: Option<String> = None;
 
     // 先吸收起点那一次感知。少了它，第一步之后"视图变了没有"就没有可比的基准，
     // 而位置会从第一步起就开始漂。
@@ -1089,6 +1101,21 @@ pub fn play_through_actions(
         if view.mission != mission {
             mission = view.mission.clone();
         }
+        // **先问一句还有没有能推进的目标。**
+        //
+        // 不问的话，撞上的是一个"这次动作无处归属"的错误——而它看起来像写错了代码，
+        // 真因是**额度花完了**（§4.2 的升级触发器）。这件事在大关卡上是常态：
+        // 四房间 19×19，一份目标的 32 次激活根本不够走到终点。
+        //
+        // 一局停在这里不是失败，是"这一份预算用完了"——如实说出来，而不是崩掉。
+        if !subject.has_open_goal() {
+            stopped = Some(format!(
+                "额度用尽：这一份目标的 {MAX_ACTIVATIONS_PER_GOAL} 次激活花完了，\
+                 还有格子没走完（§4.2：这是该升级预算或拆目标的信号）"
+            ));
+            break;
+        }
+
         let (action, reason) = explorer.decide(view.direction);
         let known_before = explorer.map.len();
 
@@ -1246,6 +1273,7 @@ pub fn play_through_actions(
         map: explorer.mapped(),
         initial_cells,
         memories: remembered,
+        stopped,
         truth: true_map(seed, variant).ok(),
         contradictions: explorer.contradictions,
         mission,

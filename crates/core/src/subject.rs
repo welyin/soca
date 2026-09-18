@@ -2398,6 +2398,15 @@ impl Subject {
             .unwrap_or_else(|| self.default_scope())
     }
 
+    /// 现在还有没有一个能推进的目标。
+    ///
+    /// 额度耗尽与目标结束都会让它变成 `false`，而**那不是故障**：§4.2 说额度耗尽是
+    /// "该升级预算"的触发器。调用方要在**投递动作之前**问它一句，
+    /// 否则会撞上一个"这次动作无处归属"的错误，而那个错看起来像写错了代码。
+    pub fn has_open_goal(&self) -> bool {
+        self.next_open_goal().is_some()
+    }
+
     /// 当前还有多少条记忆等着被清理。
     pub fn memories_awaiting_purge(&self) -> Result<usize, CoreError> {
         Ok(self.store.tombstoned_memory_count()?)

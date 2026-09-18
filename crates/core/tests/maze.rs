@@ -248,6 +248,33 @@ fn the_crossing_variant_is_a_plain_maze_with_no_key_or_door() {
 }
 
 #[test]
+fn the_four_rooms_variant_runs() {
+    // 四房间是清单里最大的那一关（19×19）。它**未必走得完**——一份目标的额度是 32 次激活，
+    // 而这么大的地方很可能不够。所以这里不要求 `won`，只要求它**不崩**、地图自洽、
+    // 而且如实说出自己停在哪。
+    //
+    // 写这条测试是因为它在页面上是**空的 500**：响应体什么都没有，看不出是哪一步出的问题。
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 400, "four-rooms", at(0)).expect("走一局");
+    assert_eq!(run.variant, "four-rooms");
+    assert_eq!(run.contradictions, 0);
+    assert!(!run.steps.is_empty(), "一步都没走");
+    let truth = run.truth.clone().expect("真值");
+    assert_eq!(truth.width, 19);
+
+    // **走不完不是失败**——额度用尽要说得出为什么，而不是崩掉。
+    //
+    // 这一条是页面上那个"空的 500"逼出来的：`request_game_step` 在没有可推进目标时
+    // 返回的是错误，于是整局以一次内部错误结束，而真因是**这一份预算花完了**。
+    // 两者在界面上必须分得开：一个是"我们给的钱不够"，一个是"它坏了"。
+    assert!(
+        run.won() || run.stopped.is_some(),
+        "既没赢也没说清为什么停（outcome={}）",
+        run.outcome
+    );
+}
+
+#[test]
 fn the_walls_it_learned_match_the_truth() {
     // **整条链对地面真值的一次比对。**
     //

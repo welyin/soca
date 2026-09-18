@@ -41,7 +41,7 @@ pub fn handle(
     at: WallClock,
 ) -> Response {
     // 页面本身不校验 token（token 由服务端注入页面），其余一律校验。
-    if request.path == "/" {
+    if page::is_index(request) {
         return Response::html(page::render(session.token()));
     }
 

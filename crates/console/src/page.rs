@@ -78,8 +78,30 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   .maze-cell.door-open { background: #eef1f5; color: #6b4b1f; }
   .maze-cell.lava { background: #ffb3a7; color: #7a1f10; }
   .maze-cell.ball, .maze-cell.box { background: #cfe0ff; color: #24457a; }
-  tr.current { background: #eaf1ff; font-weight: 600; }
+  /* 当前行的高亮**必须在深色底上做**。
+     这里原先是 `#eaf1ff`——一个浅色主题里留下的颜色，而这一页是深色的：
+     亮底 + 亮字 = 那一行**整个看不见**。表现是"表格里一大片空白，只有一行有字"，
+     很容易读成"数据没出来"，而数据一直在，只是被自己涂掉了。 */
+  tr.current { background: #1d2b44; font-weight: 600; }
+  #maze-steps td, #maze-steps th { color: var(--ink); }
   .wait-list { font-size: 11px; line-height: 1.5; margin-top: 3px; max-width: 320px; }
+
+  /* 演示页：`/maze` 用的是**同一个页面**，只是把别的区块藏起来。
+     复制一份"迷宫专用页"看起来更省事，代价是两份布局迟早分叉——
+     而分叉的那一天，你在演示页里看到的东西与它在控制台里的样子不是同一个。 */
+  body.demo header, body.demo #log, body.demo main > section:not(#maze-section) { display: none; }
+  body.demo [data-full] { display: none; }
+  /* 控制台里反过来：只列链接，不把一局塞在首页中间。 */
+  body:not(.demo) [data-demo] { display: none !important; }
+  .demo-links { display: flex; flex-wrap: wrap; gap: 10px; }
+  .demo-link {
+    display: block; padding: 12px 14px; border: 1px solid var(--line);
+    border-radius: 8px; background: #0c0e13; text-decoration: none; color: var(--ink);
+    min-width: 220px;
+  }
+  .demo-link:hover { border-color: #3d5a8a; }
+  .demo-link .t { font-weight: 600; }
+  .demo-link .s { color: var(--dim); font-size: 12px; margin-top: 4px; }
   /* 淡的那层（这一局最后才认得的）：**虚边 + 白底**，与"此刻认得"一眼分得开。
      两层的底色原来是同一族的浅灰，结果看不出那张图在长大——而那正是它存在的理由。 */
   .maze-cell.ghost {
@@ -168,10 +190,17 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
     <pre id="unit-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
 
-  <section>
-    <h2>迷宫探索（§17 的"认知游戏"）</h2>
+  <section id="maze-section">
+    <h2>游戏演示</h2>
+    <div class="hint" style="margin:0 0 12px" data-full>
+      每个演示是一个<b>单独的页面</b>——一页只看一局，不和控制台别的区块挤在一起。
+      链接里的种子与关卡都写明了，所以<b>发给别人看到的是同一局</b>（同一 seed 是确定性的）。
+    </div>
+    <div id="maze-links" class="demo-links" data-full>（正在取演示清单……）</div>
+
+    <div data-demo>
     <div class="hint" style="margin:0 0 12px">
-      真规则引擎：<code>MiniGrid-DoorKey-8x8-v0</code>，一个回合一个 Python 子进程，
+      <a href="/">← 回控制台</a>　真规则引擎：<code>MiniGrid-*</code>，一个回合一个 Python 子进程，
       走 <code>games/maze/game.py</code> 的投影。公开面上只有 <b>7×7 局部视图</b>、
       任务文本、朝向和携带物——<b>绝对坐标、完整地图、seed、info 一样都不出那道门</b>。
     </div>
@@ -245,6 +274,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得（新增）</th><th>记入 L1</th></tr></thead>
       <tbody></tbody>
     </table>
+    </div>
   </section>
 
   <section>
@@ -1091,6 +1121,9 @@ $("maze-run").onclick = async function () {
       "<b>" + escapeHtml(mazeRun.outcome) + "</b>　走了 " + mazeRun.steps.length + " 步　" +
       "认得 " + mazeRun.map.length + " 格　" +
       "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
+      (mazeRun.stopped
+        ? "<br><b>停下了</b>：" + escapeHtml(mazeRun.stopped)
+        : "") +
       "<br>关卡 <b>" + escapeHtml(mazeRun.variant || "—") + "</b>　" +
       "开局一眼看见 " + (mazeRun.initial_cells || 0) + " 格　" +
       "记进 L1 " + (mazeRun.memories || 0) + " 条　" +
@@ -1491,45 +1524,84 @@ loadMazeVariants();
 // 而表现是"新关卡明明加了，下拉框里没有它"。
 async function loadMazeVariants() {
   try {
-    const result = await api("maze/variants", {});
-    const select = $("maze-variant");
-    select.innerHTML = (result.variants || [])
+    // **不传第二个参数**：`api` 的约定是"不给 body 就是 GET"。
+    // 传一个 `{}` 会让它变成 POST，而那个路径只注册了 GET——于是报回来的是
+    // "没有这个接口"，看起来像路由没写，真因是方法不对。查了半天的就是这一行。
+    const result = await api("maze/variants");
+    const variants = result.variants || [];
+    $("maze-variant").innerHTML = variants
       .map(function (item) {
         return "<option value=\"" + escapeHtml(item.name) + "\"" +
           (item.default ? " selected" : "") + ">" +
           escapeHtml(item.name + "　" + item.title) + "</option>";
       })
       .join("");
+
+    // 控制台首页只列链接。**链接里把种子与通路都写全**——点过去看到的是哪一局，
+    // 从 URL 上读得出来；靠页面自己"记住上次选的"则做不到这件事，
+    // 而且那种链接发出去之后，别人看到的是他自己的默认值。
+    const paths = [
+      { name: "agent", title: "认知通路" },
+      { name: "evaluator", title: "评估器通路" },
+    ];
+    const links = [];
+    variants.forEach(function (item) {
+      paths.forEach(function (path) {
+        const href = "/maze?variant=" + encodeURIComponent(item.name) +
+          "&path=" + path.name + "&seed=7";
+        links.push(
+          "<a class=\"demo-link\" href=\"" + escapeHtml(href) + "\">" +
+          "<div class=\"t\">" + escapeHtml(item.title) + "　" + path.title + "</div>" +
+          "<div class=\"s\">" + escapeHtml(item.name + "　" + path.name + "　seed 7") + "</div>" +
+          "</a>"
+        );
+      });
+    });
+    $("maze-links").innerHTML = links.length
+      ? links.join("")
+      : "（清单里一关都没有）";
   } catch (error) {
+    $("maze-links").textContent = "取演示清单失败：" + error.message;
     log("取关卡名单失败：" + error.message, "err");
   }
 }
 
-// `?maze=<种子>` 直接在打开时跑一局。
+// 演示页与首页是**同一个页面**，只是藏起了别的区块。
 //
-// 加它有两个用处：**这一局可以分享**（把链接发给别人，他看到的和你看到的是同一局——
-// 同一 seed 是确定性的），以及**这一页可以被截下来**——没有这个参数，
-// 一张截图永远只是"还没运行"的样子。
+// 判据取自路径，而不是另开一份模板：复制一份"迷宫专用页"看起来更省事，
+// 代价是两份布局迟早分叉——而分叉的那一天，你在演示页里看到的东西
+// 与它在控制台里的样子不是同一个。
 (function () {
+  const demo = window.location.pathname.replace(/\/+$/, "") === "/maze";
   const params = new URLSearchParams(window.location.search);
-  if (!params.has("maze")) { return; }
-  const seed = parseInt(params.get("maze"), 10);
-  $("maze-seed").value = String(Number.isFinite(seed) ? seed : 7);
-  if (params.has("path")) { $("maze-path").value = params.get("path"); }
-  // 变体要等名单取回来才设得上，所以用 `setTimeout` 排在它后面。
-  if (params.has("variant")) {
+
+  if (demo) {
+    document.body.classList.add("demo");
+    // 演示页打开就跑，不用先点一下。
+    if (params.has("seed")) {
+      const seed = parseInt(params.get("seed"), 10);
+      $("maze-seed").value = String(Number.isFinite(seed) ? seed : 7);
+    }
+    if (params.has("path")) { $("maze-path").value = params.get("path"); }
+    if (params.has("at")) { mazeAtOnLoad = parseInt(params.get("at"), 10) || 0; }
+    // 变体要等清单取回来才设得上，所以排在它后面。
     const wanted = params.get("variant");
-    window.setTimeout(function () { $("maze-variant").value = wanted; }, 0);
+    window.setTimeout(function () {
+      if (wanted) { $("maze-variant").value = wanted; }
+      $("maze-run").click();
+    }, 0);
   }
-  if (params.has("at")) { mazeAtOnLoad = parseInt(params.get("at"), 10) || 0; }
-  window.setTimeout(function () { $("maze-run").click(); }, 0);
 })();
 </script>
 </body>
 </html>
 "#;
 
-/// 页面路径是否是控制台首页。
+/// 这一个路径是不是要发控制台那一份 HTML。
+///
+/// `/maze` 发的是**同一份**，由页面自己按路径决定藏起哪些区块。
+/// 另开一份"演示专用模板"看起来更省事，代价是两份迟早分叉——而分叉的那一天，
+/// 演示页里看到的与它在控制台里的样子不是同一个东西，且没有任何信号会告诉你。
 pub fn is_index(request: &Request) -> bool {
-    request.method == "GET" && request.path == "/"
+    request.method == "GET" && matches!(request.path.as_str(), "/" | "/maze")
 }
