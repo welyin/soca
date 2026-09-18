@@ -67,8 +67,9 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
     border-radius: 3px; margin: 1px;
   }
   .maze-cell.wall { background: #2a2f3a; color: #2a2f3a; }
-  .maze-cell.empty, .maze-cell.floor { background: #eef1f5; color: #9aa4b2; }
-  .maze-cell.unseen { background: #dfe3ea; color: #b6bec9; }
+  /* 实的那层（此刻认得的）：底色更实，字形看得清。 */
+  .maze-cell.empty, .maze-cell.floor { background: #dde5ef; color: #6b7787; }
+  .maze-cell.unseen { background: #eef1f5; color: #c2c9d3; }
   .maze-cell.unknown { background: transparent; color: transparent; }
   .maze-cell.agent { background: #2f6feb; color: #fff; font-weight: 700; }
   .maze-cell.key { background: #ffe08a; color: #8a5a00; }
@@ -79,6 +80,14 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   .maze-cell.ball, .maze-cell.box { background: #cfe0ff; color: #24457a; }
   tr.current { background: #eaf1ff; font-weight: 600; }
   .wait-list { font-size: 11px; line-height: 1.5; margin-top: 3px; max-width: 320px; }
+  /* 淡的那层（这一局最后才认得的）：**虚边 + 白底**，与"此刻认得"一眼分得开。
+     两层的底色原来是同一族的浅灰，结果看不出那张图在长大——而那正是它存在的理由。 */
+  .maze-cell.ghost {
+    background: #fcfdff; color: #ced5df;
+    box-shadow: inset 0 0 0 1px #e9edf3;
+  }
+  /* 走过的格子：加一圈边，让"它去过哪儿"看得出来。 */
+  .maze-cell.visited { box-shadow: inset 0 0 0 2px #7d9ce0; }
 
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -215,7 +224,10 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       </div>
       <div>
         <div class="hint" style="margin-bottom:6px">
-          它拼出来的地图（★ 走过、· 认得）——往回拖，这张图会跟着缩回去
+          它拼出来的地图——<b>实的是"此刻认得的"，淡的是"这一局最后才认得的"</b>（当地形参照）；
+          蓝框是走过的地方，蓝块是它现在在哪。往回拖滑块，<b>实的会缩回去，淡的不动</b>。
+          <br>淡的那层<b>不是迷宫真值</b>——真值不在公开面上（§15.2）。它是这一局跑完之后
+          它自己认得的东西，只是对 8×8 的 DoorKey 恰好把 64 格走遍了。
         </div>
         <div id="maze-map" class="maze-grid"></div>
       </div>
@@ -837,6 +849,8 @@ let pendingStrategy = null;
 let mazeRun = null;
 let mazeAt = 0;
 let mazeTimer = null;
+/// `?at=N` 让链接停在某一步上——截图与"给他看那一步"都要它。
+let mazeAtOnLoad = null;
 
 function mazeGlyph(cell) {
   if (cell.object === "agent") { return "你"; }
@@ -883,32 +897,63 @@ function renderMaze() {
     })
     .join("");
 
-  // 地图：把世界坐标归一化到 0..max，画成一张固定大小的格子图。
+  // 地图分三层画：
   //
-  // **画的是"到这一步为止"的那一张**，不是最后那一张。往回拖滑块时地图会缩回去——
-  // 而它长大这件事，就是"探索"本身。画最后那一张的话，任何一步上看到的都是
-  // "它最后知道了什么"，于是"一步步探索"在页面上就只剩下"它探索完了"。
-  const cells = step.map || mazeRun.map || [];
-  const xs = cells.map(function (cell) { return cell.at[0]; });
-  const ys = cells.map(function (cell) { return cell.at[1]; });
+  // 1. **背景**——这一局**最终认得**的那张图（走完时它覆盖了全部 64 格），画成淡的。
+  //    它是参照物：让你看得出"它现在认得的这一块，是整座迷宫的哪一部分"。
+  // 2. **前景**——到这一步为止认得的那张，画成实的。往回拖滑块，实的那层会缩回去，
+  //    而淡的那层不动——**缩回去的才是探索**。
+  // 3. **走过的地方**标出来，以及 agent 自己。
+  //
+  // ## 框架必须固定，不能每一步各自归一化
+  //
+  // 原来是把每一步的格子重新 fit 到 0..max。那样做的后果是：每发现一格新地方，
+  // 整张图就重排一次——同一个格子在相邻两步里画在不同的位置。看起来像地图在跳，
+  // 而"没有参照物"正是这么来的。
+  //
+  // 框架现在由**最终那张**定，与当前步无关，于是它在整段回放里一动不动。
+  //
+  // ## 背景不是真值
+  //
+  // 它是**这一局跑完之后认得的东西**，不是迷宫的真值——真值不在公开面上（§15.2：
+  // "迷宫不泄露全图/绝对真值"）。对 DoorKey-8x8 这两者恰好一样（它最后把 64 格全走遍了），
+  // 而那是**这一局的结果**，不是我们绕过那条规矩拿到的。
+  const frame = mazeRun.map || [];
+  const xs = frame.map(function (cell) { return cell.at[0]; });
+  const ys = frame.map(function (cell) { return cell.at[1]; });
   const minX = Math.min.apply(null, xs.concat([step.position[0]]));
   const maxX = Math.max.apply(null, xs.concat([step.position[0]]));
   const minY = Math.min.apply(null, ys.concat([step.position[1]]));
   const maxY = Math.max.apply(null, ys.concat([step.position[1]]));
-  const lookup = {};
-  cells.forEach(function (cell) { lookup[cell.at[0] + "," + cell.at[1]] = cell; });
+
+  const wholeRun = {};
+  frame.forEach(function (cell) { wholeRun[cell.at[0] + "," + cell.at[1]] = cell; });
+  const soFar = {};
+  (step.map || []).forEach(function (cell) { soFar[cell.at[0] + "," + cell.at[1]] = cell; });
+  // 它走过哪儿：到这一步为止每一步的落点。这是**回放出来的**，不是另存的一栏——
+  // 每一步的位置本来就在轨迹里，另存一份迟早会和它对不上。
+  const trail = {};
+  mazeRun.steps.slice(0, mazeAt + 1).forEach(function (item) {
+    trail[item.position[0] + "," + item.position[1]] = true;
+  });
 
   let rows = "";
   for (let y = minY; y <= maxY; y += 1) {
     let line = "";
     for (let x = minX; x <= maxX; x += 1) {
+      const at = x + "," + y;
       let glyph = " ";
       let kind = "unknown";
       if (x === step.position[0] && y === step.position[1]) {
         glyph = "你"; kind = "agent";
-      } else if (lookup[x + "," + y]) {
-        glyph = mapGlyph(lookup[x + "," + y]);
-        kind = lookup[x + "," + y].object;
+      } else if (soFar[at]) {
+        glyph = mapGlyph(soFar[at]);
+        kind = soFar[at].object;
+        if (trail[at]) { kind += " visited"; }
+      } else if (wholeRun[at]) {
+        // 这一局**最后**认得、而此刻还没认得的：淡着画，只当地形参照。
+        glyph = mapGlyph(wholeRun[at]);
+        kind = "ghost";
       }
       line += "<span class=\"maze-cell " + escapeHtml(kind) + "\">" + escapeHtml(glyph) + "</span>";
     }
@@ -986,7 +1031,9 @@ $("maze-run").onclick = async function () {
       path: $("maze-path").value,
     });
     mazeRun = result.run;
-    mazeAt = 0;
+    mazeAt = mazeAtOnLoad === null
+      ? 0
+      : Math.max(0, Math.min(mazeAtOnLoad, mazeRun.steps.length - 1));
     const waited = mazeRun.steps.reduce(function (sum, step) { return sum + (step.rounds_waited || 0); }, 0);
     const gated = mazeRun.steps.filter(function (step) { return step.permit_id; }).length;
     $("maze-summary").innerHTML =
@@ -1386,6 +1433,21 @@ $("message").addEventListener("keydown", function (event) {
 
 refresh();
 refreshModel();
+
+// `?maze=<种子>` 直接在打开时跑一局。
+//
+// 加它有两个用处：**这一局可以分享**（把链接发给别人，他看到的和你看到的是同一局——
+// 同一 seed 是确定性的），以及**这一页可以被截下来**——没有这个参数，
+// 一张截图永远只是"还没运行"的样子。
+(function () {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("maze")) { return; }
+  const seed = parseInt(params.get("maze"), 10);
+  $("maze-seed").value = String(Number.isFinite(seed) ? seed : 7);
+  if (params.has("path")) { $("maze-path").value = params.get("path"); }
+  if (params.has("at")) { mazeAtOnLoad = parseInt(params.get("at"), 10) || 0; }
+  window.setTimeout(function () { $("maze-run").click(); }, 0);
+})();
 </script>
 </body>
 </html>
