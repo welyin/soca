@@ -11,7 +11,7 @@
 //! 后半句（峰值）还没有。写在这里，免得读的人以为整行都做完了。
 
 use soca_contracts::{
-    ActionLevel, Approval, ApprovalId, CapabilityPolicyRef, ExplorationQuota, GoalBudget,
+    ActionLevel, Approval, ApprovalId, CapabilityPolicyRef, DataClass, ExplorationQuota, GoalBudget,
     ModelBackend, ModelBudget, ModelReservation, ModelVersion, PermissionScope, PlanState,
     PlannerPolicy, ResourceEnvelope, SelectionPolicy, Sha256Hex, SubjectId, UserChannel, WallClock,
     LEAF_PROFILES,
@@ -108,6 +108,135 @@ fn soca_topology_plan(
         &PlannerPolicy::default(),
     )
     .expect("规划")
+}
+
+// ---------------------------------------------------------------------------
+// 峰值（§17 的后半句）
+// ---------------------------------------------------------------------------
+
+/// 观测一次、跑一轮，直到记下一条结论。返回那条记忆的标识。
+fn record_one(subject: &mut Subject, offset: i64) -> soca_contracts::MemoryId {
+    subject
+        .observe(WATCHED, DataClass::Personal, at(offset))
+        .expect("观测");
+    subject
+        .run_round(
+            &SelectionPolicy::default(),
+            ActionLevel::A1,
+            at(offset + 1),
+        )
+        .expect("跑一轮");
+    subject
+        .store()
+        .recall(&owner(), None, at(offset + 2))
+        .expect("召回")
+        .last()
+        .map(|entry| entry.memory_id.clone())
+        .expect("这一轮应当记下一条结论")
+}
+
+#[test]
+fn a_peak_survives_the_value_falling_back() {
+    // 这一条就是 §17 那半句的落点。
+    //
+    // 峰值**不能**在事后从采样里算——那要求把所有采样都留着，而"留所有采样"正是长跑里
+    // 最先撑不住的东西。所以它必须在**值变化的那一刻**记下来。而"值掉回去了、峰值还在"
+    // 正是"事后算"做不到的那件事：事后只看得到现在是多少。
+    let mut subject = subject();
+    delegate(&mut subject);
+    let first = record_one(&mut subject, 2);
+    let second = record_one(&mut subject, 5);
+
+    let peak = subject
+        .resource_ledger()
+        .metric("memories")
+        .expect("跑过轮就该有计量")
+        .peak;
+    assert!(peak >= 2, "两次结论该把峰值推到 2：{peak}");
+
+    // 把两条都删掉、再清理掉。当前值会掉回去。
+    subject.forget(&first, at(8)).expect("删第一条");
+    subject.forget(&second, at(9)).expect("删第二条");
+    subject
+        .enforce_retention(&soca_core::RetentionPolicy::default(), at(10))
+        .expect("清理");
+
+    let metric = subject
+        .resource_ledger()
+        .metric("memories")
+        .expect("有计量");
+    assert_eq!(metric.current, 0, "当前值该掉到 0");
+    assert_eq!(
+        metric.peak, peak,
+        "而峰值要留在原处——它记的是'被撑到过哪里'，不是'现在是多少'"
+    );
+    assert!(
+        metric.peak_at.is_some(),
+        "峰值出现的时刻要记着：'第 3 分钟还是第 11 小时'决定了它是启动抖动还是泄漏"
+    );
+    assert!(
+        subject.resource_ledger().headroom("memories") >= 2,
+        "两者之差就是'退回去多少'"
+    );
+}
+
+#[test]
+fn a_new_window_starts_from_the_current_value_not_from_zero() {
+    // §17 要"先 8 小时后 24 小时试运行"——两段。第一段的峰值不该污染第二段。
+    //
+    // 而把峰值压到 **0** 会让新窗口的峰值比实际低，因为"当时已经是 2 了"这件事被抹掉了。
+    // 一个偏低的峰值比没有峰值更糟：它看起来是个答案。
+    let mut subject = subject();
+    delegate(&mut subject);
+    let kept = record_one(&mut subject, 2);
+
+    subject.reset_resource_peaks(at(6)).expect("开新窗口");
+    let metric = subject
+        .resource_ledger()
+        .metric("memories")
+        .expect("有计量");
+    assert_eq!(metric.current, 1, "那条结论还在");
+    assert_eq!(metric.peak, 1, "新窗口的峰值起点是当前值，不是 0");
+
+    // 而新窗口确实重新开始积累。
+    let _other = record_one(&mut subject, 7);
+    assert!(
+        subject
+            .resource_ledger()
+            .metric("memories")
+            .expect("有计量")
+            .peak
+            >= 2,
+        "新窗口照样往上记"
+    );
+    let _ = kept;
+}
+
+#[test]
+fn every_round_samples_so_the_peak_does_not_depend_on_who_is_looking() {
+    // 采样发生在**动作之后**，而不是"读状态的时候现算"。
+    //
+    // 差别是实的：现算的话，记下的峰值只反映"有人来看过的那几个时刻"，
+    // 而把一台机器压垮的那一下通常发生在没人看的时候。这条测试**一次也不读**
+    // `public_state`，然后断言峰值已经涨上去了。
+    let mut subject = subject();
+    delegate(&mut subject);
+    assert!(
+        subject.resource_ledger().metric("events").is_none(),
+        "还没干过活，账上应当是空的"
+    );
+
+    let _ = record_one(&mut subject, 2);
+
+    let events = subject
+        .resource_ledger()
+        .metric("events")
+        .expect("跑过轮就该采过样");
+    assert!(events.peak >= 1, "观测写了一条事件：{events:?}");
+    assert!(
+        subject.resource_ledger().total_peak() > 0,
+        "总峰值要能报出来"
+    );
 }
 
 // ---------------------------------------------------------------------------

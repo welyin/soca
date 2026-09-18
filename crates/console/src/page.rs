@@ -97,6 +97,24 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       这些数字全部来自主体自己持有的状态。界面上没有任何前端推算——
       界面看到的必须和 agent 依据的是同一份东西，否则两者会开始互相解释。
     </div>
+    <h2 style="margin-top:22px">资源峰值（§17）</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §17：「记录<b>峰值</b>私有提交及工作集，<b>不只看平均值</b>。」
+      峰值不能在事后从采样里算——那要求把所有采样都留着，而那正是长跑里最先撑不住的东西。
+      所以它在<b>值变化的那一刻</b>记下来，记的是"这一段被撑到过哪里"。
+    </div>
+    <div class="hint">
+      记的是<b>进程自己知道的那部分</b>：内容仓字节、事件与审计条数、内存里的池子。
+      真正的 OS 数字（工作集、私有提交）该由适配器提供，本版没有——所以这里<b>不是</b>工作集。
+    </div>
+    <table id="resources" style="margin-top:14px">
+      <thead><tr><th>计量</th><th>当前</th><th>峰值</th><th>峰值时刻</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row" style="margin-top:12px">
+      <button id="reset-peaks" class="ghost">开一段新的计量窗口</button>
+      <span class="hint">把峰值压到<b>当前值</b>，不是 0——压到 0 会让新窗口的峰值偏低，而一个偏低的峰值比没有峰值更糟：它看起来是个答案</span>
+    </div>
   </section>
 
   <section>
@@ -428,6 +446,8 @@ function renderState(state) {
     return '<div class="metric"><div class="k">' + m[0] + '</div><div class="v">' + m[1] + "</div></div>";
   }).join("");
 
+  renderResources(state.resources);
+
   const tbody = $("goals");
   if (state.goals.length === 0) {
     tbody.innerHTML = '<tr><td colspan="4" class="empty">还没有目标</td></tr>';
@@ -611,6 +631,31 @@ $("run-select").onclick = async function () {
 
 // 重试条件的**中文说法**。放在这里而不是后端，是因为它要读的是"接下来该做什么"，
 // 而那句话是给用户看的措辞——后端给的是取值（`when_unpaused`），不是句子。
+// 资源峰值表。**当前与峰值并排**，而不是只显示一个数——§17 要的正是这个对照：
+// 一个当下很轻的进程可能刚刚才被撑到过边上。
+function renderResources(resources) {
+  const tbody = $("resources").querySelector("tbody");
+  const metrics = resources && resources.metrics ? resources.metrics : {};
+  const names = Object.keys(metrics).sort();
+  if (names.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">还没有采过样</td></tr>';
+    return;
+  }
+  tbody.innerHTML = names
+    .map(function (name) {
+      const metric = metrics[name];
+      // 峰值高过当前值时标出来：那说明它被撑到过，而现在退回去了。
+      const marker = metric.peak > metric.current ? "　←" : "";
+      return "<tr>"
+        + "<td>" + escapeHtml(name) + "</td>"
+        + "<td>" + metric.current + "</td>"
+        + "<td>" + metric.peak + marker + "</td>"
+        + "<td>" + escapeHtml(metric.peak_at || "—") + "</td>"
+        + "</tr>";
+    })
+    .join("");
+}
+
 function retryLabel(retry) {
   if (!retry) { return "—"; }
   switch (retry.kind) {
@@ -650,6 +695,16 @@ function renderRejections(candidates, rejections) {
 // 上一次提的建议。**必须由用户显式提交回来**——"提了就等于启用了"是 §13.2 那句话最容易
 // 落空的地方，而落空之后看不出来。
 let pendingStrategy = null;
+
+$("reset-peaks").onclick = async function () {
+  try {
+    const result = await api("resources/reset", {});
+    log("已开一段新的计量窗口：" + result.note, "ok");
+  } catch (error) {
+    log("重置失败：" + error.message, "err");
+  }
+  refresh();
+};
 
 $("run-learning").onclick = async function () {
   try {

@@ -66,6 +66,7 @@ pub fn handle(
         // 建议与启用分开两个路径：§13.2 说系统"可建议……但必须经过准入"，
         // 而"提了就等于启用了"正是那句话最容易落空的地方。
         ("POST", "/api/learning") => propose_strategy(subject, request, at),
+        ("POST", "/api/resources/reset") => reset_resource_peaks(subject, request, at),
         ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
         ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
         ("POST", "/api/write") => request_write(subject, request, at),
@@ -975,6 +976,25 @@ fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response
             500,
             &json!({"error": "round_failed", "detail": error.to_string()}),
         ),
+    }
+}
+
+/// 开一段新的资源计量窗口（§17 的"先 8 小时后 24 小时试运行"）。
+///
+/// 单独一条路径，而不是让 `/api/state` 顺手清一次：峰值是**证据**，而"什么时候把它清掉"
+/// 是一个判断。混进读状态里的话，一次查看会把 8 小时的记录清空——而查看恰恰是压力最大的
+/// 时候会做的事。
+fn reset_resource_peaks(subject: &mut Subject, _request: &Request, at: WallClock) -> Response {
+    match subject.reset_resource_peaks(at) {
+        Ok(()) => Response::json(
+            200,
+            &json!({
+                "resources": subject.resource_ledger(),
+                "note": "峰值压到**当前值**，不是 0——压到 0 会让新窗口的峰值比实际低，\
+                         而一个偏低的峰值比没有峰值更糟：它看起来是个答案。",
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
     }
 }
 

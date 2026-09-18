@@ -1313,6 +1313,57 @@ fn correcting_by_a_source_that_nothing_was_derived_from_retracts_nothing() {
 }
 
 #[test]
+fn the_console_reports_peaks_not_just_current_values() {
+    // §17 那半句："记录**峰值**私有提交及工作集，**不只看平均值**。"
+    //
+    // 两件事一起测：**当前与峰值成对出现**，以及**值掉回去之后峰值还在**。
+    // 少了后者，这份数据与"当前值"没有区别——而 §17 要的正是那个差别。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+
+    let before = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))))["resources"]["metrics"]
+        ["memories"]
+        .clone();
+    let peak = before["peak"].as_u64().expect("数字");
+    assert!(peak >= 1, "干过活就该有峰值：{before}");
+    assert!(
+        before["peak_at"].as_str().is_some(),
+        "峰值出现的时刻要记着：{before}"
+    );
+
+    // 删掉那条结论：当前值掉回去。
+    call(
+        &mut subject,
+        "POST",
+        "/api/forget",
+        &body(json!({"memory_id": memory_id})),
+    );
+
+    let after = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))))["resources"]["metrics"]
+        ["memories"]
+        .clone();
+    assert_eq!(after["current"], 0, "当前值该掉到 0：{after}");
+    assert_eq!(after["peak"], peak, "而峰值要留在原处：{after}");
+
+    // 开一段新窗口：峰值从**当前值**起算，不是 0。
+    let reset = json(&call(
+        &mut subject,
+        "POST",
+        "/api/resources/reset",
+        &body(json!({})),
+    ));
+    let fresh = reset["resources"]["metrics"]["memories"].clone();
+    assert_eq!(fresh["peak"], 0, "当前本来就是 0，所以新窗口的峰值是 0");
+    assert!(
+        reset["resources"]["metrics"]["events"]["peak"]
+            .as_u64()
+            .expect("数字")
+            >= 1,
+        "别的计量照旧：{reset}"
+    );
+}
+
+#[test]
 fn the_console_stops_the_loop_when_told_the_machine_is_out_of_resources() {
     // §17 的"弹性"那一行："**人为**降低可用内存、GPU OOM、磁盘忙时，**停止后台扩容**并
     // 保持取消/审批可响应。"

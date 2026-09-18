@@ -51,6 +51,7 @@ use soca_storage::{ContentRetention, ContentStore, Store};
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
 use crate::policy::{PermitDecision, PolicyAgent};
+use crate::resources::ResourceLedger;
 use crate::retention::{
     expire_retained, forget as forget_memory, purge_retained, RetentionPolicy, RetentionReport,
 };
@@ -385,6 +386,11 @@ pub struct PublicState {
     pub strategy_version: String,
     /// 当前已准入的选择策略。
     pub strategy: SelectionPolicy,
+    /// 资源峰值账（§17 的"记录峰值……不只看平均值"）。
+    ///
+    /// 给的是**当前值与峰值成对**的东西，而不是一个数：§17 要的正是这个成对关系——
+    /// "不只看平均值"的意思是，一个当下很轻的进程可能刚刚才被撑到过边上。
+    pub resources: ResourceLedger,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 已经隐藏、等着清理的记忆条数（§12.3）。
@@ -467,6 +473,12 @@ pub struct Subject {
     /// 由策略内容派生（[`soca_contracts::strategy_version_of`]），所以它不需要"记得同步"——
     /// 换了内容就一定换了版本号，而同一个内容永远得到同一个版本号。
     strategy_version: StrategyVersion,
+    /// 资源峰值账（§17 的"记录峰值……不只看平均值"）。
+    ///
+    /// 在**每一次会改变它的动作之后**采样，见 [`Subject::sample_resources`]。不是"读的时候
+    /// 现算一个当前值"：那样记下的峰值只反映**有人来看过的那几个时刻**，而把一台机器压垮的
+    /// 那一下恰恰通常发生在没人看的时候。
+    resources: ResourceLedger,
 }
 
 impl std::fmt::Debug for Subject {
@@ -545,7 +557,59 @@ impl Subject {
             // "v1"。写死的话，改了默认值而忘了改版本号，两种默认值会共用同一个版本号。
             strategy: SelectionPolicy::default(),
             strategy_version: soca_contracts::strategy_version_of(&SelectionPolicy::default())?,
+            resources: ResourceLedger::default(),
         })
+    }
+
+    /// 记一次资源采样（§17 的"记录峰值……不只看平均值"）。
+    ///
+    /// 在每一次会改变它的动作之后调用。**不是**在读的时候现算：那样记下的峰值只反映
+    /// "有人来看过的那几个时刻"，而把一台机器压垮的那一下通常发生在没人看的时候。
+    ///
+    /// 记的是**进程自己知道的那部分**——内容仓的字节、事件与审计的条数、内存里的池子。
+    /// 它们是"私有提交"里可归因的那部分，而可归因的那部分才是能拿去做决策的。
+    /// 真正的 OS 数字（`GetPerformanceInfo`）该由适配器提供，本版没有；这一点写在
+    /// [`ResourceLedger`] 的文档里，免得读的人以为这里记的是工作集。
+    fn sample_resources(&mut self, at: WallClock) -> Result<(), CoreError> {
+        let content_bytes = self.content.bytes()?;
+        let events = self.store.event_count()?;
+        let audit_rows = self.store.audit_count()?;
+        let memories = self.store.memory_count(&self.owner)?;
+        let actions = self.store.action_count()?;
+        let workspace = self.cluster.workspace();
+
+        self.resources.record("content_bytes", content_bytes, at);
+        self.resources
+            .record("events", u64::try_from(events).unwrap_or(0), at);
+        self.resources
+            .record("audit_rows", u64::try_from(audit_rows).unwrap_or(0), at);
+        self.resources
+            .record("memories", u64::try_from(memories).unwrap_or(0), at);
+        self.resources
+            .record("actions", u64::try_from(actions).unwrap_or(0), at);
+        self.resources
+            .record("evidence_pool", self.observed.len() as u64, at);
+        self.resources
+            .record("ledger_records", self.cluster.ledger().len() as u64, at);
+        self.resources
+            .record("workspace_evidence", workspace.evidence().len() as u64, at);
+        self.resources.record("workspace_topics", workspace.topic_count() as u64, at);
+        Ok(())
+    }
+
+    /// 资源峰值账（§17）。
+    pub fn resource_ledger(&self) -> &ResourceLedger {
+        &self.resources
+    }
+
+    /// 开一段新的计量窗口：把峰值压到当前值（§17 的"先 8 小时后 24 小时试运行"）。
+    ///
+    /// 它先采一次样，所以"当前的量"本身就是新窗口的起点——压到 0 会让新窗口的峰值偏低，
+    /// 而一个偏低的峰值比没有峰值更糟：它看起来是个答案。
+    pub fn reset_resource_peaks(&mut self, at: WallClock) -> Result<(), CoreError> {
+        self.sample_resources(at)?;
+        self.resources.reset_peaks(at);
+        Ok(())
     }
 
     /// 主体标识。
@@ -829,6 +893,8 @@ impl Subject {
             data_class,
         });
         self.cluster.observe(&envelope, at)?;
+        // 观测是内容仓唯一会长的地方（正文按引用存），所以它之后的这一次采样最要紧。
+        self.sample_resources(at)?;
         Ok(record)
     }
 
@@ -1218,6 +1284,7 @@ impl Subject {
                 let _ = report;
             }
         }
+        self.sample_resources(at)?;
         Ok(admission)
     }
 
@@ -1364,6 +1431,13 @@ impl Subject {
             },
             SelectionOutcome::NothingToPursue => RoundOutcome::Idle,
         };
+
+        // 这一轮改动了世界的账（观测、结论、动作），所以在这里采一次样。
+        //
+        // 放在**一轮的末尾**而不是每一处改动的旁边：一轮是"一段工作"的自然单位，
+        // 而峰值要回答的正是"一整段工作把机器撑到了哪里"。放在每一处的话，
+        // 一处的中间态会被记成峰值——而那多半是个瞬时值，不是这一轮真实的高水位。
+        self.sample_resources(at)?;
 
         Ok(LoopRound {
             round,
@@ -1711,6 +1785,10 @@ impl Subject {
         if policy.purge {
             report.merge(purge_retained(&mut self.store, &self.content, policy, at)?);
         }
+        // 清理会**减少**记忆与内容字节，所以它也必须采样：一台只记"涨"的账会在清理之后
+        // 报出一个偏高的当前值，而偏高的当前值会让"还剩多少额度"的判断跟着错。
+        // 峰值不受影响——那正是它该有的样子。
+        self.sample_resources(at)?;
         Ok(report)
     }
 
@@ -1724,7 +1802,12 @@ impl Subject {
         memory_id: &MemoryId,
         at: WallClock,
     ) -> Result<RetentionReport, CoreError> {
-        forget_memory(&mut self.store, memory_id, "user_requested", at)
+        let report = forget_memory(&mut self.store, memory_id, "user_requested", at)?;
+        // 删除会改变"记忆条数"这个计量，所以它也要采样——否则台账上的 `current` 会停在
+        // 上一次采样时的值，而那是**过期的当前值**。这一条与"峰值"同样要紧：
+        // 一个说"当前有 12 条"而实际只有 2 条的界面，比不显示更糟。
+        self.sample_resources(at)?;
+        Ok(report)
     }
 
     /// 用户说"记错了"（§14）。
@@ -1797,6 +1880,8 @@ impl Subject {
                 retracted.len()
             ),
         )?;
+        // 纠错会写审计、写事件、隐藏记忆——三处都会进峰值账。
+        self.sample_resources(at)?;
 
         Ok(CorrectionReport {
             event_id: event_id.to_string(),
@@ -2188,6 +2273,7 @@ impl Subject {
             paused: self.policy.pause_reason().map(str::to_string),
             strategy_version: self.strategy_version.to_string(),
             strategy: self.strategy,
+            resources: self.resources.clone(),
             memory_entries: self.store.memory_count(&self.owner)?,
             memories_awaiting_purge: self.store.tombstoned_memory_count()?,
             actions: self.store.action_count()?,
