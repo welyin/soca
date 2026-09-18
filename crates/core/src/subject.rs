@@ -36,11 +36,11 @@ use soca_contracts::{
     Candidate, CandidateSet, CapabilityPolicyRef, CapabilitySlice, CognitiveUnit, ContextBundle,
     ContractError, DataClass, DerivationKind, EgressPolicy, Envelope, EventId, EvidenceRef,
     EvidenceSlice, Expectation, ExplorationQuota, GrantScope, GoalBudget, GoalId, GoalStack,
-    GoalState, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
+    GoalState, HoldoutSet, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
     MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
     OutputSchema, PayloadRef, PermitId, PermissionScope, PredictionRef, Provenance, ResourceCost,
     ResourceScope, RetryWhen, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId,
-    TaskId,
+    StrategyAdmission, StrategyCandidate, StrategyVersion, TaskId,
     ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
@@ -378,6 +378,13 @@ pub struct PublicState {
     /// 界面要能一眼看到它，因为暂停期间**三件事同时停了**：新许可、新采集、模型调用。
     /// 不显示的话，用户会看到"什么都没发生"，而原因（他自己按下的那个暂停）看不出来。
     pub paused: Option<String>,
+    /// 当前已准入的选择策略版本（§13.2 的"版本化启用"）。
+    ///
+    /// 与"当前策略"一起报，而不是只报版本号：版本号是一个摘要，出问题时把它拿去比一比
+    /// 能知道"换没换过"，但**换成了什么**要读那几个数字。
+    pub strategy_version: String,
+    /// 当前已准入的选择策略。
+    pub strategy: SelectionPolicy,
     /// 可见记忆条数。
     pub memory_entries: usize,
     /// 已经隐藏、等着清理的记忆条数（§12.3）。
@@ -446,6 +453,20 @@ pub struct Subject {
     handled_claims: Vec<String>,
     /// 策略代理（§12.2）。执行许可由它判定，而不是由调用方手搓。
     policy: PolicyAgent,
+    /// 当前**已准入**的选择策略（§13.2 的"版本化启用"）。
+    ///
+    /// 与 `policy` 那一层的分工：策略代理管"这次动作允不允许"（§12.1 的能力与审批），
+    /// 这一份管"哪条候选够格被推进"（§6 第 5 步的证据门槛）。
+    ///
+    /// 它**只由 [`Subject::admit_strategy`] 改动**，而那条路要过准入闸。调用方递进来的策略
+    /// 会与它取更严的一档（见 [`Subject::effective_policy`]），所以它是一道**下界**，
+    /// 不是一份可以被绕过的建议。
+    strategy: SelectionPolicy,
+    /// 当前策略的版本号。
+    ///
+    /// 由策略内容派生（[`soca_contracts::strategy_version_of`]），所以它不需要"记得同步"——
+    /// 换了内容就一定换了版本号，而同一个内容永远得到同一个版本号。
+    strategy_version: StrategyVersion,
 }
 
 impl std::fmt::Debug for Subject {
@@ -520,6 +541,10 @@ impl Subject {
             conversation_retention: ContentRetention::Days(CONVERSATION_RETENTION_DAYS),
             handled_claims: Vec::new(),
             policy,
+            // 起点是 `SelectionPolicy::default()`，而且**版本号由它派生**——不是写死的
+            // "v1"。写死的话，改了默认值而忘了改版本号，两种默认值会共用同一个版本号。
+            strategy: SelectionPolicy::default(),
+            strategy_version: soca_contracts::strategy_version_of(&SelectionPolicy::default())?,
         })
     }
 
@@ -1083,6 +1108,9 @@ impl Subject {
         risk: ActionLevel,
         at: WallClock,
     ) -> Result<(CandidateSet, Selection), CoreError> {
+        // §13.2：调用方给什么策略都行，但**实际用的不会比已准入的更松**。见
+        // [`Subject::effective_policy`]。
+        let policy = self.effective_policy(policy);
         let candidates = self.cluster.propose(at)?;
         let review_policy = ReviewPolicy::for_risk(risk, policy.high_risk_from, policy.max_checks);
         let reviews = review_all(
@@ -1091,8 +1119,106 @@ impl Subject {
             &self.content,
             &review_policy,
         );
-        let selection = select_candidate(&candidates, reviews, policy, risk)?;
+        let selection = select_candidate(&candidates, reviews, &policy, risk)?;
         Ok((candidates, selection))
+    }
+
+    /// 本次实际生效的策略（§13.2）。
+    ///
+    /// 取"调用方给的"与"已准入的"里**更严**的那一档。这不是一条建议，而是一道**下界**：
+    /// §13.2 说系统没有自行提高权限的能力，反过来说——**任何一条路径也不该能悄悄降低它**，
+    /// 包括调用方随手传一个更松的策略进来。
+    ///
+    /// 少了这一行，"只能变严"就只管住了 [`Subject::admit_strategy`] 那一个入口，而策略是
+    /// 每一轮都要从外面传进来的。一道只管住其中一个入口的闸，等于没有闸。
+    pub fn effective_policy(&self, requested: &SelectionPolicy) -> SelectionPolicy {
+        requested.tightened_by(&self.strategy)
+    }
+
+    /// 当前已准入的选择策略。
+    pub fn strategy(&self) -> &SelectionPolicy {
+        &self.strategy
+    }
+
+    /// 当前策略的版本。
+    pub fn strategy_version(&self) -> &StrategyVersion {
+        &self.strategy_version
+    }
+
+    /// 当前的保留任务集（§13.2 的"保留任务集检验"的输入）。
+    ///
+    /// 需要 `at` 是因为它复用 [`Store::recall`] 的到期过滤——一条过期的结论不该还算"对的"。
+    pub fn holdout(&self, at: WallClock) -> Result<HoldoutSet, CoreError> {
+        crate::learning::holdout_from(&self.store, &self.owner, at)
+    }
+
+    /// 从实际记录里提一个策略改进的候选（§13.2 的"系统可**建议**"）。
+    ///
+    /// 返回 `None` 表示没有可提的。**提议本身不改任何东西**——它要送进
+    /// [`Subject::admit_strategy`] 才算数，而那道闸对这个提议与对别处的提议一视同仁。
+    /// 这一点是刻意的：§13.2 说系统"可建议"，而不是"可自行启用"，而"建议方与审批方是同一段
+    /// 代码"正是最容易让那句话落空的地方。
+    pub fn propose_strategy(
+        &self,
+        risk: ActionLevel,
+        at: WallClock,
+    ) -> Result<Option<StrategyCandidate>, CoreError> {
+        let holdout = self.holdout(at)?;
+        Ok(soca_contracts::propose_strategy(
+            &self.strategy,
+            &holdout,
+            risk,
+        ))
+    }
+
+    /// 把一个策略候选送进准入闸，准了才启用（§13.2 的"必须经过准入"）。
+    ///
+    /// 准入的规则全在 [`soca_contracts::admit`] 里，本方法只做两件它做不了的事：把保留任务集
+    /// 从存储里取出来，以及**在准了之后真的把策略换掉**。
+    ///
+    /// 换掉时同时写两处：主体自己那一份（下一次选择用它），和能力簇的 `strategy_version`
+    /// （下一次 `checkpoint` 落进 `UnitSnapshot` 的那一份）。分两处不是冗余——
+    /// §9.2 要求"跨重启恢复的是**语义状态**"，而"当时用的是哪一版判定标准"正是语义状态的一部分。
+    pub fn admit_strategy(
+        &mut self,
+        candidate: &StrategyCandidate,
+        risk: ActionLevel,
+        at: WallClock,
+    ) -> Result<StrategyAdmission, CoreError> {
+        let holdout = self.holdout(at)?;
+        let admission = soca_contracts::admit(candidate, &self.strategy, &holdout, risk)?;
+
+        match &admission {
+            StrategyAdmission::Admitted { version, report } => {
+                self.strategy = candidate.policy;
+                self.strategy_version = version.clone();
+                self.cluster.set_strategy_version(version.clone());
+                self.store.audit(
+                    at,
+                    AuditCategory::PolicyChanged,
+                    version.as_str(),
+                    "strategy_admitted",
+                    &format!(
+                        "启用策略 {version}：证据门槛 {} 条；保留集上误伤 0 条、{} 条已知对仍放行",
+                        report.bar,
+                        holdout.known_right.len()
+                    ),
+                )?;
+            }
+            StrategyAdmission::Refused {
+                reason, report, ..
+            } => {
+                self.store.audit(
+                    at,
+                    AuditCategory::PolicyChanged,
+                    candidate.version.as_str(),
+                    "strategy_refused",
+                    reason,
+                )?;
+                let _ = report;
+            }
+        }
+        Ok(admission)
     }
 
     /// 请求在授权目录里写一份内容（§12.1 的 A2）。
@@ -2060,6 +2186,8 @@ impl Subject {
             ledger_records: self.cluster.ledger().len(),
             proposed_candidates: self.cluster.pending_proposals(),
             paused: self.policy.pause_reason().map(str::to_string),
+            strategy_version: self.strategy_version.to_string(),
+            strategy: self.strategy,
             memory_entries: self.store.memory_count(&self.owner)?,
             memories_awaiting_purge: self.store.tombstoned_memory_count()?,
             actions: self.store.action_count()?,

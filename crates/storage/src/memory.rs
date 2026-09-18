@@ -221,6 +221,38 @@ impl Store {
             .collect())
     }
 
+    /// 已经被删除、但还没被物理清理掉的记忆（§12.3 的第二步之前）。
+    ///
+    /// 存在的理由是：**"一条结论被删掉了"与"一条结论被证明是错的"是两件事**，
+    /// 而区分它们的信息（`tombstone_reason`）只留在这一层。用户主动删一条、保留期到期、
+    /// 或者他按了"记错了"，三种都会让条目不可见——把三者当成同一个信号，
+    /// 系统学到的教训就会是"有人删过东西"，然后据此把门槛提上去。
+    ///
+    /// 它只在**清理之前**读得到：`purge_tombstoned` 会把行删掉。也就是说这条信号有寿命，
+    /// 而那是 §12.3 的取舍（删除要真的删掉），不是这里的疏忽。
+    pub fn tombstoned_memories(
+        &self,
+        owner: &SubjectId,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.connection().prepare(&format!(
+            "SELECT {ENTRY_COLUMNS} FROM memory_entries
+              WHERE status = 'tombstoned' AND owner = ?1
+              ORDER BY recorded_at_utc, memory_id
+              LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![owner.as_str(), limit as i64], raw_from_row)?;
+
+        let mut found = Vec::new();
+        for row in rows {
+            found.push(assemble(row?)?);
+        }
+        Ok(found)
+    }
+
     /// 已经超过保留期、但尚未删除的可见记忆。
     ///
     /// §12.3 要求删除走 tombstone 流程并给用户完成状态，所以到期**不等于**已经删除：本方法

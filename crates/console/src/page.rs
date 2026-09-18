@@ -332,6 +332,33 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>策略改进与准入（§13.2）</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §13.2：「候选策略必须经过准入。系统可<b>建议</b>新的单元或拓扑，但<b>没有自行安装可执行
+      代码、修改签名策略或提高权限的能力</b>。」用得是「检验并选择」那一栏的风险档。
+    </div>
+    <div class="row">
+      <button id="run-learning" class="ghost">让系统提一个建议</button>
+      <button id="apply-learning">启用这个建议</button>
+    </div>
+    <div class="hint">
+      <b>两步分开是有意的。</b>「提了就等于启用了」是那句话最容易落空的地方——而落空之后
+      看不出来：账上会有一条像是经过了准入的记录。所以候选要<b>原样带回来</b>再提交一次。
+    </div>
+    <div class="hint">
+      <b>学习只能变严，不会变松。</b>而系统的"我错了"信号只有一个来源：用户按下
+      「记错了」（§14）。用户主动删掉、保留期到期、证据被撤回都<b>不算</b>——
+      把撤回一次权限当成一次纠错，门槛会莫名其妙地往上走。
+    </div>
+    <div class="hint">
+      过不了闸的两种情况会分别报出来：<b>会误伤</b>（新门槛连事后确认是对的结论一起挡了），
+      以及<b>没解决它声称的问题</b>（门槛抬得不够，那条错案照样放行）。前者说明这个错
+      <b>不能用提高门槛来纠正</b>——那是最有价值的答案。
+    </div>
+    <pre id="learning-out" style="margin-top:14px">（尚未运行）</pre>
+  </section>
+
+  <section>
     <h2>事件</h2>
     <div id="log"><div class="empty">还没有操作</div></div>
   </section>
@@ -611,6 +638,62 @@ function renderRejections(candidates, rejections) {
     })
     .join("");
 }
+
+// 上一次提的建议。**必须由用户显式提交回来**——"提了就等于启用了"是 §13.2 那句话最容易
+// 落空的地方，而落空之后看不出来。
+let pendingStrategy = null;
+
+$("run-learning").onclick = async function () {
+  try {
+    const result = await api("learning", { risk: $("select-risk").value });
+    $("learning-out").textContent = JSON.stringify(result, null, 2);
+    pendingStrategy = result.candidate || null;
+    if (result.outcome === "suggested") {
+      log(
+        "建议：证据门槛提到 " + result.candidate.policy.base_evidence + " 条（依据 " +
+        result.candidate.based_on.join("、") + "）；保留集里 " +
+        result.holdout.known_wrong + " 条错案、" + result.holdout.known_right + " 条对的",
+        "ok"
+      );
+    } else {
+      log("没有可提的：" + result.note, "ok");
+    }
+  } catch (error) {
+    $("learning-out").textContent = error.message;
+    log("提议失败：" + error.message, "err");
+  }
+  refresh();
+};
+
+$("apply-learning").onclick = async function () {
+  if (!pendingStrategy) { log("先让系统提一个建议", "err"); return; }
+  try {
+    const result = await api("learning/apply", {
+      risk: $("select-risk").value,
+      // 原样带回来，不让后端重新提一遍：取后者的话，"用户看到的那一份"与"实际启用的那一份"
+      // 之间就多了一个可以不一致的环节，而两边都是系统自己算的、版本号也一样。
+      version: pendingStrategy.version,
+      policy: pendingStrategy.policy,
+      based_on: pendingStrategy.based_on,
+      rationale: pendingStrategy.rationale,
+    });
+    $("learning-out").textContent = JSON.stringify(result, null, 2);
+    if (result.admitted) {
+      log("已启用策略 " + result.strategy_version + "，门槛 " + result.strategy.base_evidence + " 条", "ok");
+      pendingStrategy = null;
+    } else {
+      log(
+        "未启用：" + result.admission.reason +
+        "（下一步：" + retryLabel(result.admission.retry_when) + "）",
+        "err"
+      );
+    }
+  } catch (error) {
+    $("learning-out").textContent = error.message;
+    log("启用失败：" + error.message, "err");
+  }
+  refresh();
+};
 
 function showExec(label, result) {
   $("exec-out").textContent = JSON.stringify(result, null, 2);

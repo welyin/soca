@@ -339,6 +339,35 @@ impl Default for SelectionPolicy {
 }
 
 impl SelectionPolicy {
+    /// 取两个策略里**更严**的那一档，逐维比较。
+    ///
+    /// 四个维度的"更严"方向不一样，所以不能整体比大小：证据条数越高越严，而"从哪一档算高风险"
+    /// 越低越严（更多档被当成高风险）。写成一个函数而不是让调用方各自 `max`／`min`，
+    /// 是因为**方向搞反一维不会有任何报错**——它只会让系统在某类动作上悄悄松一点。
+    ///
+    /// §13.2 那句"系统……没有自行……提高权限的能力"，落到这里就是它：不管调用方递进来什么
+    /// 策略，实际用的门槛都不会低于已准入的那一档。少了这一条，"守规矩"就只是一种约定，
+    /// 而约定在有人图省事的时候就不作数了。
+    pub fn tightened_by(&self, other: &Self) -> Self {
+        Self {
+            base_evidence: self.base_evidence.max(other.base_evidence),
+            high_risk_extra: self.high_risk_extra.max(other.high_risk_extra),
+            // 越低越严：从 A1 起算高风险比从 A2 起算覆盖更多档。
+            high_risk_from: self.high_risk_from.min(other.high_risk_from),
+            // 核验预算是"能查多少"：给少了就是放松。
+            max_checks: self.max_checks.max(other.max_checks),
+        }
+    }
+
+    /// 是否**不比** `incumbent` 更松。
+    ///
+    /// 这一句就是准入里的"没有放宽"检查。之所以能让它长得这么短，是因为
+    /// [`SelectionPolicy::tightened_by`] 已经把"更严"定义清楚了：比它更松的策略被它夹过
+    /// 之后就等于它自己。
+    pub fn is_at_least_as_strict_as(&self, incumbent: &Self) -> bool {
+        self.tightened_by(incumbent) == *self
+    }
+
     /// 给定风险等级下的证据门槛（§6 第 5 步）。
     ///
     /// 逐级上升，不是"高风险就一律很高"：门槛是风险的函数这一点要能被测试，

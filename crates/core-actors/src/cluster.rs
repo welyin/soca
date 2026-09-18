@@ -117,6 +117,19 @@ impl DesktopAndFilesCluster {
         self.ledger.retracted_count()
     }
 
+    /// 换用一份新的策略版本（§13.2 的"版本化启用"）。
+    ///
+    /// **只能由准入流程调用**，而这里没有做任何检查——因为它做不了：准入闸要读保留任务集，
+    /// 而那是存储层的事，簇看不见。把它写在这里而不是留一个公开字段，是为了让"谁能改它"
+    /// 在类型上有个形状：一处 `&mut self` 的方法，名字就是它干的事。
+    ///
+    /// 它会经由 [`CognitiveUnit::checkpoint`] 落进 `UnitSnapshot.strategy_version`——
+    /// 也就是说，换了策略之后的那次降温，会把"当时用的是哪一版"写进快照。§9.2 要的
+    /// "跨重启恢复的是**语义状态**"里包含这一项。
+    pub fn set_strategy_version(&mut self, version: StrategyVersion) {
+        self.strategy_version = version;
+    }
+
     /// 授权根目录：守望对象所在的那一层（§12.1 的"指定目录"）。
     ///
     /// 守望对象本身是一个 `file:` 引用；它的父路径就是这次任务被授权触及的那一层。

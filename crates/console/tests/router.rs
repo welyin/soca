@@ -638,6 +638,122 @@ fn the_console_says_why_each_candidate_was_rejected_and_when_it_could_come_back(
 }
 
 // ---------------------------------------------------------------------------
+// 策略改进的准入（§13.2）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_console_separates_suggesting_a_strategy_from_enabling_it() {
+    // §13.2："系统可**建议**新的单元或拓扑，但……候选策略**必须经过准入**。"
+    //
+    // 两个接口，两步。合成一步（"提了就等于启用了"）是那句话最容易落空的地方——
+    // 而落空之后看不出来：账上有一条像是经过了准入的记录。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+    let state = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))));
+    let version_before = state["strategy_version"].clone();
+    assert!(
+        version_before.as_str().is_some_and(|v| !v.is_empty()),
+        "状态里要能看到当前策略版本：{state}"
+    );
+
+    // 攒一条错案：把记下的那条结论纠正掉。
+    let corrected = json(&call(
+        &mut subject,
+        "POST",
+        "/api/correct",
+        &body(json!({"memory_id": memory_id, "note": "记错了"})),
+    ));
+    assert_eq!(corrected["retracted"].as_array().expect("数组").len(), 1);
+
+    // 一、建议。**它什么都不改。**
+    let suggestion = json(&call(
+        &mut subject,
+        "POST",
+        "/api/learning",
+        &body(json!({"risk": "a1"})),
+    ));
+    assert_eq!(suggestion["outcome"], "suggested", "{suggestion}");
+    assert_eq!(
+        suggestion["holdout"]["known_wrong"], 1,
+        "保留任务集里要有那条错案：{suggestion}"
+    );
+
+    let after_suggesting = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))));
+    assert_eq!(
+        after_suggesting["strategy_version"], version_before,
+        "提建议不该动任何东西"
+    );
+
+    // 二、启用。候选要**原样带回来**，而不是让后端重新提一遍。
+    let candidate = suggestion["candidate"].clone();
+    let applied = json(&call(
+        &mut subject,
+        "POST",
+        "/api/learning/apply",
+        &body(json!({
+            "risk": "a1",
+            "version": candidate["version"],
+            "policy": candidate["policy"],
+            "based_on": candidate["based_on"],
+            "rationale": candidate["rationale"],
+        })),
+    ));
+    assert_eq!(applied["admitted"], true, "{applied}");
+
+    let after = json(&call(&mut subject, "GET", "/api/state", &body(json!({}))));
+    assert_ne!(after["strategy_version"], version_before, "启用了就该换版本号");
+    assert_eq!(applied["strategy_version"], after["strategy_version"]);
+    assert!(
+        after["strategy"]["base_evidence"].as_u64().expect("数字") >= 2,
+        "而门槛真的抬上去了：{after}"
+    );
+}
+
+#[test]
+fn the_console_refuses_a_strategy_that_loosens_anything() {
+    // §13.2："系统……没有自行……**提高权限**的能力。" 反过来说，也没有自行放宽的能力。
+    let mut subject = subject();
+    let memory_id = record_a_memory(&mut subject);
+    call(
+        &mut subject,
+        "POST",
+        "/api/correct",
+        &body(json!({"memory_id": memory_id, "note": "记错了"})),
+    );
+
+    // 手搓一个"把门槛降到 0"的候选。版本号按内容算——算错了闸会先以另一条理由挡下来，
+    // 而那条理由不是这条测试要看的。
+    let loosened = soca_contracts::SelectionPolicy {
+        base_evidence: 0,
+        high_risk_extra: 0,
+        high_risk_from: soca_contracts::ActionLevel::A4,
+        max_checks: 0,
+    };
+    let version =
+        soca_contracts::strategy_version_of(&loosened).expect("派生版本");
+
+    let applied = json(&call(
+        &mut subject,
+        "POST",
+        "/api/learning/apply",
+        &body(json!({
+            "risk": "a1",
+            "version": version.as_str(),
+            "policy": loosened,
+            "based_on": [memory_id],
+            "rationale": "试试能不能放宽",
+        })),
+    ));
+    assert_eq!(applied["admitted"], false, "{applied}");
+    assert_eq!(applied["admission"]["retry_when"]["kind"], "never");
+    assert_eq!(
+        json(&call(&mut subject, "GET", "/api/state", &body(json!({}))))["strategy"]["max_checks"],
+        8,
+        "策略一点没变"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 放弃与未知路径
 // ---------------------------------------------------------------------------
 

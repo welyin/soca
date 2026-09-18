@@ -34,6 +34,7 @@ pub mod goal;
 pub mod ids;
 pub mod inference;
 pub mod instance;
+pub mod learning;
 pub mod memory;
 pub mod policy;
 pub mod selection;
@@ -91,6 +92,10 @@ pub use crate::memory::{MemoryEntry, MemoryKind, MemoryStatus};
 pub use crate::policy::{
     ActionLevel, Approval, ApprovalRequirement, DataClass, EgressPolicy, EgressVerdict, GrantScope,
     PermissionScope,
+};
+pub use crate::learning::{
+    admit, evaluate_holdout, propose as propose_strategy, version_of as strategy_version_of,
+    HoldoutReport, HoldoutSet, RecordedConclusion, StrategyAdmission, StrategyCandidate,
 };
 pub use crate::selection::{
     select, CandidateReview, Rejection, RetryWhen, Selection, SelectionOutcome, SelectionPolicy,

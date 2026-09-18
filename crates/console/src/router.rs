@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, EventId,
     EvidenceRef, ExplorationQuota, GoalBudget, GoalId, GoalState, GrantScope, MemoryId,
-    PermissionScope, SelectionPolicy, Sha256Hex, UserChannel, WallClock,
+    PermissionScope, SelectionPolicy, Sha256Hex, StrategyCandidate, StrategyVersion, UserChannel,
+    WallClock,
 };
 use soca_core::{CoreError, Correction, RetentionPolicy, Scheduler, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
@@ -61,6 +62,10 @@ pub fn handle(
         ("POST", "/api/retention") => enforce_retention(subject, request, at),
         ("POST", "/api/forget") => forget_memory(subject, request, at),
         ("POST", "/api/correct") => correct(subject, request, at),
+        // 建议与启用分开两个路径：§13.2 说系统"可建议……但必须经过准入"，
+        // 而"提了就等于启用了"正是那句话最容易落空的地方。
+        ("POST", "/api/learning") => propose_strategy(subject, request, at),
+        ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
         ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
         ("POST", "/api/write") => request_write(subject, request, at),
         ("POST", "/api/approve") => grant_approval(subject, request, at),
@@ -592,6 +597,124 @@ fn correct(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
         // 指名了一条已经不存在的记忆会是 404：那是用户指错了东西，值得说出来。
         // 而那次纠错**已经记进事件账了**——顺序是先记再改。
         Err(error) => Response::text(404, error.to_string()),
+    }
+}
+
+/// 提一个策略改进的候选（§13.2 的"系统可**建议**"）。
+///
+/// 单独一条路径，而且**它什么都不改**。"建议"与"启用"分开成两个接口，是因为 §13.2 把
+/// 这两件事分得很清楚（"系统可建议……但必须经过准入"），而把它们并成一个接口
+/// ——"提了就等于启用了"——正是那句话最容易落空的地方。
+fn propose_strategy(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let risk = match parse_level(payload.get("risk").and_then(Value::as_str)) {
+        Ok(level) => level,
+        Err(message) => return Response::text(400, message),
+    };
+
+    let holdout = match subject.holdout(at) {
+        Ok(holdout) => holdout,
+        Err(error) => return internal(error.to_string()),
+    };
+
+    match subject.propose_strategy(risk, at) {
+        Ok(Some(candidate)) => Response::json(
+            200,
+            &json!({
+                "outcome": "suggested",
+                "candidate": candidate,
+                // 保留任务集的**规模**要一起报：它决定了这次建议有多少依据。空集时
+                // 闸会拒绝任何候选，而用户看到的应当是这个数字，不是一句"被拒了"。
+                "holdout": {
+                    "known_right": holdout.known_right.len(),
+                    "known_wrong": holdout.known_wrong.len(),
+                },
+                "note": "这只是建议。它要送进 /api/learning/apply 才算数——\
+                         而那道闸对这一个提议与对别处的提议一视同仁。",
+            }),
+        ),
+        Ok(None) => Response::json(
+            200,
+            &json!({
+                "outcome": "nothing_to_suggest",
+                "holdout": {
+                    "known_right": holdout.known_right.len(),
+                    "known_wrong": holdout.known_wrong.len(),
+                },
+                "note": "没有可提的：没有错案，或者当前门槛已经拦得住手上最严重的那一条。\
+                         「没有可提的」不是失败——提一个空改动会让版本号每次都变，\
+                         而审计上看起来系统在不停地学。",
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 把一个策略候选送进准入闸（§13.2 的"必须经过准入"）。
+///
+/// 候选**取自请求体**，而不是后端重新提一遍。取后者的话，"用户批准的那一份"与
+/// "实际启用的那一份"之间就多了一个可以不一致的环节——而这个环节出事时看不出来：
+/// 两边都是系统自己算的，版本号也一样。
+fn admit_strategy(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let risk = match parse_level(payload.get("risk").and_then(Value::as_str)) {
+        Ok(level) => level,
+        Err(message) => return Response::text(400, message),
+    };
+
+    let Some(policy) = payload.get("policy") else {
+        return Response::text(400, "缺少 policy：候选要原样带回来，不能只报一个版本号");
+    };
+    let Ok(policy) = serde_json::from_value::<SelectionPolicy>(policy.clone()) else {
+        return Response::text(400, "policy 不是一份合法的选择策略");
+    };
+    let Some(raw_version) = payload.get("version").and_then(Value::as_str) else {
+        return Response::text(400, "缺少 version");
+    };
+    let Ok(version) = StrategyVersion::new(raw_version) else {
+        return Response::text(400, "version 不是合法的策略版本标识");
+    };
+    let based_on: Vec<String> = payload
+        .get("based_on")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let rationale = payload
+        .get("rationale")
+        .and_then(Value::as_str)
+        .unwrap_or("由界面提交")
+        .to_string();
+
+    let candidate = StrategyCandidate {
+        version,
+        policy,
+        rationale,
+        based_on,
+    };
+
+    match subject.admit_strategy(&candidate, risk, at) {
+        Ok(admission) => Response::json(
+            200,
+            &json!({
+                "admitted": admission.is_admitted(),
+                // 判定与它跑出来的报告一起给。只给"准／不准"的话，被拒时用户不知道
+                // 是"会误伤"还是"没解决它声称的问题"——而这两件事要做的事完全不同。
+                "admission": admission,
+                "strategy_version": subject.strategy_version(),
+                "strategy": subject.strategy(),
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
     }
 }
 
