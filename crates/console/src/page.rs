@@ -220,6 +220,15 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       暂停写不进审计也要停住——停住永远是安全的那一侧；而<b>恢复</b>相反，审计必须写在它前面，
       否则"怎样才能让这台机器放开"就有了一个答案：把审计写坏。
     </div>
+    <div class="hint">
+      <b>每一条候选都有去处</b>：要么被选中，要么留下一条拒绝记录，带着理由和
+      <b>可重试条件</b>（§13.1）。「等名额」与「等那条否掉它的证据变了」是两回事——
+      前者下一轮可能就好了，后者要有人去重新授权。合成一句"不行"的话，用户不知道该做什么。
+    </div>
+    <table id="rejections" style="margin-top:14px">
+      <thead><tr><th>#</th><th>候选</th><th>为什么不行</th><th>什么条件下能重来</th></tr></thead>
+      <tbody></tbody>
+    </table>
     <pre id="select-out" style="margin-top:14px">（尚未运行）</pre>
   </section>
 
@@ -556,6 +565,7 @@ $("run-select").onclick = async function () {
       ? ("选中候选 #" + result.outcome.index)
       : ("未选中：" + result.outcome.kind);
     log(chosen + "　跑了 " + checks + " 项检验，证据门槛 " + result.required_evidence + " 条", "ok");
+    renderRejections(result.candidates, result.rejections || []);
   } catch (error) {
     $("select-out").textContent = error.message;
     log("检验失败：" + error.message, "err");
@@ -563,6 +573,44 @@ $("run-select").onclick = async function () {
   $("run-select").disabled = false;
   refresh();
 };
+
+// 重试条件的**中文说法**。放在这里而不是后端，是因为它要读的是"接下来该做什么"，
+// 而那句话是给用户看的措辞——后端给的是取值（`when_unpaused`），不是句子。
+function retryLabel(retry) {
+  if (!retry) { return "—"; }
+  switch (retry.kind) {
+    case "never": return "此路不通（换一条，或重新授权／重新委托）";
+    case "more_evidence": return "还差 " + retry.short_by + " 条证据";
+    case "when_approved": return "补一次人工批准";
+    case "when_unpaused": return "等暂停结束（此刻不通，「此刻」会过去）";
+    case "when_capacity_freed": return "等名额（本轮已有 " + retry.held_by + " 条在等核验）";
+    case "when_next_round": return "下一轮再提（它进了核验，只是没赢）";
+    case "when_evidence_changes": return "等那条否掉它的证据变了";
+    default: return retry.kind;
+  }
+}
+
+function renderRejections(candidates, rejections) {
+  const tbody = $("rejections").querySelector("tbody");
+  if (rejections.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">这一轮没有被拒的候选</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rejections
+    .map(function (rejection) {
+      const candidate = candidates.find(function (item) {
+        return item.index === rejection.candidate_index;
+      });
+      const summary = candidate ? candidate.summary : "";
+      return "<tr>"
+        + "<td>" + rejection.candidate_index + "</td>"
+        + "<td>" + escapeHtml(summary) + "</td>"
+        + "<td>" + escapeHtml(rejection.reason) + "</td>"
+        + "<td>" + escapeHtml(retryLabel(rejection.retry_when)) + "</td>"
+        + "</tr>";
+    })
+    .join("");
+}
 
 function showExec(label, result) {
   $("exec-out").textContent = JSON.stringify(result, null, 2);

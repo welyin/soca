@@ -341,6 +341,152 @@ fn an_empty_candidate_set_selects_nothing() {
     assert_eq!(selection.selected_index(), None);
 }
 
+// ---------------------------------------------------------------------------
+// 拒绝台账与容量闸（§13.1）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_candidate_ends_up_either_selected_or_rejected_with_a_retry_condition() {
+    // §13.1："最**多 8 个待核验正式候选**。……**拒绝有原因和可重试条件**。"
+    //
+    // 最要紧的是这条**记账完整性**：每条候选要么被选中、要么有一条带理由和重试条件的
+    // 拒绝记录，没有第三种去处。此前它们是"没被选中"就消失了，而"消失"与"被拒"在界面上
+    // 一样，在调度器那里也一样。
+    let candidates = set(vec![
+        claim("文件是 sha256:aaa", &["1", "2", "3"]),
+        claim("文件是 sha256:bbb", &["4"]),
+        observation("file:other.md"),
+    ]);
+    let reviews = vec![CandidateReview::new(
+        1,
+        vec![VerificationOutcome {
+            kind: VerificationKind::CounterExample,
+            verdict: Verdict::Refuted,
+            evidence_refs: vec![evidence_ref("counter")],
+        }],
+    )];
+
+    let selection = select(&candidates, reviews, &policy(), ActionLevel::A2).expect("选择");
+    let selected = selection.selected_index().expect("应当选出一条");
+
+    for index in 0..candidates.candidates.len() {
+        assert!(
+            index == selected || selection.rejection_for(index).is_some(),
+            "候选 #{index} 既没被选中也没有拒绝记录"
+        );
+    }
+    for rejection in &selection.rejections {
+        assert!(!rejection.reason.is_empty(), "拒绝要给理由");
+    }
+
+    // 而三类拒绝要能分开：这一条**进了核验、够格、只是没赢**。
+    // 与"名额满了"（根本没进核验）混成一个取值的话，提出方收到的反馈会是同一句话，
+    // 而"我没排上队"与"我比了但没赢"要做的事不一样。
+    assert_eq!(
+        selection.rejection_for(2).expect("要有记录").retry_when,
+        RetryWhen::WhenNextRound
+    );
+    assert_eq!(
+        selection.rejection_for(1).expect("要有记录").retry_when,
+        RetryWhen::WhenEvidenceChanges
+    );
+}
+
+#[test]
+fn a_claim_below_the_bar_says_how_many_more_it_needs() {
+    // 门槛是风险等级的函数，而"没达标"要能说出**还差几条**。只说"证据不足"的话，
+    // 提出方下一轮只能瞎猜该补几条——而它恰好知道该补几条，因为门槛是公开的。
+    let candidates = set(vec![claim("文件是 sha256:aaa", &["1"])]);
+    let selection = select(&candidates, Vec::new(), &policy(), ActionLevel::A2).expect("选择");
+
+    assert_eq!(selection.selected_index(), None, "没达标就不该被选中");
+
+    let rejection = selection.rejection_for(0).expect("要有拒绝记录");
+    assert_eq!(
+        rejection.retry_when,
+        RetryWhen::MoreEvidence { short_by: 2 },
+        "A2 门槛 3 条，手上 1 条，还差 2 条：{}",
+        rejection.reason
+    );
+}
+
+#[test]
+fn a_refutation_says_which_kind_refuted_it() {
+    // 只说"被否定"的话，操作员得自己去翻档案——而翻出来之后要做的事恰恰取决于答案：
+    // 证据失效要去重新授权，反例成立要去看那条反例还在不在。
+    let candidates = set(vec![claim("文件是 sha256:aaa", &["1"])]);
+    let reviews = vec![CandidateReview::new(
+        0,
+        vec![VerificationOutcome {
+            kind: VerificationKind::EvidenceAccess,
+            verdict: Verdict::Refuted,
+            evidence_refs: vec![evidence_ref("1")],
+        }],
+    )];
+    let selection = select(&candidates, reviews, &policy(), ActionLevel::A0).expect("选择");
+
+    let rejection = selection.rejection_for(0).expect("要有拒绝记录");
+    assert!(
+        rejection.reason.contains("evidence_access"),
+        "理由要点明是哪一类检验：{}",
+        rejection.reason
+    );
+    // 而"证据没了"是**会变**的——重新授权之后它就能回来。报成 `Never` 的话，
+    // 这条候选再也不会被提起。
+    assert_eq!(rejection.retry_when, RetryWhen::WhenEvidenceChanges);
+    assert!(rejection.retry_when.is_retryable());
+}
+
+#[test]
+fn only_eight_candidates_go_to_verification_and_the_rest_wait_for_a_slot() {
+    // §13.1 的容量闸。不设它的话，"提出 32 条"就等于"核验 32 条"，而核验预算被摊薄到
+    // 每条只够查一下——于是**没有一条被查清**。
+    //
+    // 注意闸门在**核验之前**：第 9 条不该有一条检验档案，因为它压根没进核验。
+    let candidates = set((0..12)
+        .map(|index| claim(&format!("结论 {index}"), &[&format!("e{index}")]))
+        .collect());
+    let selection = select(&candidates, Vec::new(), &policy(), ActionLevel::A0).expect("选择");
+
+    let verified: Vec<usize> = selection
+        .reviews
+        .iter()
+        .map(|review| review.candidate_index)
+        .collect();
+    assert!(
+        verified.iter().all(|index| *index < MAX_FORMAL_CANDIDATES),
+        "超额的候选不该被核验过：{verified:?}"
+    );
+
+    let waiting: Vec<usize> = selection
+        .rejections
+        .iter()
+        .filter(|rejection| {
+            matches!(
+                rejection.retry_when,
+                RetryWhen::WhenCapacityFreed { held_by } if held_by == MAX_FORMAL_CANDIDATES
+            )
+        })
+        .map(|rejection| rejection.candidate_index)
+        .collect();
+    assert_eq!(
+        waiting.len(),
+        12 - MAX_FORMAL_CANDIDATES,
+        "超额的应当在等名额：{waiting:?}"
+    );
+
+    // 而它们等的是**名额**，不是证据——这两者在界面上该显示成不同的东西。
+    for index in &waiting {
+        let rejection = selection.rejection_for(*index).expect("有记录");
+        assert!(rejection.retry_when.is_retryable(), "等名额是会好的");
+        assert!(
+            rejection.reason.contains("名额"),
+            "理由要说是名额问题：{}",
+            rejection.reason
+        );
+    }
+}
+
 #[test]
 fn a_structurally_broken_set_is_refused_before_anything_is_compared() {
     // 工作对象必须是合法集合。让一条不带证据的结论进来比一比，等于承认它是一条候选。

@@ -93,8 +93,8 @@ pub use crate::policy::{
     PermissionScope,
 };
 pub use crate::selection::{
-    select, CandidateReview, Selection, SelectionOutcome, SelectionPolicy, VerificationKind,
-    VerificationOutcome,
+    select, CandidateReview, Rejection, RetryWhen, Selection, SelectionOutcome, SelectionPolicy,
+    VerificationKind, VerificationOutcome, MAX_FORMAL_CANDIDATES,
 };
 pub use crate::time::{Monotonic, TimeWindow, WallClock};
 pub use crate::topology::{

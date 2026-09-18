@@ -28,7 +28,8 @@ use std::collections::BTreeMap;
 
 use soca_contracts::{
     ActionIntent, ActionLevel, Approval, ApprovalRequirement, BudgetRef, CapabilityPolicyRef,
-    ExecutionPermit, GrantScope, PermissionScope, PermitId, PolicyVersion, SubjectId, WallClock,
+    ExecutionPermit, GrantScope, PermissionScope, PermitId, PolicyVersion, RetryWhen, SubjectId,
+    WallClock,
 };
 
 /// 一份许可的默认有效期（秒）。
@@ -92,6 +93,25 @@ pub enum PermitDecision {
 }
 
 impl PermitDecision {
+    /// 被拒时**下一步该做什么**（§13.1 的"可重试条件"）。
+    ///
+    /// 这个取值是从变体本身推出来的，**不是另存一个字段**。因为三档的划分依据就是它：
+    /// `Refused` 是此路不通，`Paused` 是等一等，`NeedsApproval` 是去批一次。多存一份
+    /// 就多一个能对不上的地方——而它一旦对不上，界面会说"等一等就会好"，
+    /// 而实际是永远好不了。
+    ///
+    /// 那为什么还要这个方法：因为**这个信息此前只活在理由的散文里**。调用方能拿到
+    /// `Refused` 与 `Paused` 这两个名字，但"该继续挂着还是该收工"这个判断，每个调用点
+    /// 都得自己 `match` 一遍——每加一档，都会在某个调用点上悄悄变成默认的那个。
+    pub fn retry_when(&self) -> Option<RetryWhen> {
+        match self {
+            Self::Issued(_) => None,
+            Self::NeedsApproval { .. } => Some(RetryWhen::WhenApproved),
+            Self::Refused { .. } => Some(RetryWhen::Never),
+            Self::Paused { .. } => Some(RetryWhen::WhenUnpaused),
+        }
+    }
+
     /// 是否签发了许可。
     pub fn issued(&self) -> Option<&ExecutionPermit> {
         match self {

@@ -11,8 +11,8 @@
 
 use soca_contracts::{
     ActionLevel, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
-    GoalBudget, GrantScope, ModelBackend, ModelBudget, ModelVersion, PermissionScope, SubjectId,
-    UserChannel, VerificationKind, WallClock,
+    GoalBudget, GrantScope, ModelBackend, ModelBudget, ModelVersion, PermissionScope, RetryWhen,
+    SubjectId, UserChannel, VerificationKind, WallClock,
 };
 use soca_core::{ActionBroker, AdvanceStep, RoundOutcome, SimulatedOs, Subject};
 use soca_core_actors::DesktopAndFilesCluster;
@@ -147,8 +147,14 @@ fn a_revoked_capability_no_longer_issues_permits() {
 
     match &report.outcome {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
-        } => assert!(reason.contains("撤回") || reason.contains("授权"), "实际：{reason}"),
+            step: AdvanceStep::Refused { reason, retry_when },
+        } => {
+            assert!(reason.contains("撤回") || reason.contains("授权"), "实际：{reason}");
+            // §13.1 的"可重试条件"：撤权是**此路不通**。等多久都不会变好——
+            // 要恢复得先重新授予，而那是另一次决策。把它报成"等一等"的话，
+            // 调度器会一直挂着这个目标，而它永远不会成。
+            assert_eq!(*retry_when, RetryWhen::Never, "撤权不该被报成'再等等'");
+        }
         other => panic!("已撤回的授权不该签发许可，实际：{other:?}"),
     }
     assert_eq!(subject.goals().goal(&goal_id).map(|goal| goal.state), Some(soca_contracts::GoalState::Active));
@@ -341,7 +347,7 @@ fn the_loop_reports_a_revoked_capability_as_a_refusal_not_a_crash() {
 
     match &report.outcome {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
+            step: AdvanceStep::Refused { reason, .. },
         } => assert!(reason.contains("已撤回"), "实际：{reason}"),
         other => panic!("应当报成拒绝而不是崩溃：{other:?}"),
     }

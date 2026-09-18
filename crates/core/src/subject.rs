@@ -39,7 +39,8 @@ use soca_contracts::{
     GoalState, IdempotencyKey, MediaType, MemoryEntry, MemoryId,
     MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Monotonic, Observation,
     OutputSchema, PayloadRef, PermitId, PermissionScope, PredictionRef, Provenance, ResourceCost,
-    ResourceScope, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId, TaskId,
+    ResourceScope, RetryWhen, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, SourceId,
+    TaskId,
     ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
@@ -310,6 +311,13 @@ pub enum AdvanceStep {
     Refused {
         /// 拒绝原因。
         reason: String,
+        /// **什么条件下可以重来**（§13.1）。
+        ///
+        /// §13.1 要的是"拒绝有原因和**可重试条件**"，而这一档的取值不总是"此路不通"：
+        /// 全局暂停挡下的那些也是走这条路出去的，而它们是"此刻不通"。把两者都报成
+        /// 一句 `Refused`，界面就只能说"不行"——而用户该做的动作完全不同：一个去改授权，
+        /// 一个去点恢复。
+        retry_when: RetryWhen,
     },
     /// 这条候选需要一条本版还没有的通路。
     Unsupported {
@@ -1253,11 +1261,11 @@ impl Subject {
                         subject_ref: subject_ref.clone(),
                         evidence_ref: record.observation.evidence_ref.to_string(),
                     }),
-                    // 授权已撤回不是一个"运行出错了"，而是一个需要人处理的拒绝——和等级
-                    // 超范围、全局暂停同一类。把它当成普通错误抛出，环路会中断在一句
-                    // "内部错误"上，而真正的原因看不出来。
                     // 暂停与撤回都不是"运行出错了"，而是需要人处理的拒绝——把它们当成普通
                     // 错误抛出，环路会中断在一句"内部错误"上，而真正的原因看不出来。
+                    //
+                    // 而两者的"下一步"不一样，所以下面各自带着 `retry_when`：暂停是等一等，
+                    // 撤回是此路不通（§13.1 的"拒绝有原因和可重试条件"）。
                     Err(CoreError::Paused { reason }) => {
                         self.store.audit(
                             at,
@@ -1268,6 +1276,7 @@ impl Subject {
                         )?;
                         Ok(AdvanceStep::Refused {
                             reason: format!("全局暂停中，拒绝新的采集（§12.1）：{reason}"),
+                            retry_when: RetryWhen::WhenUnpaused,
                         })
                     }
                     Err(CoreError::CapabilityRevoked { capability }) => {
@@ -1282,6 +1291,9 @@ impl Subject {
                             reason: format!(
                                 "能力策略 {capability} 已撤回，新的观测不再发生（§12.1）"
                             ),
+                            // 此路不通：要恢复得先重新授予，而"重新授予之后"是一次**新的**
+                            // 决策，不是这一次的重试。
+                            retry_when: RetryWhen::Never,
                         })
                     }
                     Err(other) => Err(other),
@@ -1384,7 +1396,7 @@ impl Subject {
         let permit_id = PermitId::new(format!("permit:{}", intent.action_id))?;
         let approval = self.find_covering_approval(intent, at)?;
 
-        match self.policy.decide(
+        let decision = self.policy.decide(
             intent,
             &goal.permission_scope,
             approval.as_ref(),
@@ -1392,7 +1404,11 @@ impl Subject {
             permit_id,
             self.owner.clone(),
             budget_ref,
-        ) {
+        );
+        // §13.1 的"可重试条件"从决定本身推出来，不在这里重新判一遍——两处必然一致，
+        // 而多写一处就多一个能对不上的地方。
+        let retry_when = decision.retry_when().unwrap_or(RetryWhen::Never);
+        match decision {
             PermitDecision::Paused { reason } => {
                 self.store.audit(
                     at,
@@ -1406,6 +1422,7 @@ impl Subject {
                 // "被拒绝"——一次静默的放弃。
                 Ok(AdvanceStep::Refused {
                     reason: format!("全局暂停中，不签发新许可（§12.1）：{reason}"),
+                    retry_when,
                 })
             }
             PermitDecision::Refused { reason } => {
@@ -1421,7 +1438,7 @@ impl Subject {
                 // 动作，环路会空转到额度耗尽——而 §6 第 9 步要的是"计划外动作不继续后台执行"。
                 // 范围若以后被放宽，那是一次**新的**委托，应当重新投递。
                 self.cluster.release_action(&intent.action_id);
-                Ok(AdvanceStep::Refused { reason })
+                Ok(AdvanceStep::Refused { reason, retry_when })
             }
             PermitDecision::NeedsApproval {
                 level, reason, ..

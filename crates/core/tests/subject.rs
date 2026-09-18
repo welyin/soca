@@ -1294,7 +1294,7 @@ fn a_write_request_beyond_the_goals_scope_is_refused_rather_than_awaited() {
 
     match &report.outcome {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
+            step: AdvanceStep::Refused { reason, .. },
         } => {
             assert!(reason.contains("上限"), "理由要说明这是范围问题：{reason}");
             assert!(reason.contains("重新委托"), "还要说明补救办法：{reason}");
@@ -1458,7 +1458,7 @@ fn a_paused_policy_refuses_every_new_permit() {
 
     match &report.outcome {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
+            step: AdvanceStep::Refused { reason, .. },
         } => {
             assert!(reason.contains("全局暂停"), "实际：{reason}");
         }

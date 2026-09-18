@@ -916,11 +916,18 @@ fn select_ladder(subject: &mut Subject, request: &Request, at: WallClock) -> Res
                 .iter()
                 .enumerate()
                 .map(|(index, candidate)| {
+                    // §13.1："拒绝有原因和**可重试条件**。" 两者都挂在**这条候选自己**身上，
+                    // 而不是只留一句汇总——否则"证据差一条"与"名额满了"在界面上长得一样，
+                    // 而用户该做的事完全不同。
+                    let rejection = selection.rejection_for(index);
                     json!({
                         "index": index,
                         "kind": candidate.kind().as_str(),
                         "summary": summarize(candidate),
                         "evidence_count": candidate.evidence_refs().len(),
+                        "rejected": rejection.is_some(),
+                        "rejection_reason": rejection.map(|item| item.reason.clone()),
+                        "retry_when": rejection.map(|item| item.retry_when),
                     })
                 })
                 .collect();
@@ -934,6 +941,9 @@ fn select_ladder(subject: &mut Subject, request: &Request, at: WallClock) -> Res
                     "outcome": selection.outcome,
                     "candidates": listed,
                     "reviews": selection.reviews,
+                    // 每一条候选都在"被选中"或"被拒"之一里，没有第三种去处。
+                    "rejections": selection.rejections,
+                    "has_retryable": selection.has_retryable_rejection(),
                     "unresolved": candidates.unresolved.iter().map(|item| item.question.clone()).collect::<Vec<_>>(),
                     "conflicts": candidates.conflicts.iter().map(|item| item.subject_ref.clone()).collect::<Vec<_>>(),
                 }),

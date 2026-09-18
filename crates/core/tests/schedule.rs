@@ -11,7 +11,7 @@
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, CapabilityPolicyRef, DataClass, ExplorationQuota,
     GoalBudget, GrantScope, ModelBackend, ModelBudget, ModelVersion, OutputSchema,
-    PermissionScope, SelectionPolicy, SubjectId, UserChannel, WallClock,
+    PermissionScope, RetryWhen, SelectionPolicy, SubjectId, UserChannel, WallClock,
 };
 use soca_core::{
     ActionBroker, AdvanceStep, CoreError, RoundOutcome, ScheduleOutcome, Scheduler, SimulatedOs,
@@ -222,8 +222,13 @@ fn a_refusal_caused_by_pausing_does_not_throw_the_work_away() {
         .outcome
     {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
-        } => assert!(reason.contains("暂停"), "实际：{reason}"),
+            step: AdvanceStep::Refused { reason, retry_when },
+        } => {
+            assert!(reason.contains("暂停"), "实际：{reason}");
+            // §13.1 的"可重试条件"：暂停是**此刻不通**，而"此刻"会过去。
+            // 报成 `Never` 的话，调度器会把这个目标收工掉——而用户只是按了一下暂停。
+            assert_eq!(retry_when, RetryWhen::WhenUnpaused, "暂停要给的是'等一等'");
+        }
         other => panic!("实际：{other:?}"),
     }
 
@@ -273,8 +278,12 @@ fn a_refusal_caused_by_scope_does_take_the_work_out() {
         .outcome
     {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
-        } => assert!(reason.contains("上限"), "实际：{reason}"),
+            step: AdvanceStep::Refused { reason, retry_when },
+        } => {
+            assert!(reason.contains("上限"), "实际：{reason}");
+            // 与暂停相反：等级超范围是**此路不通**。要提升得重新委托。
+            assert_eq!(retry_when, RetryWhen::Never, "超范围等多久都不会好");
+        }
         other => panic!("实际：{other:?}"),
     }
     assert_eq!(
@@ -345,8 +354,11 @@ fn a_paused_subject_refuses_new_observations_as_a_refusal_not_an_error() {
         .outcome
     {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
-        } => assert!(reason.contains("暂停"), "实际：{reason}"),
+            step: AdvanceStep::Refused { reason, retry_when },
+        } => {
+            assert!(reason.contains("暂停"), "实际：{reason}");
+            assert_eq!(retry_when, RetryWhen::WhenUnpaused);
+        }
         other => panic!("实际：{other:?}"),
     }
 }

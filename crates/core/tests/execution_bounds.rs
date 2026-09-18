@@ -20,7 +20,7 @@
 use serde_json::json;
 use soca_contracts::{
     ActionLevel, Approval, ApprovalId, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
-    GoalBudget, ModelBackend, ModelBudget, ModelVersion, PermissionScope, Provenance,
+    GoalBudget, ModelBackend, ModelBudget, ModelVersion, PermissionScope, Provenance, RetryWhen,
     SelectionPolicy, Sha256Hex, SourceId, SubjectId, UserChannel, WallClock,
 };
 use soca_core::{
@@ -155,7 +155,7 @@ fn grant(subject: &mut Subject, id: &str, level: ActionLevel, max_uses: u8, at: 
 fn assert_refused(outcome: &RoundOutcome, expected: &str) {
     match outcome {
         RoundOutcome::Advanced {
-            step: AdvanceStep::Refused { reason },
+            step: AdvanceStep::Refused { reason, .. },
         } => assert!(
             reason.contains(expected),
             "理由要说明是哪一类：期望含 {expected:?}，实际 {reason:?}"
@@ -590,6 +590,7 @@ fn the_json_shape_of_a_refusal_is_stable() {
     let outcome = RoundOutcome::Advanced {
         step: AdvanceStep::Refused {
             reason: "演示".to_string(),
+            retry_when: RetryWhen::Never,
         },
     };
     let rendered = serde_json::to_value(&outcome).expect("可序列化");

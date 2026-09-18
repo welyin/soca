@@ -578,6 +578,65 @@ fn a_malformed_goal_id_is_refused_before_anything_happens() {
     assert_eq!(response.status, 400);
 }
 
+#[test]
+fn the_console_says_why_each_candidate_was_rejected_and_when_it_could_come_back() {
+    // §13.1："最**多 8 个待核验正式候选**。……**拒绝有原因和可重试条件**。"
+    //
+    // 两者都要能从接口上读到。只给一句散文的话，界面只能把它原样贴出来，
+    // 而调度器连"该不该过一会儿再试"都判断不了——那正是这一项要补的东西。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/observe",
+        &body(json!({"subject": WATCHED, "data_class": "personal"})),
+    );
+
+    // A2 的门槛是 3 条，手上只有 1 条——所以这一轮应当有候选被拒，而且理由是可操作的。
+    let payload = json(&call(
+        &mut subject,
+        "POST",
+        "/api/select",
+        &body(json!({"risk": "a2"})),
+    ));
+
+    let rejections = payload["rejections"].as_array().expect("要有拒绝台账");
+    assert!(
+        !rejections.is_empty(),
+        "一条证据过不了 A2 的门槛，应当留下拒绝记录：{payload}"
+    );
+
+    let below_bar = rejections
+        .iter()
+        .find(|item| item["retry_when"]["kind"] == "more_evidence")
+        .expect("门槛不达标要报成 more_evidence");
+    assert_eq!(
+        below_bar["retry_when"]["short_by"], 2,
+        "3 条门槛、1 条在手，还差 2 条——数字要是可操作的，不是'证据不足'四个字"
+    );
+    assert!(
+        below_bar["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("门槛")),
+        "理由要说清是哪一条判定：{below_bar}"
+    );
+
+    // 而**每一条候选都有去处**：要么被选中，要么有一条记录。没有第三种。
+    let selected_index = if payload["outcome"]["kind"] == "selected" {
+        Some(payload["outcome"]["index"].clone())
+    } else {
+        None
+    };
+    for candidate in payload["candidates"].as_array().expect("候选列表") {
+        let is_selected = selected_index.as_ref() == Some(&candidate["index"]);
+        assert!(
+            is_selected || candidate["rejected"] == true,
+            "候选 {} 既没被选中也没有拒绝记录：{candidate}",
+            candidate["index"]
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 放弃与未知路径
 // ---------------------------------------------------------------------------
