@@ -12,9 +12,16 @@
 //! 需要 `minigrid==3.1.0`。没装时这条测试会失败而不是跳过——**跳过会让"没跑"和"跑过了"
 //! 看起来一样**，而这一行要的正是"跑过了"。
 
-use soca_core::maze::run_episode;
-use soca_contracts::WallClock;
+use soca_core::maze::{play_through_actions, run_episode, RunPath};
+use soca_contracts::{
+    ModelBackend, ModelBudget, ModelVersion, SubjectId, WallClock,
+};
+use soca_core::{ActionBroker, SimulatedOs, Subject};
+use soca_core_actors::DesktopAndFilesCluster;
+use soca_model_gateway::DeterministicTransport;
 use soca_storage::Store;
+
+const WATCHED: &str = "file:D:\\资料\\摘要\\summary.md";
 
 fn at(offset: i64) -> WallClock {
     WallClock::from_rfc3339("2026-09-18T10:00:00Z")
@@ -24,6 +31,31 @@ fn at(offset: i64) -> WallClock {
 
 fn store() -> Store {
     Store::open_in_memory(at(0)).expect("内存存储")
+}
+
+/// 一个带守望文件的主体。守望文件不是摆设：簇会围绕它提候选，于是游戏动作
+/// **真的**要在 L3 里和别的东西排队。
+fn subject() -> Subject {
+    let mut os = SimulatedOs::new();
+    os.seed(WATCHED, "资料摘要\n");
+    let cluster = DesktopAndFilesCluster::new(WATCHED, Vec::new()).expect("装配能力簇");
+    Subject::new(
+        Store::open_in_memory(at(0)).expect("内存存储"),
+        ActionBroker::new(os),
+        cluster,
+        SubjectId::new("user:local").expect("固定主体"),
+        soca_contracts::BootId::parse("00000000-0000-4000-8000-0000000000b2").expect("固定 boot"),
+        Box::new(DeterministicTransport::new(Vec::new())),
+        ModelBackend::Cpu,
+        false,
+        ModelBudget {
+            max_output_tokens: 1024,
+            max_wall_millis: 30_000,
+            max_attempts: 1,
+        },
+        ModelVersion::new("sha256:test-model").expect("固定模型版本"),
+    )
+    .expect("装配主体")
 }
 
 #[test]
@@ -99,6 +131,57 @@ fn the_public_view_never_carries_the_seed_or_an_absolute_position() {
     let step = run.steps.first().expect("有步");
     assert_eq!(step.view.len(), 7, "视图是 7×7");
     assert!(step.view.iter().all(|row| row.len() == 7));
+}
+
+#[test]
+fn the_agent_path_pays_every_toll_on_the_way() {
+    // §15.2 的"同一 L3 候选和 Broker 动作循环"。
+    //
+    // 每一步都要留下三样东西：一条**执行许可**、一条**回执**、一次**核验判定**。
+    // 三样缺一，就说明那一步没有真的走那条循环——而"走没走"正是这一条要证的。
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("让主体走一局");
+
+    assert_eq!(run.path, RunPath::Agent, "走的应当是认知通路");
+    assert_eq!(run.contradictions, 0, "地图仍然要自洽");
+    assert!(!run.steps.is_empty());
+    assert!(
+        run.won() || run.outcome == "timeout",
+        "意外的相位：{}",
+        run.outcome
+    );
+
+    for step in &run.steps {
+        assert!(
+            step.permit_id.is_some(),
+            "第 {} 步没有执行许可——它没走许可那道关",
+            step.index
+        );
+        assert!(
+            step.verdict.is_some(),
+            "第 {} 步没有核验判定——它没走回执之后的那次核对",
+            step.index
+        );
+        assert!(
+            step.receipt.contains("Completed"),
+            "第 {} 步的回执不对：{}",
+            step.index,
+            step.receipt
+        );
+    }
+
+    // 而且它**真的排过队**。至少有一轮的候选不是它——簇自己会提文件观测一类的候选，
+    // 而选择规则是"证据多者先、并列时先出现的先"。
+    //
+    // 这条断言如果把 `rounds_waited` 写成恒 0 会通过，所以它同时也是那个字段的自检。
+    assert!(
+        run.steps.iter().any(|step| step.rounds_waited > 1),
+        "每一步都是一轮就轮上，说明它没有和别的候选竞争过：{:?}",
+        run.steps
+            .iter()
+            .map(|step| step.rounds_waited)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

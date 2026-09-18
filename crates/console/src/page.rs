@@ -166,6 +166,10 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       任务文本、朝向和携带物——<b>绝对坐标、完整地图、seed、info 一样都不出那道门</b>。
     </div>
     <div class="row">
+      <select id="maze-path" style="width:auto">
+        <option value="agent">认知通路：动作是一条候选，要排队、要许可</option>
+        <option value="evaluator">评估器通路：动作直接交给宿主</option>
+      </select>
       <input id="maze-seed" type="number" min="0" value="7" style="width:88px" title="种子（私有控制面）">
       <button id="maze-run">跑一局</button>
       <button id="maze-prev" class="ghost">◀ 上一步</button>
@@ -177,10 +181,23 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       <input id="maze-slider" type="range" min="0" max="0" value="0" style="flex:1">
     </div>
     <div class="hint">
+      <b>两条路的差别不是"谁调用了它"，而是每一步要经过什么。</b>
+      <b>认知通路</b>下，一步是一条候选：它要和簇自己提的候选在 L3 里争，赢了才拿到执行许可，
+      执行完还要回执、再观测一次、核对（§15.2 的"同一 L3 候选和 Broker 动作循环"）。
+      <b>评估器通路</b>下动作直接交给宿主——那条路也合法，§15.2 说"Evaluator 私有控制面
+      负责 reset、种子与赛后指标"，只是它不经过候选与许可。表格里的「排队／许可／核验」
+      三栏只有前者有值，<b>空着不是漏填</b>。
+    </div>
+    <div class="hint">
       <b>每一步都能说出为什么。</b>探索器维护一张从局部视图按视图约定拼出来的地图
       （agent 恒在 <code>(3,6)</code>，前方是<b>列号变小</b>），按固定优先级挑目标：
       目标已知且门开着 → 直奔目标；手里有钥匙 → 去开门；知道钥匙在哪 → 去拿；
       否则 → 朝最近的未知边界走。确定性，所以同一 seed 再看一遍是同一局。
+    </div>
+    <div class="hint">
+      <b>认知通路每步花掉一次激活，而一份目标的额度上限是 32 次</b>（
+      <code>MAX_ACTIVATIONS_PER_GOAL</code>）。所以一局走得完走不完，是被这个上限决定的——
+      而"额度耗尽"不是故障，正是 §4.2 说的<b>升级触发器</b>：该给更多预算，或该把它拆成几个目标。
     </div>
     <div id="maze-summary" class="hint" style="margin-top:10px">（尚未运行）</div>
     <div style="display:flex; gap:24px; align-items:flex-start; margin-top:14px; flex-wrap:wrap">
@@ -194,7 +211,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       </div>
     </div>
     <table id="maze-steps" style="margin-top:16px">
-      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>回执</th><th>认得</th></tr></thead>
+      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -890,14 +907,22 @@ function renderMaze() {
     "朝向 " + step.direction + "　认得 " + step.known_cells + " 格";
 
   // 步骤表：**走到哪一步高亮到哪一步**，这就是"一步一步"的样子。
+  //
+  // 「排队／许可／核验」三栏在评估器通路上是空的——**空着不是漏填**，
+  // 它如实说明那一步没有排队、没有许可、没有核验。填一个看起来像的值，
+  // 会让两条路在页面上长得一样，而它们不是一回事。
   $("maze-steps").querySelector("tbody").innerHTML = mazeRun.steps
     .map(function (item, index) {
       const active = index === mazeAt ? " class=\"current\"" : "";
+      const dash = function (value) { return value ? escapeHtml(String(value)) : "<span class=\"dim\">—</span>"; };
       return "<tr" + active + ">"
         + "<td>" + item.index + "</td>"
         + "<td>" + escapeHtml(item.action) + "</td>"
         + "<td>" + escapeHtml(item.reason) + "</td>"
+        + "<td>" + (item.rounds_waited ? item.rounds_waited + " 轮" : "<span class=\"dim\">—</span>") + "</td>"
+        + "<td>" + dash(item.permit_id) + "</td>"
         + "<td>" + escapeHtml(item.receipt) + "</td>"
+        + "<td>" + dash(item.verdict) + "</td>"
         + "<td>" + item.known_cells + "</td>"
         + "</tr>";
     })
@@ -922,16 +947,24 @@ $("maze-run").onclick = async function () {
     const result = await api("maze/run", {
       seed: parseInt($("maze-seed").value, 10) || 7,
       max_steps: 300,
+      path: $("maze-path").value,
     });
     mazeRun = result.run;
     mazeAt = 0;
+    const waited = mazeRun.steps.reduce(function (sum, step) { return sum + (step.rounds_waited || 0); }, 0);
+    const gated = mazeRun.steps.filter(function (step) { return step.permit_id; }).length;
     $("maze-summary").innerHTML =
       "<b>" + escapeHtml(mazeRun.outcome) + "</b>　走了 " + mazeRun.steps.length + " 步　" +
       "认得 " + mazeRun.map.length + " 格　" +
       "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
+      "<br>走的是<b>" + (mazeRun.path === "agent" ? "认知通路" : "评估器通路") + "</b>　" +
+      (mazeRun.path === "agent"
+        ? "拿到许可的有 " + gated + "/" + mazeRun.steps.length + " 步，一共排了 " + waited + " 轮队"
+        : "动作直接交给宿主，没有候选竞争与执行许可") +
       "<br>任务：" + escapeHtml(mazeRun.mission);
     renderMaze();
-    log("迷宫：seed " + mazeRun.seed + " → " + mazeRun.outcome + "，走了 " + mazeRun.steps.length + " 步", "ok");
+    log("迷宫：" + mazeRun.path + "，seed " + mazeRun.seed + " → " + mazeRun.outcome +
+        "，走了 " + mazeRun.steps.length + " 步", "ok");
   } catch (error) {
     $("maze-summary").textContent = error.message;
     log("跑迷宫失败：" + error.message, "err");

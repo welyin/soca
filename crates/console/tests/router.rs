@@ -579,6 +579,72 @@ fn a_malformed_goal_id_is_refused_before_anything_happens() {
 }
 
 #[test]
+fn the_maze_section_can_run_the_agent_path_where_every_step_pays_a_toll() {
+    // §15.2 那一句在界面上的样子：每走一步，界面上都能看到它**排了几轮队、拿到了哪个许可、
+    // 核验判成了什么**。三样缺一，就说明那一步没有真的走那条循环。
+    //
+    // 这条测试的另一半是**两条路要能分开**：`path` 决定动作经过什么，而返回值如实说是哪一条。
+    // 在页面上把它们画成同一个样子，"经过候选与许可"这件事就是无法验证的。
+    let mut first = subject();
+    let payload = json(&call(
+        &mut first,
+        "POST",
+        "/api/maze/run",
+        &body(json!({"seed": 7, "max_steps": 300, "path": "agent"})),
+    ));
+    let run = &payload["run"];
+    assert_eq!(run["path"], "agent", "返回值要说清走的是哪一条：{payload}");
+    let steps = run["steps"].as_array().expect("有步骤");
+    assert!(!steps.is_empty());
+    assert!(
+        steps.iter().all(|step| step["permit_id"].is_string()),
+        "认知通路下每一步都该有许可"
+    );
+    assert!(
+        steps.iter().all(|step| step["verdict"].is_string()),
+        "认知通路下每一步都该核验过"
+    );
+    // 判据落在**结构**上：每一步都由 L3 选中，所以它有一条被选中候选的下标。
+    // 评估器通路上这一栏是空的（见下面那半段）。
+    //
+    // 这条断言一开始写的是"至少有一轮排了不止一轮队"，而它是**不稳定**的：
+    // 这个夹具的 `BootId` 是随机的，簇提不提候选、按什么次序提，跟着一起变。
+    // 一个会随夹具抖动的断言，迟早会以"测试挂了"的形式让人去改代码而不是改断言——
+    // 而"被 L3 选中过"这件事在任何一次运行里都成立。
+    assert!(
+        steps
+            .iter()
+            .all(|step| step["candidate_index"].as_u64().is_some()),
+        "认知通路下每一步都该是被 L3 选中的那一条"
+    );
+    assert!(
+        steps
+            .iter()
+            .all(|step| step["rounds_waited"].as_u64().unwrap_or(0) >= 1),
+        "每一步都该记下它等了几轮"
+    );
+    assert_eq!(run["contradictions"], 0);
+
+    // 而评估器通路下这三栏**空着**，不是填了别的值。
+    let mut second = subject();
+    let other = json(&call(
+        &mut second,
+        "POST",
+        "/api/maze/run",
+        &body(json!({"seed": 7, "max_steps": 60, "path": "evaluator"})),
+    ));
+    assert_eq!(other["run"]["path"], "evaluator");
+    assert!(
+        other["run"]["steps"]
+            .as_array()
+            .expect("有步骤")
+            .iter()
+            .all(|step| step["permit_id"].is_null() && step["candidate_index"].is_null()),
+        "评估器通路不该有许可，也不该有候选下标：{other}"
+    );
+}
+
+#[test]
 fn the_console_says_why_each_candidate_was_rejected_and_when_it_could_come_back() {
     // §13.1："最**多 8 个待核验正式候选**。……**拒绝有原因和可重试条件**。"
     //

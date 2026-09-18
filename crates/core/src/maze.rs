@@ -36,13 +36,24 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 use soca_contracts::{
-    ActionRequest, ActionRequestTag, GameAction, GameKind, GameObservation, MazeCell, MazeObject,
-    MoveAction, MoveOp, Percept, PublicId, WallClock, GAME_PROTOCOL_VERSION,
+    ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, ExplorationQuota, GameAction,
+    GameKind, GameObservation, GoalBudget, GrantScope, MazeCell, MazeObject, MazeView, MoveAction,
+    MoveOp, Percept, PermissionScope, PublicId, SelectionPolicy, UserChannel, WallClock,
+    GAME_PROTOCOL_VERSION, MAX_ACTIVATIONS_PER_GOAL,
 };
 use soca_game_host::{GameHost, HostConfig, ProcessEngineConfig, ProcessFactory};
 use soca_storage::Store;
 
 use crate::error::CoreError;
+use crate::game_os::{episode_ref, GAME_STEP_TOOL};
+use crate::subject::{AdvanceStep, RoundOutcome, Subject};
+
+/// 游戏操作的能力名（§15.2）。
+///
+/// 与 [`GAME_STEP_TOOL`] 分开：**工具是"做什么"，能力是"允许做什么"**。
+/// 两者同名会让人以为改一个就得改另一个，而它们本来就该能各自演化——
+/// 比如把一步游戏拆成两个工具，而能力仍然只有一项。
+const GAME_CAPABILITY: &str = "cap:game-step";
 
 /// agent 在视图里恒定所在的格子（`manifest.json` 的 `view_convention`）。
 const AGENT_ROW: i32 = 3;
@@ -85,11 +96,44 @@ pub struct MazeStep {
     pub known_cells: usize,
     /// 这一步的公开局部视图。
     pub view: Vec<Vec<MazeCell>>,
+
+    // -----------------------------------------------------------------------
+    // 下面四项只在**认知通路**上有值。
+    //
+    // 评估器通路（`run_episode`）直接把动作交给宿主，不经过 L3 候选与执行许可，
+    // 所以它们空着。**空着不是漏填**——它如实说明那一步没有排队、没有许可、没有核验。
+    // 把它填上一个看起来像的值（比如"第 0 轮排队"），会让两条路在页面上长得一样，
+    // 而它们不是一回事。
+    // -----------------------------------------------------------------------
+    /// 这一次动作在 L3 里**排了多久的队**：从投递到被选中经过了几轮。
+    pub rounds_waited: u32,
+    /// 被选中的那条候选在集合里的下标。
+    pub candidate_index: Option<usize>,
+    /// 执行许可标识。
+    pub permit_id: Option<String>,
+    /// 后置条件核验的判定。
+    pub verdict: Option<String>,
+}
+
+/// 一局是**谁**在走的。
+///
+/// 两条路都合法，而它们不是一回事：§15.2 把"Evaluator 私有控制面负责 reset、种子与赛后指标"
+/// 与"认知循环进入游戏"分开写了。页面必须说得出来它现在看的是哪一条——否则
+/// "经过候选与许可"这件事在看的人眼里是无法验证的。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPath {
+    /// 评估器：动作直接交给宿主，不经 L3 候选与执行许可。
+    Evaluator,
+    /// 认知通路：动作是一条候选，要排队、要许可、要回执、要核验。
+    Agent,
 }
 
 /// 一次探索的完整记录。
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MazeRun {
+    /// 这一局是谁在走的。
+    pub path: RunPath,
     /// 回合标识。
     pub episode_id: String,
     /// 用的种子。**它属于私有控制面**——回放要靠它，而公开面上没有它。
@@ -143,6 +187,8 @@ struct Explorer {
     plan: VecDeque<GameAction>,
     /// 上一步看到的视图，用来判断"那一步到底动没动"。
     last_view: Option<Vec<Vec<MazeCell>>>,
+    /// 最近一次观测到的朝向（来自感知，不是推算的）。
+    direction: u8,
     contradictions: usize,
 }
 
@@ -166,6 +212,7 @@ impl Default for Explorer {
             carrying: "none".to_string(),
             plan: VecDeque::new(),
             last_view: None,
+            direction: 0,
             contradictions: 0,
         }
     }
@@ -205,10 +252,7 @@ impl Explorer {
     /// 这里最初写的是"视图变了就说明动了"，而那是个 bug：**转身、拾取、开门都会让视图变**，
     /// 于是每转一次身，位置就凭空挪一格，地图整体碎掉。视图是第一人称的，它对旋转和
     /// 平移都敏感，所以它区分不了这两件事——能区分的只有"我按的是哪个键"。
-    fn absorb(&mut self, observation: &GameObservation, last_action: Option<GameAction>) {
-        let Percept::Maze(view) = &observation.percept else {
-            return;
-        };
+    fn absorb(&mut self, view: &MazeView, last_action: Option<GameAction>) {
         // "这一步到底动没动"。
         //
         // 判据是**两个条件同时成立**：刚才走的是前进，**而且**视图变了。
@@ -231,6 +275,7 @@ impl Explorer {
             self.position = (self.position.0 + dx, self.position.1 + dy);
         }
         self.visited.insert(self.position);
+        self.direction = view.direction;
         self.carrying = match view.carrying {
             soca_contracts::Carrying::None => "none",
             soca_contracts::Carrying::Key => "key",
@@ -562,6 +607,11 @@ impl Explorer {
         actions
     }
 
+    /// 最近一次观测到的朝向。
+    fn last_direction(&self) -> u8 {
+        self.direction
+    }
+
     /// 把地图导出成给页面用的列表。
     fn mapped(&self) -> Vec<MappedCell> {
         self.map
@@ -655,7 +705,9 @@ pub fn run_episode(
         let receipt = host.submit(&request, at.plus_seconds(index as i64))?;
         observation = host.observe(&episode_id)?;
 
-        explorer.absorb(&observation, Some(action));
+        if let Percept::Maze(view) = &observation.percept {
+            explorer.absorb(view, Some(action));
+        }
         steps.push(MazeStep {
             index,
             action: action.op_name().to_string(),
@@ -674,6 +726,11 @@ pub fn run_episode(
                 Percept::Maze(view) => view.view.clone(),
                 _ => Vec::new(),
             },
+            // 评估器通路没有排队、没有许可、没有核验。空着不是漏填——见 `MazeStep`。
+            rounds_waited: 0,
+            candidate_index: None,
+            permit_id: None,
+            verdict: None,
         });
 
         if observation.terminated || observation.truncated {
@@ -686,10 +743,209 @@ pub fn run_episode(
     drop(host);
 
     Ok(MazeRun {
+        path: RunPath::Evaluator,
         episode_id: episode_id.to_string(),
         seed,
         outcome: observation.outcome.as_str().to_string(),
         truncated: observation.truncated,
+        steps,
+        map: explorer.mapped(),
+        contradictions: explorer.contradictions,
+        mission,
+    })
+}
+
+/// 让**主体自己**把这一局走完（§15.2）。
+///
+/// 与 [`run_episode`] 的差别不是"谁调用了它"，而是**每一步要经过什么**：
+///
+/// | | 评估器通路 | 这一条 |
+/// |---|---|---|
+/// | 起局 | `GameHost` 直驱 | `Subject::start_game`，引擎归 `GameOs` |
+/// | 许可 | 无 | 每一步都要过 `PolicyAgent` |
+/// | 排队 | 无 | 动作是一条候选，要和簇提的别的候选争 |
+/// | 回执 | 引擎回执 | 执行回执，还要再观测一次核对 |
+/// | 观测 | 引擎给的感知 | 走 `broker.read`，与读一个文件同一条路 |
+///
+/// 两条都合法，§15.2 把它们分开写：一条是"Evaluator 私有控制面负责 reset、种子与赛后指标"，
+/// 一条是"认知循环进入游戏"。**分开写的是它们，不是我们。**
+///
+/// ## 队列是真的在排队
+///
+/// 投递一次 `game.step` 之后，L3 未必立刻选它：簇自己会提文件观测一类的候选，而选择规则是
+/// "证据多者先、并列时先出现的先"。所以这里要跑到**这次动作被选中为止**，并把等了几轮记进
+/// 轨迹（`rounds_waited`）。那个数字就是"它确实在竞争"的证据——把它写成 0 的话，
+/// 页面上"经过候选"这句话就只是一句话。
+pub fn play_through_actions(
+    subject: &mut Subject,
+    seed: u64,
+    max_steps: u32,
+    at: WallClock,
+) -> Result<MazeRun, CoreError> {
+    let adapter = adapter_path();
+    let factory = ProcessFactory::new(ProcessEngineConfig::new(
+        engine_program(),
+        &adapter,
+        GameKind::Maze,
+    ));
+
+    let episode_id = format!("maze-{seed}");
+    subject.start_game(GameKind::Maze, &episode_id, seed, &factory)?;
+
+    // 委托一个**只带 `cap:game-step`** 的目标，并把这项能力授予**这一个回合**。
+    //
+    // 额度取契约允许的**上限**（`MAX_ACTIVATIONS_PER_GOAL` = 32）。
+    //
+    // 这不是"给得越大越好"，而是**一局能走多远是被这个上限决定的**：每一轮激活花一次，
+    // 而一轮可能选中的是簇提的别的候选（那时游戏动作继续排队，但激活照样扣）。
+    //
+    // 所以"跑着跑着没额度了"不是探索器坏了——那是 §4.2 说的**升级触发器**在响：
+    // 额度耗尽正是"该给这个目标更多预算"或者"该把它拆成几个目标"的信号。
+    // 这条通路如实把它报出来（`RoundOutcome::Finished`），而不是偷偷重置计数器。
+    let capability = CapabilityPolicyRef::new(GAME_CAPABILITY)?;
+    let goal_id = subject.delegate(
+        "把这一局走完",
+        UserChannel::Chat,
+        PermissionScope {
+            capability_policy_ref: capability.clone(),
+            max_action_level: ActionLevel::A1,
+        },
+        GoalBudget::new(512, MAX_ACTIVATIONS_PER_GOAL, 1 << 20, 3_600_000)?,
+        ExplorationQuota::new(0),
+        at,
+        None,
+    )?;
+    subject.accept(&goal_id, at.plus_seconds(1))?;
+    subject.grant_capability(
+        capability,
+        GrantScope::under(episode_ref(&episode_id))?,
+        at.plus_seconds(2),
+    )?;
+
+    let mut explorer = Explorer::default();
+    let mut steps: Vec<MazeStep> = Vec::new();
+    let mut mission = String::new();
+
+    // 先吸收起点那一次感知。少了它，第一步之后"视图变了没有"就没有可比的基准，
+    // 而位置会从第一步起就开始漂。
+    if let Some(Percept::Maze(view)) = subject.game_percept() {
+        mission = view.mission.clone();
+        explorer.absorb(&view, None);
+    }
+
+    for index in 1..=u64::from(max_steps) {
+        let Some(Percept::Maze(view)) = subject.game_percept() else {
+            break;
+        };
+        if view.mission != mission {
+            mission = view.mission.clone();
+        }
+        let (action, reason) = explorer.decide(view.direction);
+
+        subject.request_game_step(action.op_name(), at)?;
+
+        // 跑到这条动作被选中为止。上限是防呆：一个永远选不上的动作会让这里空转。
+        let mut rounds_waited = 0u32;
+        let mut advanced: Option<(AdvanceStep, Option<usize>)> = None;
+        let mut refusal: Option<String> = None;
+        while rounds_waited < 64 {
+            rounds_waited = rounds_waited.saturating_add(1);
+            let round = subject.run_round(&SelectionPolicy::default(), ActionLevel::A1, at)?;
+            match round.outcome {
+                RoundOutcome::Advanced { step } => match &step {
+                    AdvanceStep::Action { tool_id, .. } if tool_id == GAME_STEP_TOOL => {
+                        advanced = Some((step, round.selected));
+                        break;
+                    }
+                    AdvanceStep::Refused { reason, .. } => {
+                        refusal = Some(reason.clone());
+                        break;
+                    }
+                    // 别的候选先被选中：正常。它花掉一轮，这一轮也算"排队"。
+                    _ => {}
+                },
+                // 没有可推进的目标——额度用尽或目标结束。这一局到此为止。
+                _ => break,
+            }
+        }
+
+        let Some((advanced, candidate_index)) = advanced else {
+            // 没轮上就没轮上，如实说。把它当成"走了一步"会让轨迹里多出一步没发生的事。
+            steps.push(MazeStep {
+                index,
+                action: action.op_name().to_string(),
+                reason: match refusal {
+                    Some(reason) => format!("{reason}；这一步没有发生"),
+                    None => format!("{reason}；但等了 {rounds_waited} 轮仍未轮上"),
+                },
+                receipt: "not_advanced".to_string(),
+                outcome: subject
+                    .game_status()
+                    .map(|(outcome, _)| outcome)
+                    .unwrap_or_else(|| "running".to_string()),
+                position: explorer.position,
+                direction: view.direction,
+                known_cells: explorer.map.len(),
+                view: view.view.clone(),
+                rounds_waited,
+                candidate_index: None,
+                permit_id: None,
+                verdict: None,
+            });
+            break;
+        };
+
+        let (receipt, permit_id, verdict) = match &advanced {
+            AdvanceStep::Action {
+                permit_id,
+                receipt,
+                verdict,
+                ..
+            } => (receipt.clone(), Some(permit_id.clone()), verdict.clone()),
+            other => (format!("{other:?}"), None, None),
+        };
+
+        if let Some(Percept::Maze(after)) = subject.game_percept() {
+            explorer.absorb(&after, Some(action));
+        }
+        let (outcome, truncated) = subject
+            .game_status()
+            .unwrap_or_else(|| ("running".to_string(), false));
+
+        steps.push(MazeStep {
+            index,
+            action: action.op_name().to_string(),
+            reason,
+            receipt,
+            outcome: outcome.clone(),
+            position: explorer.position,
+            direction: explorer.last_direction(),
+            known_cells: explorer.map.len(),
+            view: match subject.game_percept() {
+                Some(Percept::Maze(view)) => view.view.clone(),
+                _ => Vec::new(),
+            },
+            rounds_waited,
+            candidate_index,
+            permit_id,
+            verdict,
+        });
+
+        if truncated || outcome != "running" {
+            break;
+        }
+    }
+
+    let (outcome, truncated) = subject
+        .game_status()
+        .unwrap_or_else(|| ("running".to_string(), false));
+
+    Ok(MazeRun {
+        path: RunPath::Agent,
+        episode_id: episode_ref(&episode_id),
+        seed,
+        outcome,
+        truncated,
         steps,
         map: explorer.mapped(),
         contradictions: explorer.contradictions,

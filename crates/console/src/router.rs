@@ -1071,13 +1071,28 @@ fn run_maze(subject: &mut Subject, request: &Request, at: WallClock) -> Response
         .unwrap_or(300)
         .clamp(1, 640) as u32;
 
-    match soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, at) {
+    // 两条路都留着，因为 §15.2 把它们分开写了：一条是"Evaluator 私有控制面负责 reset、
+    // 种子与赛后指标"，一条是"认知循环进入游戏"。**分开写的是它们，不是我们。**
+    // 界面上能选，而返回值里带着走的是哪一条——见 `MazeRun::path`。
+    let path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("agent");
+
+    let run = if path == "evaluator" {
+        soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, at)
+    } else {
+        soca_core::maze::play_through_actions(subject, seed, max_steps, at)
+    };
+
+    match run {
         Ok(run) => Response::json(
             200,
             &json!({
                 "run": run,
                 "note": "每一步里的 reason 就是探索器当时的判断。它是确定性的，\
-                         所以同一 seed 再看一遍是同一局。",
+                         所以同一 seed 再看一遍是同一局。\
+                         认知通路下每步还带着排了几轮队、许可、回执与核验判定。",
             }),
         ),
         Err(error) => Response::text(500, error.to_string()),

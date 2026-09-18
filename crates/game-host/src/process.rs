@@ -35,6 +35,16 @@ pub struct EngineTimeouts {
     /// 规则步。
     pub step: Duration,
     /// 握手与事实查询。
+    ///
+    /// **它实际上覆盖的是"进程冷启动到手能讲话"**，而不是一次往返：`spawn` 起完子进程就
+    /// 立刻发 `facts`，而子进程在那一刻还没执行到第一行 Python——`import gymnasium` 与
+    /// `import minigrid` 都还没发生。所以这个上限要按**解释器启动加导入**来给，
+    /// 不能按"一次消息往返"来给。
+    ///
+    /// 默认值原本是 2 秒，它在一台空机器上够用；而并行跑整套测试时（多个测试二进制
+    /// 同时各起一个 Python），它开始稳定超时——表现是 `Unavailable { reason: "等待游戏
+    /// 进程响应超时（2 秒）" }`，看起来像引擎坏了，实际是**等错了东西**：
+    /// 那 2 秒被拿去等导入，而不是等一次握手。
     pub facts: Duration,
 }
 
@@ -42,8 +52,10 @@ impl Default for EngineTimeouts {
     fn default() -> Self {
         Self {
             reset: Duration::from_secs(30),
+            // 5 秒对**已经在跑**的引擎是够的：规则步不该慢。
             step: Duration::from_secs(5),
-            facts: Duration::from_secs(2),
+            // 20 秒给冷启动。它比一次往返宽得多，是因为它要等的东西多得多。
+            facts: Duration::from_secs(20),
         }
     }
 }

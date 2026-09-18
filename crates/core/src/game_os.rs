@@ -36,7 +36,7 @@
 
 use std::collections::BTreeMap;
 
-use soca_contracts::{ActionIntent, GameAction, GameKind, Percept, Sha256Hex};
+use soca_contracts::{ActionIntent, GameAction, GameKind, Outcome, Percept, Sha256Hex};
 use soca_game_host::{Engine, EngineError, EngineFactory};
 
 use crate::os::{Attempt, AttemptOutcome, ObjectState};
@@ -66,6 +66,21 @@ pub struct GameOs {
     attempts: Vec<Attempt>,
     /// 当前公开感知的正文。它同时是 `episode:` 对象的"内容"。
     body: String,
+    /// 最近一步的相位。
+    ///
+    /// **它不在公开感知里。** 感知只有视图、任务、朝向与携带物；"这一局结束了没有"是
+    /// 操作员与循环要知道的事，不是认知单元从视图里推出来的事。把它塞进感知，
+    /// 等于给探索器一条它本来没有的信息通道。
+    phase: Phase,
+}
+
+/// 一局走到哪儿了。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Phase {
+    outcome: Outcome,
+    terminated: bool,
+    truncated: bool,
+    reward: f64,
 }
 
 impl std::fmt::Debug for GameOs {
@@ -97,6 +112,12 @@ impl GameOs {
             applied: BTreeMap::new(),
             attempts: Vec::new(),
             body: body_of(&step.percept),
+            phase: Phase {
+                outcome: step.outcome,
+                terminated: step.terminated,
+                truncated: step.truncated,
+                reward: step.reward,
+            },
         })
     }
 
@@ -123,6 +144,24 @@ impl GameOs {
     /// 当前公开感知。
     pub fn percept(&self) -> Option<Percept> {
         serde_json::from_str(&self.body).ok()
+    }
+
+    /// 这一局的相位：终局／截断／进行中。
+    ///
+    /// §11.3 要求"**不得把故障伪装成游戏结束**"，所以终局与截断是两个字段——
+    /// 它们在这里也是两个字段，而不是一个 `is_over`。
+    pub fn status(&self) -> (Outcome, bool) {
+        (self.phase.outcome, self.phase.truncated)
+    }
+
+    /// 这一局是否已经结束（规则终局**或**外部截断）。
+    pub fn is_finished(&self) -> bool {
+        self.phase.terminated || self.phase.truncated
+    }
+
+    /// 最近一步的奖励。
+    pub fn reward(&self) -> f64 {
+        self.phase.reward
     }
 
     /// 这个对象在当前公开面上读得到什么。
@@ -204,6 +243,12 @@ impl GameOs {
             Ok(step) => {
                 self.step_index = self.step_index.saturating_add(1);
                 self.body = body_of(&step.percept);
+                self.phase = Phase {
+                    outcome: step.outcome,
+                    terminated: step.terminated,
+                    truncated: step.truncated,
+                    reward: step.reward,
+                };
                 let version = Sha256Hex::of_bytes(self.body.as_bytes()).to_string();
                 self.applied.insert(action_id.clone(), version.clone());
                 let outcome = AttemptOutcome::Applied { version };

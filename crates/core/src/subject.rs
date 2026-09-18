@@ -1657,6 +1657,17 @@ impl Subject {
         self.broker.game().and_then(GameOs::percept)
     }
 
+    /// 这一局的相位（终局／截断／进行中）。
+    ///
+    /// **它不在公开感知里。** 感知只有视图、任务、朝向与携带物——"这一局结束了没有"是
+    /// 操作员与循环要知道的事，不是认知单元从视图里推出来的事。把它塞进感知，
+    /// 等于给探索器一条它本来没有的信息通道。
+    pub fn game_status(&self) -> Option<(String, bool)> {
+        self.broker
+            .game()
+            .map(|game| (game.status().0.as_str().to_string(), game.status().1))
+    }
+
     /// 这一局推进到第几步，以及执行器一共试过几次。
     ///
     /// 第二个数不是凑数的：它是"这一步**有没有走到执行器**"的唯一证据。
