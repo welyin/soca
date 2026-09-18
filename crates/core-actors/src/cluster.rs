@@ -12,15 +12,16 @@
 //! 集合而不是挑出违规的那一条。
 
 use soca_contracts::{
-    BlobRef, BudgetRef, Candidate, CandidateSet, CapabilityPolicyRef, CognitiveUnit, ContractError,
-    DomainId, Envelope, EvidenceRef, ModelProfileRef, OutcomeVerified, Prediction, Scope,
-    Sha256Hex, StrategyVersion, TaskContractVersion, UnitId, UnitKind, UnitSnapshot, UnitState,
-    WallClock, Workspace, WorkspaceNote, SCHEMA_VERSION,
+    ActionIntent, BlobRef, BudgetRef, Candidate, CandidateSet, CapabilityPolicyRef, CognitiveUnit,
+    ContractError, DomainId, Envelope, EvidenceRef, Expectation, ModelProfileRef, OutcomeVerified,
+    Prediction, Scope, Sha256Hex, StrategyVersion, TaskContractVersion, UnitId, UnitKind,
+    UnitSnapshot, UnitState, WallClock, Workspace, WorkspaceNote, SCHEMA_VERSION,
 };
 
 use crate::evidence::{EvidenceLedger, EvidenceRecord};
 use crate::leaves::{
-    observation_of, ActionPrecondition, FileVersion, PostconditionVerify, Precondition,
+    observation_of, ActionPrecondition, FileVersion, PendingAction, PostconditionVerify,
+    Precondition,
 };
 
 /// §4.3"桌面与文件"能力簇。
@@ -75,6 +76,7 @@ impl DesktopAndFilesCluster {
                 Box::new(FileVersion::new(watched)?),
                 Box::new(ActionPrecondition::new(preconditions)?),
                 Box::new(PostconditionVerify::new()?),
+                Box::new(PendingAction::new()?),
             ],
             workspace: Workspace::new(),
             ledger: EvidenceLedger::new(),
@@ -111,6 +113,48 @@ impl DesktopAndFilesCluster {
     /// 直接摄入的观测数。
     pub fn ingested(&self) -> u64 {
         self.ingested
+    }
+
+    /// 投递一个待推进的动作（§6 第 3 步：动作前必须带可检查的预测）。
+    ///
+    /// 由簇转发而不是让调用方自己去 `leaves` 里找：簇的子单元列表是实现细节，
+    /// 让外面按下标去摸第 4 个叶单元，等价于把列表顺序变成公开接口。
+    pub fn queue_action(
+        &mut self,
+        intent: ActionIntent,
+        expectation: Expectation,
+    ) -> Result<(), ContractError> {
+        for leaf in &mut self.leaves {
+            if let Some(pending) = leaf.as_any_mut().downcast_mut::<PendingAction>() {
+                return pending.queue(intent, expectation);
+            }
+        }
+        Err(ContractError::MissingRefs {
+            field: "cluster.leaves.pending-action",
+        })
+    }
+
+    /// 取走一个已经有过结论的动作。
+    ///
+    /// 三种结论都算"有过结论"：执行完成、被拒绝、被判定需要审批之后由审批流程接管。
+    /// 留着它会让 L3 每一轮都重新提议同一个动作——而"计划外动作不继续后台执行"（§6 第 9 步）
+    /// 在慢动作下就是这个样子。
+    pub fn release_action(&mut self, action_id: &soca_contracts::ActionId) -> bool {
+        for leaf in &mut self.leaves {
+            if let Some(pending) = leaf.as_any_mut().downcast_mut::<PendingAction>() {
+                return pending.release(action_id);
+            }
+        }
+        false
+    }
+
+    /// 尚未推进的动作数。
+    pub fn pending_actions(&self) -> usize {
+        self.leaves
+            .iter()
+            .filter_map(|leaf| leaf.as_any().downcast_ref::<PendingAction>())
+            .map(PendingAction::pending)
+            .sum()
     }
 }
 
@@ -256,5 +300,13 @@ impl CognitiveUnit for DesktopAndFilesCluster {
             last_applied_sequence: 0,
             state: UnitState::Ready,
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

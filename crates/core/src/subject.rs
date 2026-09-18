@@ -30,20 +30,23 @@
 
 use serde::Serialize;
 use soca_contracts::{
-    ActionOutcomeSlice, ActionLevel, BeliefSummary, Candidate, CandidateSet, CapabilitySlice,
-    CognitiveUnit, ContextBundle, ContractError, DataClass, DerivationKind, EgressPolicy,
-    EvidenceSlice, ExplorationQuota, GoalBudget, GoalId, GoalStack, GoalState, MemoryEntry,
-    MemoryId, MemoryKind, ModelBackend, ModelBudget, ModelOutput, ModelVersion, Observation,
-    OutputSchema, PermissionScope, Provenance, Selection, SelectionOutcome, SelectionPolicy,
-    Sha256Hex, TaskId, ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE,
-    select as select_candidate,
+    ActionId, ActionIntent, ActionLevel, ActionOutcomeSlice, Approval, BeliefSummary, BudgetRef,
+    Candidate, CandidateSet, CapabilitySlice, CognitiveUnit, ContextBundle, ContractError, DataClass,
+    DerivationKind, EgressPolicy, EvidenceSlice, Expectation, ExplorationQuota, GoalBudget, GoalId,
+    GoalStack, GoalState, MemoryEntry, MemoryId, MemoryKind, ModelBackend, ModelBudget, ModelOutput,
+    ModelVersion, Observation, OutputSchema, PermitId, PermissionScope, PredictionRef, Provenance,
+    ResourceCost, ResourceScope, Selection, SelectionOutcome, SelectionPolicy, Sha256Hex, TaskId,
+    ToolId, UserChannel, WallClock, MAX_CONTEXT_EVIDENCE, select as select_candidate,
 };
 use soca_core_actors::{DesktopAndFilesCluster, ReviewPolicy, review_all};
 use soca_model_gateway::{ContextCompiler, ContextInput, ModelGateway, Transport};
+use soca_storage::audit::AuditCategory;
 use soca_storage::Store;
 
 use crate::broker::ActionBroker;
 use crate::error::CoreError;
+use crate::policy::{PermitDecision, PolicyAgent};
+use crate::session::DispatchOutcome;
 use crate::session::{ObservationRecord, Session};
 
 /// 本版通过认知循环可用的工具。
@@ -86,6 +89,9 @@ pub struct GoalSummary {
 
 /// 本次会话里最多记住多少条"已推进过的结论"。
 pub const MAX_HANDLED_CLAIMS: usize = 128;
+
+/// 写入类工具的标识。§12.2 禁止的是任意拼接的 shell 字符串，不是一个结构化的写入工具。
+pub const WRITE_TOOL: &str = "fs.write";
 
 /// 派生出记忆条目标识的种子：命题 + 排序后的证据集合。
 ///
@@ -152,6 +158,31 @@ pub enum AdvanceStep {
         /// 是否真的新增了条目。`false` 表示这条结论此前已记过（幂等）。
         recorded: bool,
     },
+    /// 签发许可并执行了一次动作（§6 第 3–8 步）。
+    Action {
+        /// 动作标识。
+        action_id: String,
+        /// 工具。
+        tool_id: String,
+        /// 消耗的许可。
+        permit_id: String,
+        /// 执行回执状态。回执**不等于**后置条件已验证（§7.2）。
+        receipt: String,
+        /// 后置条件判定。`None` 表示结果未知或未执行。
+        verdict: Option<String>,
+    },
+    /// 需要一次人工批准（§12.1）。目标已转入等待审批。
+    NeedsApproval {
+        /// 动作等级。
+        level: String,
+        /// 为什么还不能放行。
+        reason: String,
+    },
+    /// 被策略代理拒绝。**再多的人工批准也改变不了它**（§12.2）。
+    Refused {
+        /// 拒绝原因。
+        reason: String,
+    },
     /// 这条候选需要一条本版还没有的通路。
     Unsupported {
         /// 候选种类。
@@ -205,6 +236,13 @@ pub struct PublicState {
     pub memory_entries: usize,
     /// 动作账条数。
     pub actions: i64,
+    /// 已投递、尚未推进的动作数（§12.1 的 A2 之类）。
+    ///
+    /// 界面需要它来回答"我说要做的那件事现在在哪"：队列里还有几个、是不是卡在审批上。
+    /// 只看目标状态看不出来——目标可以是"进行中"而动作正等着批准。
+    pub pending_actions: usize,
+    /// 当前可用的人工批准数（未过期且有余量）。
+    pub usable_approvals: usize,
     /// 累计模型调用次数（含重试）。
     pub model_calls: u64,
     /// 当前模型后端。
@@ -245,6 +283,8 @@ pub struct Subject {
     /// 不改变（它是幂等的），而**再观测一次是合理的**——世界会变，同一对象的新观测正是
     /// "我先前判断错了"的证据来源。把观测也一并过滤掉，等于把那条路封死。
     handled_claims: Vec<String>,
+    /// 策略代理（§12.2）。执行许可由它判定，而不是由调用方手搓。
+    policy: PolicyAgent,
 }
 
 impl std::fmt::Debug for Subject {
@@ -295,6 +335,7 @@ impl Subject {
             observed: Vec::new(),
             rounds: 0,
             handled_claims: Vec::new(),
+            policy: PolicyAgent::default(),
         })
     }
 
@@ -546,6 +587,63 @@ impl Subject {
         Ok((candidates, selection))
     }
 
+    /// 请求在授权目录里写一份内容（§12.1 的 A2）。
+    ///
+    /// 本方法只**投递**一次动作：构造意图、算出预期后果、交给能力簇的"待推进动作"槽位。
+    /// 它不签发许可、不执行、也不绕过任何一道关——那三件事分别在 L3、[`PolicyAgent`] 与
+    /// 执行代理手里。把"想要做"与"可以做"分成两处，就是 §7.2 那张表最直接的样子。
+    ///
+    /// 动作标识由**内容**派生，因此同一次写入重复投递是幂等的。动作标识是去重与恢复核对的
+    /// 锚点（§7.3），用随机标识会让"这次动作做过没有"变成一个必须查账才能回答的问题——
+    /// 而那正是账要解决的问题，不是账要制造的问题。
+    pub fn request_write(
+        &mut self,
+        subject_ref: &str,
+        content: &str,
+        _at: WallClock,
+    ) -> Result<ActionId, CoreError> {
+        let path = subject_ref
+            .strip_prefix("file:")
+            .ok_or_else(|| CoreError::UnresolvedSubject(subject_ref.to_string()))?;
+
+        let action_id = ActionId::new(format!(
+            "action:{}",
+            Sha256Hex::of_bytes(format!("{subject_ref}\u{1f}{content}").as_bytes())
+        ))?;
+
+        let intent = ActionIntent::new(
+            action_id.clone(),
+            ToolId::new(WRITE_TOOL)?,
+            ResourceScope::new(subject_ref)?,
+            serde_json::json!({ "path": path, "content": content }),
+            Vec::new(),
+            PredictionRef::new(format!("prediction:{action_id}"))?,
+            // §12.1："在指定目录生成/重命名文件"就是 A2。写死在这里而不是做成参数：
+            // 等级是动作**性质**的函数，让调用方自己声明，等于让提议方给自己的动作定风险。
+            ActionLevel::A2,
+            ResourceCost {
+                est_ram_bytes: content.len() as u64,
+                est_tokens: 0,
+                est_millis: 50,
+            },
+            self.cluster.unit_id().clone(),
+        )?;
+
+        self.cluster.queue_action(
+            intent,
+            Expectation::VersionEquals {
+                subject_ref: subject_ref.to_string(),
+                expected: Sha256Hex::of_bytes(content.as_bytes()).to_string(),
+            },
+        )?;
+        Ok(action_id)
+    }
+
+    /// 还有几个动作等待推进。
+    pub fn pending_actions(&self) -> usize {
+        self.cluster.pending_actions()
+    }
+
     /// 跑一轮 §6 的闭环（第 3–8 步），并按第 9 步给出走向。
     ///
     /// 这一轮**不**执行副作用。本版还没有执行许可的签发与审批通路（§12.2），所以
@@ -586,7 +684,7 @@ impl Subject {
 
         let outcome = match selection.outcome {
             SelectionOutcome::Selected { index } => {
-                let step = self.advance(&candidates.candidates[index], at)?;
+                let step = self.advance(&candidates.candidates[index], &goal_id, at)?;
                 // 推进过的结论记下来，下一轮不再重复推它（§6 第 2 步的路由雏形）。
                 if let Candidate::Claim {
                     statement,
@@ -614,7 +712,12 @@ impl Subject {
     }
 
     /// 把选中的一条候选推进一步。
-    fn advance(&mut self, candidate: &Candidate, at: WallClock) -> Result<AdvanceStep, CoreError> {
+    fn advance(
+        &mut self,
+        candidate: &Candidate,
+        goal_id: &GoalId,
+        at: WallClock,
+    ) -> Result<AdvanceStep, CoreError> {
         match candidate {
             Candidate::RequestObservation { subject_ref, .. } => {
                 // 观测的数据类别取 personal：**保守的那一档**。低估类别会让本该留在本地的
@@ -677,12 +780,226 @@ impl Subject {
                     recorded,
                 })
             }
+            Candidate::RequestAction { intent } => self.request_action(intent, goal_id, at),
             other => Ok(AdvanceStep::Unsupported {
                 candidate_kind: other.kind().as_str().to_string(),
-                reason: "本版还没有执行许可的签发与审批通路；动作类候选无法推进（§12.2）"
-                    .to_string(),
+                reason: "这条通路尚未实现".to_string(),
             }),
         }
+    }
+
+    /// 走完 §6 第 3–8 步：预测 → 签发许可 → 受理 → 投递 → 回执 → 后置条件核对。
+    ///
+    /// 许可由 [`PolicyAgent`] 判定，**不是调用方手搓的**。这是本次改动要补的那一环：
+    /// 在此之前，许可类型本身能构造、能校验、能被执行代理复核，但没有任何东西决定
+    /// "该不该发"——而那正是"系统会不会拒绝不该发生的动作"这个问题的所在。
+    fn request_action(
+        &mut self,
+        intent: &ActionIntent,
+        goal_id: &GoalId,
+        at: WallClock,
+    ) -> Result<AdvanceStep, CoreError> {
+        let Some(goal) = self.goals.goal(goal_id).cloned() else {
+            return Ok(AdvanceStep::Unsupported {
+                candidate_kind: "request_action".to_string(),
+                reason: format!("目标 {goal_id} 不在栈上，无法核对权限范围"),
+            });
+        };
+
+        // 预算账挂在目标上，因此引用由目标标识派生。用随机标识的话，"这次动作花了谁的钱"
+        // 就答不上来了。
+        let budget_ref = BudgetRef::new(format!("budget:{goal_id}"))?;
+        let permit_id = PermitId::new(format!("permit:{}", intent.action_id))?;
+        let approval = self.find_covering_approval(intent, at)?;
+
+        match self.policy.decide(
+            intent,
+            &goal.permission_scope,
+            approval.as_ref(),
+            at,
+            permit_id,
+            self.owner.clone(),
+            budget_ref,
+        ) {
+            PermitDecision::Refused { reason } => {
+                // §6 第 8 步：否决要留在最小审计账里。
+                self.store.audit(
+                    at,
+                    AuditCategory::PermitRefused,
+                    intent.action_id.as_str(),
+                    "refused",
+                    &reason,
+                )?;
+                // 从待推进队列里取走。留在那里的话，L3 每一轮都会重新提议同一个必然被拒的
+                // 动作，环路会空转到额度耗尽——而 §6 第 9 步要的是"计划外动作不继续后台执行"。
+                // 范围若以后被放宽，那是一次**新的**委托，应当重新投递。
+                self.cluster.release_action(&intent.action_id);
+                Ok(AdvanceStep::Refused { reason })
+            }
+            PermitDecision::NeedsApproval {
+                level, reason, ..
+            } => {
+                self.store.audit(
+                    at,
+                    AuditCategory::ApprovalRequired,
+                    intent.action_id.as_str(),
+                    "waiting_approval",
+                    &reason,
+                )?;
+                // §12.1 的人工审批是一个**正常状态**，不是一个失败。目标停在
+                // `WaitingApproval` 上等外部输入。报成失败的话，环路会把它当成本轮的挫折
+                // 去"绕路"，而绕路正是审批要挡住的东西。
+                if self
+                    .goals
+                    .goal(goal_id)
+                    .is_some_and(|goal| goal.state == GoalState::Active)
+                {
+                    self.goals.transition(goal_id, GoalState::WaitingApproval)?;
+                }
+                Ok(AdvanceStep::NeedsApproval {
+                    level: level.as_str().to_string(),
+                    reason,
+                })
+            }
+            PermitDecision::Issued(permit) => {
+                // 原子消费批准。失败就丢弃许可——它还没有被任何地方受理过，丢弃是安全的；
+                // 而放它过去，就等于同一个批准被两次签发同时用掉（§12.1 要求"每动作"）。
+                if let Some(approval) = &approval {
+                    self.store.consume_approval(&approval.approval_id)?;
+                }
+                self.store.audit(
+                    at,
+                    AuditCategory::PermitIssued,
+                    intent.action_id.as_str(),
+                    "issued",
+                    &format!("工具 {}、等级 {}", intent.tool_id, intent.risk.as_str()),
+                )?;
+
+                let mut session = Session::new(
+                    &mut self.store,
+                    &mut self.broker,
+                    intent.proposed_by.clone(),
+                    self.task.clone(),
+                    self.boot,
+                )
+                .with_policy(goal.permission_scope.clone(), DataClass::Personal);
+                let round = session.run_write_round(intent, &permit, at)?;
+
+                // 动作已经走完 §6 第 3–8 步，从待推进队列里取走。留着它会让 L3 每一轮都
+                // 重新提议同一个已经执行过的动作——`run_write_round` 走的是会话路径，
+                // 不经过能力簇的 `handle_result`，所以这一步在这里显式做。
+                self.cluster.release_action(&intent.action_id);
+
+                let (receipt, verdict) = match &round.dispatch {
+                    DispatchOutcome::Receipted(receipt) => (
+                        format!("{:?}", receipt.status),
+                        round.outcome.as_ref().map(|outcome| format!("{:?}", outcome.verdict)),
+                    ),
+                    DispatchOutcome::Interrupted { .. } => ("interrupted".to_string(), None),
+                    DispatchOutcome::Refused { reason } => {
+                        (format!("refused: {reason}"), None)
+                    }
+                };
+
+                Ok(AdvanceStep::Action {
+                    action_id: intent.action_id.to_string(),
+                    tool_id: intent.tool_id.to_string(),
+                    permit_id: permit.permit_id.to_string(),
+                    receipt,
+                    verdict,
+                })
+            }
+        }
+    }
+
+    /// 找一份覆盖这次动作的批准。
+    ///
+    /// 只取第一份覆盖的。批准之间没有优先级，而"按某个体贴的顺序挑一份"会引入一个不在规格
+    /// 里的判据——那种判据在被审计时无法解释"为什么用了这一份而不是那一份"。
+    ///
+    /// 找不到就返回 `None` 交给策略代理：它区分"一份都没有"与"有但不覆盖这次动作"，
+    /// 而那个区分决定了给用户看的是"请批准"还是"请针对这一次动作再批一次"。
+    fn find_covering_approval(
+        &self,
+        intent: &ActionIntent,
+        now: WallClock,
+    ) -> Result<Option<Approval>, CoreError> {
+        for approval in self.store.approvals_for(&self.owner)? {
+            if approval.covers(intent, now).is_ok() {
+                return Ok(Some(approval));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 记下一次人工批准（§12.1）。
+    ///
+    /// 批准落盘而不是只活在内存里：动作账上会留下 `approval_id`，如果批准本身重启就没了，
+    /// 那条引用就是一个悬空锚点，而追溯链恰好断在最需要它回答的那个问题上——"这次写入是谁批的"。
+    pub fn grant_approval(&mut self, approval: &Approval, at: WallClock) -> Result<bool, CoreError> {
+        let recorded = self.store.record_approval(approval)?;
+        self.store.audit(
+            at,
+            AuditCategory::ApprovalGranted,
+            approval.approval_id.as_str(),
+            "granted",
+            &format!(
+                "等级上限 {}、通道 {:?}、可用 {} 次",
+                approval.max_action_level.as_str(),
+                approval.channel,
+                approval.max_uses
+            ),
+        )?;
+        Ok(recorded)
+    }
+
+    /// 本主体名下当前可用的批准（未过期且有余量）。
+    pub fn usable_approvals(&self, at: WallClock) -> Result<Vec<Approval>, CoreError> {
+        Ok(self
+            .store
+            .approvals_for(&self.owner)?
+            .into_iter()
+            .filter(|approval| {
+                approval.remaining() > 0
+                    && approval.expires_at.is_none_or(|expires_at| at < expires_at)
+            })
+            .collect())
+    }
+
+    /// 策略代理（只读）。
+    pub fn policy(&self) -> &PolicyAgent {
+        &self.policy
+    }
+
+    /// 策略代理（可变）。用于全局暂停与恢复（§12.1 末段）。
+    pub fn policy_mut(&mut self) -> &mut PolicyAgent {
+        &mut self.policy
+    }
+
+    /// 执行一次状态迁移。目标卡在审批上时用它恢复（§12.1）。
+    ///
+    /// 只暴露"从等待审批回到进行中"这一条路：把目标从暂停里放出来是一个需要显式做出的
+    /// 决定，而把它藏进通用的 `transition` 里，等于给了调用方一条静悄悄绕过审批的路。
+    pub fn resume_after_approval(&mut self, goal_id: &GoalId, at: WallClock) -> Result<(), CoreError> {
+        let goal = self
+            .goals
+            .goal(goal_id)
+            .ok_or_else(|| CoreError::UnresolvedSubject(goal_id.to_string()))?;
+        if goal.state != GoalState::WaitingApproval {
+            return Err(CoreError::UnresolvedSubject(format!(
+                "{goal_id} 不处于等待审批状态（当前 {}）",
+                goal.state.as_str()
+            )));
+        }
+        self.goals.transition(goal_id, GoalState::Active)?;
+        self.store.audit(
+            at,
+            AuditCategory::ApprovalGranted,
+            goal_id.as_str(),
+            "resumed",
+            "收到批准，目标恢复推进",
+        )?;
+        Ok(())
     }
 
     /// 一条结论的出处（§7.1）。
@@ -813,6 +1130,8 @@ impl Subject {
             ledger_records: self.cluster.ledger().len(),
             memory_entries: self.store.memory_count(&self.owner)?,
             actions: self.store.action_count()?,
+            pending_actions: self.cluster.pending_actions(),
+            usable_approvals: self.usable_approvals(at)?.len(),
             model_calls: self.gateway.calls(),
             backend: self.backend.as_str(),
             egress_policy: self.egress.as_str(),

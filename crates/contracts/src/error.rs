@@ -228,6 +228,24 @@ pub enum ContractError {
     #[error("执行许可字段非法：{reason}")]
     PermitInvalid { reason: &'static str },
 
+    #[error("审批字段非法：{reason}")]
+    ApprovalInvalid { reason: &'static str },
+
+    #[error("审批 {approval_id} 不覆盖这次动作：{field} 不符（§12.2：授权不给子单元自动扩大）")]
+    ApprovalDoesNotCover {
+        approval_id: String,
+        field: &'static str,
+    },
+
+    #[error("审批 {approval_id} 已于 {expires_at} 过期（§12.2：审批过期时默认拒绝新副作用）")]
+    ApprovalExpired {
+        approval_id: String,
+        expires_at: String,
+    },
+
+    #[error("审批 {approval_id} 的可用次数已耗尽（上限 {max_uses}）")]
+    ApprovalExhausted { approval_id: String, max_uses: u8 },
+
     #[error("执行许可已过期：expires_at={expires_at}")]
     PermitExpired { expires_at: String },
 

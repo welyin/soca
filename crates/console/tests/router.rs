@@ -735,6 +735,110 @@ fn the_loop_stops_early_when_there_is_nothing_left_to_do() {
     assert_eq!(rounds[0]["outcome"]["kind"], "finished");
 }
 
+// ---------------------------------------------------------------------------
+// 执行与审批
+// ---------------------------------------------------------------------------
+
+const TARGET: &str = "file:D:\\资料\\摘要\\out.md";
+
+/// 一轮报告里出现过的推进步骤。
+fn step_kinds(payload: &Value) -> Vec<String> {
+    payload["rounds"]
+        .as_array()
+        .expect("数组")
+        .iter()
+        .filter_map(|round| round["outcome"]["step"]["kind"].as_str())
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[test]
+fn the_console_walks_a_write_from_delegation_to_verified_execution() {
+    // 端到端把 §12.1／§12.2 那条路走一遍：委托 A2 范围 → 投递写入 → 停下等审批 →
+    // 批准 → 恢复 → 真的执行并核对。
+    let mut subject = subject();
+
+    let goal = json(&call(
+        &mut subject,
+        "POST",
+        "/api/delegate_write",
+        &body(json!({"message": "写摘要"})),
+    ));
+    assert_eq!(goal["max_action_level"], "A2");
+
+    let written = json(&call(
+        &mut subject,
+        "POST",
+        "/api/write",
+        &body(json!({"subject_ref": TARGET, "content": "摘要内容"})),
+    ));
+    assert_eq!(written["pending_actions"], 1);
+
+    // 没有批准：动作应当停下来等——既不是被执行，也不是被拒绝。
+    let before = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a2", "rounds": 6})),
+    ));
+    let kinds = step_kinds(&before);
+    assert!(
+        kinds.contains(&"needs_approval".to_string()),
+        "没有批准时应当停下来等：{kinds:?}"
+    );
+    assert!(!kinds.contains(&"action".to_string()), "没有批准时不该执行");
+    assert_eq!(before["state"]["pending_actions"], 1, "动作还在队列里等着");
+
+    // 批准 → 恢复 → 再跑。
+    call(
+        &mut subject,
+        "POST",
+        "/api/approve",
+        &body(json!({"level": "a2", "max_uses": 1})),
+    );
+    let resumed = call(&mut subject, "POST", "/api/resume", &body(json!({})));
+    assert_eq!(resumed.status, 200, "{}", resumed.body);
+
+    let after = json(&call(
+        &mut subject,
+        "POST",
+        "/api/loop",
+        &body(json!({"risk": "a2", "rounds": 6})),
+    ));
+    let kinds = step_kinds(&after);
+    assert!(
+        kinds.contains(&"action".to_string()),
+        "批准之后应当真的执行：{kinds:?}"
+    );
+    assert_eq!(after["state"]["pending_actions"], 0, "执行完的动作要出队");
+    assert_eq!(
+        after["state"]["usable_approvals"], 0,
+        "一次性批准用完就不再可用"
+    );
+}
+
+#[test]
+fn resuming_without_a_waiting_goal_is_a_conflict_not_a_silent_success() {
+    let mut subject = subject();
+    let response = call(&mut subject, "POST", "/api/resume", &body(json!({})));
+    assert_eq!(response.status, 409);
+}
+
+#[test]
+fn approving_does_not_by_itself_execute_anything() {
+    // 批准是一个**输入**，不是一个动作。它只让后续的闭环有可能推进；把它做成"批准即执行"，
+    // 就等于让审批界面同时充当执行代理——而 §12.2 要求副作用只有一个出口。
+    let mut subject = subject();
+    call(
+        &mut subject,
+        "POST",
+        "/api/approve",
+        &body(json!({"level": "a2", "max_uses": 1})),
+    );
+    let state = json(&call(&mut subject, "GET", "/api/state", ""));
+    assert_eq!(state["actions"], 0, "只是批准了一次，账上不该有动作");
+}
+
 #[test]
 fn an_invalid_risk_level_is_refused() {
     let mut subject = subject();

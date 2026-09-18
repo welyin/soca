@@ -31,7 +31,9 @@ pub mod verifiers;
 
 pub use crate::cluster::DesktopAndFilesCluster;
 pub use crate::evidence::{EvidenceLedger, EvidenceRecord, MAX_EVIDENCE_RECORDS};
-pub use crate::leaves::{ActionPrecondition, FileVersion, PostconditionVerify, Precondition};
+pub use crate::leaves::{
+    ActionPrecondition, FileVersion, PendingAction, PostconditionVerify, Precondition,
+};
 pub use crate::map::{
     Cell, KnownCell, KnowledgeMap, MapUpdate, VIEW_AGENT_COLUMN, VIEW_AGENT_ROW,
 };

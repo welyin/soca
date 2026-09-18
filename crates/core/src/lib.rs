@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | [`os`] | 确定性模拟 OS，含动作级幂等与可复现故障注入 | §16 P0 的"模拟 OS" |
 //! | [`broker`] | 副作用唯一出口，只有执行许可能通过 | §12.2 |
+//! | [`policy`] | 策略代理：决定要不要签发执行许可 | §12.1、§12.2 |
 //! | [`session`] | §6 的九步循环，逐步可调用 | §6 |
 //! | [`replay`] | 只读轨迹重放与自洽性检查 | §7.3 |
 //!
@@ -28,6 +29,7 @@ pub mod broker;
 pub mod error;
 pub mod lifecycle;
 pub mod os;
+pub mod policy;
 pub mod replay;
 pub mod session;
 pub mod subject;
@@ -38,6 +40,7 @@ pub use crate::lifecycle::{
     CheckpointOutcome, UnitRegistry, WakeOutcome, WakePolicy, WAKE_CATCH_UP_LIMIT,
 };
 pub use crate::os::{Attempt, AttemptOutcome, FaultPlan, ObjectState, SimulatedOs};
+pub use crate::policy::{PermitDecision, PolicyAgent, DEFAULT_PERMIT_TTL_SECONDS};
 pub use crate::replay::{ActionTrajectory, ReplayViolation, Trajectory};
 pub use crate::session::{
     evaluate, DispatchOutcome, ObservationRecord, RoundReport, Session, ABSENT_VALUE,

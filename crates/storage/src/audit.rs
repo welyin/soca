@@ -38,6 +38,18 @@ pub enum AuditCategory {
     UnknownCommitResolved,
     /// 单元生命周期变化。
     UnitTransition,
+    /// 签发了执行许可。
+    PermitIssued,
+    /// 许可被拒绝。§6.8 与 [`AuditCategory::ActionDenied`] 同一要求，但发生在更早的一环：
+    /// 动作根本没被受理，因为策略代理判定不该签发许可。
+    PermitRefused,
+    /// 收到一次人工批准（§12.1）。
+    ApprovalGranted,
+    /// 策略代理判定需要人工批准，目标转入等待状态（§12.1）。
+    ///
+    /// 与 [`AuditCategory::PermitRefused`] 分开记录，是因为它们对"接下来该做什么"的含义
+    /// 完全不同：一个是等外部输入，另一个是此路不通。
+    ApprovalRequired,
 }
 
 impl AuditCategory {
@@ -53,6 +65,10 @@ impl AuditCategory {
             Self::UnknownCommitDetected => "unknown_commit_detected",
             Self::UnknownCommitResolved => "unknown_commit_resolved",
             Self::UnitTransition => "unit_transition",
+            Self::PermitIssued => "permit_issued",
+            Self::PermitRefused => "permit_refused",
+            Self::ApprovalGranted => "approval_granted",
+            Self::ApprovalRequired => "approval_required",
         }
     }
 }
@@ -113,6 +129,25 @@ fn truncate_detail(detail: &str) -> String {
 }
 
 impl Store {
+    /// 单独追加一条审计记录，自开事务。
+    ///
+    /// 与 `record_in` 的分工：那条路径服务于"审计必须和它描述的事实同事务落库"的场合
+    /// （受理、投递、回执）。本方法服务的是另一类事实——策略判定、许可拒绝、收到批准——
+    /// 它们自己没有别的表要写，因此不需要与谁同事务。
+    pub fn audit(
+        &mut self,
+        at: WallClock,
+        category: AuditCategory,
+        subject_ref: &str,
+        outcome: &str,
+        detail: &str,
+    ) -> Result<(), StorageError> {
+        let tx = self.connection_mut().transaction()?;
+        record_in(&tx, at, category, subject_ref, outcome, detail)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 读取审计记录，按时间升序。`limit` 为 0 时返回空列表。
     pub fn audit_entries(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
         if limit == 0 {

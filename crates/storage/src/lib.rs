@@ -24,6 +24,7 @@ pub mod error;
 pub mod events;
 pub mod game_ledger;
 pub mod goals;
+pub mod approvals;
 pub mod instances;
 pub mod memory;
 pub mod predictions;

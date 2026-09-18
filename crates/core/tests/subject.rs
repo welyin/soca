@@ -5,10 +5,11 @@
 //! 来路不明的证据，或者一次模型咨询悄悄消耗了两个目标的额度。
 
 use soca_contracts::{
-    ActionLevel, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef, ExplorationQuota,
-    GoalBudget, GoalId, GoalState, ModelBackend, ModelBudget, ModelOutput, ModelProposal,
-    MemoryKind, ModelSelfReport, ModelVersion, OutputSchema, PermissionScope, SelectionPolicy,
-    SubjectId, TokenUsage, UserChannel, VerificationKind, Verdict, WallClock, MAX_CONTEXT_EVIDENCE,
+    ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, EvidenceRef,
+    ExplorationQuota, GoalBudget, GoalId, GoalState, MemoryKind, ModelBackend, ModelBudget,
+    ModelOutput, ModelProposal, ModelSelfReport, ModelVersion, OutputSchema, PermissionScope,
+    SelectionPolicy, SubjectId, TokenUsage, UserChannel, VerificationKind, Verdict, WallClock,
+    MAX_CONTEXT_EVIDENCE,
 };
 use soca_core::{ActionBroker, AdvanceStep, RoundOutcome, SimulatedOs, Subject};
 use soca_core_actors::{DesktopAndFilesCluster, Precondition};
@@ -122,6 +123,66 @@ fn delegate_a_goal(subject: &mut Subject) -> GoalId {
             None,
         )
         .expect("委托")
+}
+
+/// 一个不带动作前提的能力簇的装配。
+///
+/// 需要它，是因为 `ActionPrecondition` 在前提被观测到之前会一直提出观测请求，而那些请求与
+/// 动作候选在**证据条数上并列**，于是谁先出场由叶单元的排列顺序决定。要单独检验动作这一条路，
+/// 就得把无关的候选排除掉——否则测的是"顺序"，不是"能不能执行"。
+fn subject_without_preconditions() -> Subject {
+    let store = Store::open_in_memory(at(0)).expect("内存存储");
+    let broker = ActionBroker::new(SimulatedOs::new());
+    let cluster = DesktopAndFilesCluster::new(WATCHED, Vec::new()).expect("装配能力簇");
+    Subject::new(
+        store,
+        broker,
+        cluster,
+        owner(),
+        boot(),
+        Box::new(DeterministicTransport::new(Vec::new())),
+        ModelBackend::Cpu,
+        false,
+        ModelBudget {
+            max_output_tokens: 1024,
+            max_wall_millis: 30_000,
+            max_attempts: 1,
+        },
+        ModelVersion::new("sha256:test-model").expect("固定模型版本"),
+    )
+    .expect("装配主体")
+}
+
+/// 委托一个范围内含 A2 的目标。
+fn delegate_an_a2_goal(subject: &mut Subject) -> GoalId {
+    let goal_id = subject
+        .delegate(
+            "把摘要写进已授权目录",
+            UserChannel::Chat,
+            scope(ActionLevel::A2),
+            budget(),
+            ExplorationQuota::new(0),
+            at(0),
+            None,
+        )
+        .expect("委托");
+    subject.accept(&goal_id, at(1)).expect("受理");
+    goal_id
+}
+
+/// 记下一次人工批准。
+fn grant_approval(subject: &mut Subject, id: &str, level: ActionLevel, max_uses: u8, at: WallClock) {
+    let approval = Approval::new(
+        ApprovalId::new(id).expect("固定审批"),
+        owner(),
+        level,
+        UserChannel::ApprovalUi,
+        at,
+        None,
+        max_uses,
+    )
+    .expect("合法批准");
+    subject.grant_approval(&approval, at).expect("记下批准");
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +829,248 @@ fn the_loop_stops_when_all_goals_exhaust_their_activations() {
         second.outcome
     );
     assert_eq!(second.activations, 0);
+}
+
+// ---------------------------------------------------------------------------
+// L4 执行通路（§12.1、§12.2）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_write_request_beyond_the_goals_scope_is_refused_rather_than_awaited() {
+    // "需要审批"与"被拒绝"是两条不同的走向，区别是能不能靠再一次人工批准解决。
+    // 等级超出范围属于后者：§12.2 的"授权不给子单元自动扩大"是一条范围规则，
+    // 补一次同意改变不了它，只有重新委托能。
+    let mut subject = subject_without_preconditions();
+    let goal_id = delegate_a_goal(&mut subject); // 范围上限 A1
+    subject.accept(&goal_id, at(1)).expect("受理");
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject.request_write(WATCHED, "摘要内容", at(2)).expect("投递");
+
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(3))
+        .expect("跑一轮");
+
+    match &report.outcome {
+        RoundOutcome::Advanced {
+            step: AdvanceStep::Refused { reason },
+        } => {
+            assert!(reason.contains("上限"), "理由要说明这是范围问题：{reason}");
+            assert!(reason.contains("重新委托"), "还要说明补救办法：{reason}");
+        }
+        other => panic!("超出范围的动作应当被拒绝，实际：{other:?}"),
+    }
+    assert_eq!(subject.pending_actions(), 0, "被拒的动作不该继续挂在队列里");
+    assert_eq!(
+        subject.goals().goal(&goal_id).expect("存在").state,
+        GoalState::Active,
+        "拒绝不是等待审批，目标状态不该改动"
+    );
+}
+
+#[test]
+fn an_a2_write_without_an_approval_parks_the_goal() {
+    let mut subject = subject_without_preconditions();
+    let goal_id = delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject.request_write(WATCHED, "摘要内容", at(2)).expect("投递");
+
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(3))
+        .expect("跑一轮");
+
+    match &report.outcome {
+        RoundOutcome::Advanced {
+            step: AdvanceStep::NeedsApproval { level, reason },
+        } => {
+            assert_eq!(level, "A2");
+            assert!(
+                reason.contains("每任务明确批准"),
+                "理由要说出该等级的放行要求（§12.1 的表）：{reason}"
+            );
+        }
+        other => panic!("没有批准时应当停下来等，实际：{other:?}"),
+    }
+
+    // §12.1 的人工审批是一个正常状态，不是失败：目标停在等待审批上。
+    assert_eq!(
+        subject.goals().goal(&goal_id).expect("存在").state,
+        GoalState::WaitingApproval
+    );
+    assert_eq!(subject.pending_actions(), 1, "动作继续等着，不是被丢掉");
+
+    // 下一轮：没有还能推进的目标，环路应当停下，而不是空转。
+    let next = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(4))
+        .expect("下一轮");
+    assert!(
+        matches!(next.outcome, RoundOutcome::Finished { .. }),
+        "等待审批期间不该继续空转：{:?}",
+        next.outcome
+    );
+}
+
+#[test]
+fn granting_an_approval_lets_the_round_execute_and_verify() {
+    // 整条链一次跑通：投递 → L3 选中 → 策略代理签发 → 受理 → 投递执行 → 回执 →
+    // 后置条件核对 → 动作出队。在此之前，这条链上的每一步都有测试，但没有一次是被
+    // 真实数据从头走到尾的。
+    let mut subject = subject_without_preconditions();
+    delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    let action_id = subject
+        .request_write(WATCHED, "摘要内容", at(2))
+        .expect("投递");
+    grant_approval(&mut subject, "approval:write", ActionLevel::A2, 1, at(2));
+
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(3))
+        .expect("跑一轮");
+
+    match &report.outcome {
+        RoundOutcome::Advanced {
+            step:
+                AdvanceStep::Action {
+                    action_id: ran,
+                    tool_id,
+                    permit_id,
+                    receipt,
+                    verdict,
+                },
+        } => {
+            assert_eq!(ran, &action_id.to_string());
+            assert_eq!(tool_id, "fs.write");
+            assert!(permit_id.starts_with("permit:"), "实际：{permit_id}");
+            assert_eq!(receipt, "Completed");
+            assert_eq!(
+                verdict.as_deref(),
+                Some("Supported"),
+                "写完之后观测到的版本应当与预测一致——回执本身不算验证（§7.2）"
+            );
+        }
+        other => panic!("有批准就应当执行，实际：{other:?}"),
+    }
+
+    assert_eq!(subject.pending_actions(), 0, "执行完的动作要出队");
+    assert!(
+        subject.usable_approvals(at(4)).expect("查").is_empty(),
+        "一次性批准用完就不再可用（§12.1 对 A3 要的是每动作审批）"
+    );
+}
+
+#[test]
+fn a_consumed_approval_does_not_authorize_a_second_action() {
+    let mut subject = subject_without_preconditions();
+    delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject.request_write(WATCHED, "第一份内容", at(2)).expect("投递");
+    grant_approval(&mut subject, "approval:once", ActionLevel::A2, 1, at(2));
+    subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(3))
+        .expect("第一轮");
+
+    // 换一份内容再投递一次。批准已经用掉了，而且它绑定的也不是这次内容。
+    subject.request_write(WATCHED, "第二份内容", at(4)).expect("再投递");
+    let second = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(5))
+        .expect("第二轮");
+
+    assert!(
+        matches!(
+            second.outcome,
+            RoundOutcome::Advanced {
+                step: AdvanceStep::NeedsApproval { .. }
+            }
+        ),
+        "一次批准不能授权第二次动作，实际：{:?}",
+        second.outcome
+    );
+    assert_eq!(
+        subject.pending_actions(),
+        1,
+        "这次动作仍然等着，因为它只差一次批准"
+    );
+}
+
+#[test]
+fn a_paused_policy_refuses_every_new_permit() {
+    // §12.1 末段：全局暂停应当先撤销尚未消费的执行授权、停止外发。对**尚未签发**的许可，
+    // 表现就是这里一律拒绝——而不是"暂停但仍然签发"。
+    let mut subject = subject_without_preconditions();
+    delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject.request_write(WATCHED, "摘要内容", at(2)).expect("投递");
+    grant_approval(&mut subject, "approval:paused", ActionLevel::A2, 1, at(2));
+    subject.policy_mut().pause("用户按下了暂停");
+
+    let report = subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(3))
+        .expect("跑一轮");
+
+    match &report.outcome {
+        RoundOutcome::Advanced {
+            step: AdvanceStep::Refused { reason },
+        } => {
+            assert!(reason.contains("全局暂停"), "实际：{reason}");
+        }
+        other => panic!("暂停期间不该签发许可，实际：{other:?}"),
+    }
+    assert_eq!(
+        subject.usable_approvals(at(4)).expect("查").len(),
+        1,
+        "拒绝不消耗批准——否则用户批了三次，系统一次也没执行"
+    );
+}
+
+#[test]
+fn every_refusal_and_issuance_lands_in_the_audit_ledger() {
+    // §6 第 8 步："错误的引用、失败、超时、**否决**均保留在最小审计账中。"
+    // 这条要求很容易被写成一个只有日志才看得见的东西，因此在这里对着账本断言。
+    let mut subject = subject_without_preconditions();
+    delegate_an_a2_goal(&mut subject);
+    subject
+        .observe(WATCHED, DataClass::Personal, at(2))
+        .expect("观测");
+    subject.request_write(WATCHED, "摘要内容", at(2)).expect("投递");
+
+    // 第一轮没有批准：应当记下"等待审批"。
+    subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(3))
+        .expect("跑一轮");
+    let entries = subject.store().audit_entries(64).expect("读审计");
+    assert!(
+        entries.iter().any(|entry| entry.category == "approval_required"),
+        "等待审批要留痕：{entries:?}"
+    );
+
+    // 补上批准，让目标恢复，再跑一轮：这次应当记下"签发"。
+    grant_approval(&mut subject, "approval:audit", ActionLevel::A2, 1, at(4));
+    let goal_id = subject.goals().iter().next().expect("有目标").goal_id.clone();
+    subject.resume_after_approval(&goal_id, at(4)).expect("恢复");
+    subject
+        .run_round(&SelectionPolicy::default(), ActionLevel::A2, at(5))
+        .expect("再跑一轮");
+
+    let entries = subject.store().audit_entries(64).expect("读审计");
+    assert!(
+        entries.iter().any(|entry| entry.category == "permit_issued"),
+        "签发要留痕：{entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.category == "approval_granted"),
+        "收到批准也要留痕：{entries:?}"
+    );
 }
 
 #[test]

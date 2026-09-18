@@ -856,7 +856,7 @@ fn an_uncalibrated_probability_is_refused_on_the_way_into_the_store() {
 fn schema_version_is_reported_and_migrations_are_recorded() {
     let store = in_memory();
     assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-    assert_eq!(LATEST_SCHEMA_VERSION, 5);
+    assert_eq!(LATEST_SCHEMA_VERSION, 6);
 }
 
 #[test]

@@ -6,8 +6,9 @@
 
 use serde_json::{json, Value};
 use soca_contracts::{
-    ActionLevel, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota, GoalBudget, GoalId,
-    PermissionScope, SelectionPolicy, UserChannel, WallClock,
+    ActionLevel, Approval, ApprovalId, Candidate, CapabilityPolicyRef, DataClass, ExplorationQuota,
+    GoalBudget, GoalId, GoalState, PermissionScope, SelectionPolicy, Sha256Hex, UserChannel,
+    WallClock,
 };
 use soca_core::{RoundOutcome, Subject};
 use soca_model_gateway::{GatewayError, ModelCredentials};
@@ -54,6 +55,10 @@ pub fn handle(
         ("GET", "/api/model") => Response::json(200, &model.summary()),
         ("POST", "/api/model") => connect_model(subject, model, request),
         ("POST", "/api/model/reset") => reset_model(subject, model),
+        ("POST", "/api/delegate_write") => delegate_write_goal(subject, request, at),
+        ("POST", "/api/write") => request_write(subject, request, at),
+        ("POST", "/api/approve") => grant_approval(subject, request, at),
+        ("POST", "/api/resume") => resume_goal(subject, request, at),
         ("POST", "/api/loop") => run_loop(subject, request, at),
         ("POST", "/api/select") => select_ladder(subject, request, at),
         ("POST", "/api/chat") => chat(subject, request, at),
@@ -293,6 +298,183 @@ fn consult(subject: &mut Subject, request: &Request, at: WallClock) -> Response 
     }
 }
 
+/// 委托一个范围内含 A2（写入）的目标。
+///
+/// 单独一个接口、单独一个名字，而不是让 `/api/chat` 收一个 `level` 参数。**放宽范围必须是
+/// 一次显式动作。** §12.2 要求"授权不给子单元自动扩大"；如果放宽与否只是一个请求字段，
+/// 那么从"读一读"到"改文件"之间就没有任何东西需要经过人的手——而两次点击之间那次点击，
+/// 正是这个设计里唯一一次由人做出的范围决定。
+fn delegate_write_goal(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let payload = body_json(request).unwrap_or(Value::Null);
+    let message = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("在已授权目录里写入文件");
+
+    let scope = PermissionScope {
+        capability_policy_ref: CapabilityPolicyRef::new("cap:read-selected-folder")
+            .expect("固定能力策略"),
+        // §12.1："在指定目录生成/重命名文件"就是 A2。这是本次委托的核心内容，也是它
+        // 为什么不复用 `/api/chat` 的原因。
+        max_action_level: ActionLevel::A2,
+    };
+    let budget = match GoalBudget::new(CHAT_ACTIONS, CHAT_ACTIVATIONS, CHAT_TOKENS, 3_600_000) {
+        Ok(budget) => budget,
+        Err(error) => return internal(error.to_string()),
+    };
+
+    let goal_id = match subject.delegate(
+        message.trim(),
+        UserChannel::Chat,
+        scope,
+        budget,
+        ExplorationQuota::new(CHAT_EXPLORATIONS),
+        at,
+        None,
+    ) {
+        Ok(id) => id,
+        Err(error) => return internal(error.to_string()),
+    };
+    if let Err(error) = subject.accept(&goal_id, at) {
+        return internal(error.to_string());
+    }
+
+    Response::json(
+        200,
+        &json!({
+            "goal_id": goal_id.to_string(),
+            "max_action_level": ActionLevel::A2.as_str(),
+        }),
+    )
+}
+
+/// 投递一次写入（§12.1 的 A2）。
+///
+/// 它只**投递**：动作要过 L3、策略代理与执行代理三道关才可能真的发生。接口本身不签发
+/// 任何东西——把"想要做"与"可以做"合到一个接口里，等于让提交方顺便给自己发许可。
+fn request_write(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let Some(subject_ref) = payload.get("subject_ref").and_then(Value::as_str) else {
+        return Response::text(400, "缺少 subject_ref");
+    };
+    let content = payload.get("content").and_then(Value::as_str).unwrap_or_default();
+
+    match subject.request_write(subject_ref, content, at) {
+        Ok(action_id) => Response::json(
+            200,
+            &json!({
+                "action_id": action_id.to_string(),
+                "pending_actions": subject.pending_actions(),
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 记下一次人工批准（§12.1）。
+///
+/// 通道由请求指定，默认 `approval_ui`。默认值必须是图形审批界面而不是语音：§14 明确
+/// "不以可能误识别的语音**自动**批准高风险操作"，把一个不指定通道的请求默认成语音，
+/// 就等于让 A3 的默认路径落在被禁止的那一条上。
+fn grant_approval(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let Ok(payload) = body_json(request) else {
+        return Response::text(400, "请求体不是合法 JSON");
+    };
+    let level = match parse_level(payload.get("level").and_then(Value::as_str)) {
+        Ok(level) => level,
+        Err(message) => return Response::text(400, message),
+    };
+    let max_uses = payload
+        .get("max_uses")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, u8::MAX as u64) as u8;
+    let channel = match payload.get("channel").and_then(Value::as_str) {
+        None | Some("approval_ui") => UserChannel::ApprovalUi,
+        Some("chat") => UserChannel::Chat,
+        Some("push_to_talk") => UserChannel::PushToTalk,
+        Some(_) => return Response::text(400, "channel 只能是 approval_ui/chat/push_to_talk"),
+    };
+
+    // 每次批准一个新标识。把它做成幂等的（比如按等级派生）会让用户第二次点"批准"变成
+    // 无效操作——而用户点第二次的语义是"再批一次"，不是"重复提交同一件事"。
+    let approval_id = match ApprovalId::new(format!(
+        "approval:{}",
+        Sha256Hex::of_bytes(format!("{}|{level:?}|{max_uses}|{at}", subject.owner()).as_bytes())
+    )) {
+        Ok(id) => id,
+        Err(error) => return internal(error.to_string()),
+    };
+
+    let approval = match Approval::new(
+        approval_id,
+        subject.owner().clone(),
+        level,
+        channel,
+        at,
+        None,
+        max_uses,
+    ) {
+        Ok(approval) => approval,
+        Err(error) => return Response::text(400, error.to_string()),
+    };
+
+    match subject.grant_approval(&approval, at) {
+        Ok(recorded) => Response::json(
+            200,
+            &json!({
+                "approval_id": approval.approval_id.to_string(),
+                "level": level.as_str(),
+                "channel": channel_name(channel),
+                "max_uses": max_uses,
+                "recorded": recorded,
+            }),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+/// 把停在审批上的目标放回进行中（§12.1）。
+///
+/// 不给 `goal_id` 时对**第一个**等待审批的目标操作。这比"批量恢复"窄，也比它安全：
+/// 一次恢复一个，用户看得见每一步。
+fn resume_goal(subject: &mut Subject, request: &Request, at: WallClock) -> Response {
+    let payload = body_json(request).unwrap_or(Value::Null);
+    let requested = payload.get("goal_id").and_then(Value::as_str);
+
+    let goal_id = match requested {
+        Some(raw) => match GoalId::new(raw) {
+            Ok(id) => id,
+            Err(error) => return Response::text(400, error.to_string()),
+        },
+        None => match subject
+            .goals()
+            .iter()
+            .find(|goal| goal.state == GoalState::WaitingApproval)
+            .map(|goal| goal.goal_id.clone())
+        {
+            Some(id) => id,
+            None => return Response::text(409, "没有等待审批的目标"),
+        },
+    };
+
+    match subject.resume_after_approval(&goal_id, at) {
+        Ok(()) => Response::json(200, &json!({"goal_id": goal_id.to_string(), "state": "active"})),
+        Err(error) => Response::text(409, error.to_string()),
+    }
+}
+
+fn channel_name(channel: UserChannel) -> &'static str {
+    match channel {
+        UserChannel::Chat => "chat",
+        UserChannel::PushToTalk => "push_to_talk",
+        UserChannel::ApprovalUi => "approval_ui",
+        UserChannel::DeviceControl => "device_control",
+    }
+}
+
 /// 连续跑若干轮 §6 的闭环。
 ///
 /// 轮数上限 32：一个 HTTP 请求不该能把主体占住任意长的时间。真正需要长跑的场景要的是
@@ -302,7 +484,7 @@ fn run_loop(subject: &mut Subject, request: &Request, at: WallClock) -> Response
     let Ok(payload) = body_json(request) else {
         return Response::text(400, "请求体不是合法 JSON");
     };
-    let risk = match parse_risk(payload.get("risk").and_then(Value::as_str)) {
+    let risk = match parse_level(payload.get("risk").and_then(Value::as_str)) {
         Ok(level) => level,
         Err(message) => return Response::text(400, message),
     };
@@ -357,7 +539,7 @@ fn select_ladder(subject: &mut Subject, request: &Request, at: WallClock) -> Res
     let Ok(payload) = body_json(request) else {
         return Response::text(400, "请求体不是合法 JSON");
     };
-    let risk = match parse_risk(payload.get("risk").and_then(Value::as_str)) {
+    let risk = match parse_level(payload.get("risk").and_then(Value::as_str)) {
         Ok(level) => level,
         Err(message) => return Response::text(400, message),
     };
@@ -397,7 +579,7 @@ fn select_ladder(subject: &mut Subject, request: &Request, at: WallClock) -> Res
     }
 }
 
-fn parse_risk(raw: Option<&str>) -> Result<ActionLevel, &'static str> {
+fn parse_level(raw: Option<&str>) -> Result<ActionLevel, &'static str> {
     match raw.unwrap_or("a1").to_ascii_lowercase().as_str() {
         "a0" => Ok(ActionLevel::A0),
         "a1" => Ok(ActionLevel::A1),

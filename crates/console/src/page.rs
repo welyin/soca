@@ -200,6 +200,43 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>执行与审批</h2>
+    <div class="hint" style="margin:0 0 12px">
+      §12.1／§12.2：写入是 A2，"在指定目录生成文件"。它需要一次人工批准，而批准
+      <b>绑定到具体那一次动作</b>——换一份内容或换一个目录就不再被覆盖。
+      批准只针对这一次，用完即尽。
+    </div>
+    <div class="row">
+      <button id="delegate-write" class="ghost">① 委托一个可写入的任务（A2）</button>
+      <span class="hint">上面聊天框的目标是 A1（只读），写入会被正确拒掉。</span>
+    </div>
+    <div class="row">
+      <input id="write-target" type="text" placeholder="要写入的路径，例如 D:\\资料\\摘要\\out.md" style="flex:1">
+      <input id="write-content" type="text" placeholder="要写入的内容" style="flex:1">
+      <button id="request-write">② 投递写入</button>
+    </div>
+    <div class="row">
+      <select id="approve-level">
+        <option value="a2" selected>A2 改动对象</option>
+        <option value="a3">A3 高风险</option>
+      </select>
+      <input id="approve-uses" type="number" min="1" max="255" value="1" style="width:76px" title="可用次数">
+      <select id="approve-channel">
+        <option value="approval_ui" selected>图形审批界面</option>
+        <option value="chat">聊天框</option>
+        <option value="push_to_talk">按键说话（A3 不接受）</option>
+      </select>
+      <button id="approve">③ 批准</button>
+      <button id="resume" class="ghost">④ 恢复等待审批的目标</button>
+    </div>
+    <div class="hint">
+      A3 不接受语音批准（§14：语音可能误识别，而 A3 没有别的兜底）。批准一旦用尽，
+      再投递同样的动作会重新回到"等待审批"，而不是悄悄放行。
+    </div>
+    <pre id="exec-out" style="margin-top:14px">（尚未运行）</pre>
+  </section>
+
+  <section>
     <h2>事件</h2>
     <div id="log"><div class="empty">还没有操作</div></div>
   </section>
@@ -419,6 +456,46 @@ $("run-select").onclick = async function () {
   $("run-select").disabled = false;
   refresh();
 };
+
+function showExec(label, result) {
+  $("exec-out").textContent = JSON.stringify(result, null, 2);
+  log(label, "ok");
+}
+
+$("delegate-write").onclick = async function () {
+  await execAction("delegate_write", { message: "在已授权目录里写入摘要文件" }, "① 已委托可写入的目标（A2）");
+};
+
+$("request-write").onclick = async function () {
+  const target = $("write-target").value.trim();
+  if (!target) { log("先填一个写入路径", "err"); return; }
+  await execAction("write", {
+    subject_ref: "file:" + target,
+    content: $("write-content").value,
+  }, "② 已投递写入");
+};
+
+$("approve").onclick = async function () {
+  await execAction("approve", {
+    level: $("approve-level").value,
+    max_uses: parseInt($("approve-uses").value, 10) || 1,
+    channel: $("approve-channel").value,
+  }, "③ 已批准");
+};
+
+$("resume").onclick = async function () {
+  await execAction("resume", {}, "④ 已恢复等待审批的目标");
+};
+
+async function execAction(path, payload, label) {
+  try {
+    showExec(label, await api(path, payload));
+  } catch (error) {
+    $("exec-out").textContent = error.message;
+    log(label + "失败：" + error.message, "err");
+  }
+  refresh();
+}
 
 $("run-loop").onclick = async function () {
   $("run-loop").disabled = true;

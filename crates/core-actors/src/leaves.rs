@@ -11,6 +11,7 @@
 //! | 文件版本 | [`FileVersion`] | 这个对象当前的版本是什么 |
 //! | 动作前提 | [`ActionPrecondition`] | 这次动作声明的前提，有没有落在证据上 |
 //! | 动作后验证 | [`PostconditionVerify`] | 哪次动作的预测被现实否定了 |
+//! | 待推进动作 | [`PendingAction`] | 目标侧投递的这个动作，该不该进 L3 参与竞争 |
 //!
 //! 三者都不调用模型、不持有 OS 句柄。§3.1 明确"不要求每个单元都有 OS 写权限"——它们能做的
 //! 事只有三件：收到事件、更新局部信念、提出候选。
@@ -18,11 +19,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use soca_contracts::{
-    ActionId, BlobRef, BudgetRef, Candidate, CandidateSet, CapabilityPolicyRef, CognitiveUnit,
-    ContractError, DomainId, Envelope, EvidenceRef, Expectation, ModelProfileRef, Observation,
-    OutcomeVerified, PayloadRef, Prediction, PredictionRef, Scope, Sha256Hex, StrategyVersion,
-    TaskContractVersion, TimeWindow, Uncertainty, UnitId, UnitKind, UnitSnapshot, UnitState,
-    Unresolved, Verdict, WallClock, SCHEMA_VERSION,
+    ActionId, ActionIntent, BlobRef, BudgetRef, Candidate, CandidateSet, CapabilityPolicyRef,
+    CognitiveUnit, ContractError, DomainId, Envelope, EvidenceRef, Expectation, ModelProfileRef,
+    Observation, OutcomeVerified, PayloadRef, Prediction, PredictionRef, Scope, Sha256Hex,
+    StrategyVersion, TaskContractVersion, TimeWindow, Uncertainty, UnitId, UnitKind, UnitSnapshot,
+    UnitState, Unresolved, Verdict, WallClock, SCHEMA_VERSION,
 };
 
 /// 从 §7.1 公共信封中取出公开观测。
@@ -265,6 +266,14 @@ impl CognitiveUnit for FileVersion {
     fn snapshot(&self) -> UnitSnapshot {
         self.core.snapshot()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +432,14 @@ impl CognitiveUnit for ActionPrecondition {
     fn snapshot(&self) -> UnitSnapshot {
         self.core.snapshot()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -566,5 +583,191 @@ impl CognitiveUnit for PostconditionVerify {
 
     fn snapshot(&self) -> UnitSnapshot {
         self.core.snapshot()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 待推进的动作
+// ---------------------------------------------------------------------------
+
+/// 一个待推进的动作，连同它预期的后果。
+#[derive(Debug)]
+struct QueuedAction {
+    intent: ActionIntent,
+    expectation: Expectation,
+}
+
+/// §4.3"推理与计划／候选方案"槽位的最小替身。
+///
+/// **先说清它是什么，以及它不是什么。** 它**不是**计划单元：真正的候选方案由计划单元从目标
+/// 与局部信念里生成，而那需要问题分解、模拟与代价预测（§4.3 的另三个槽），目前都还没有。
+/// 它做的是一件窄得多的事——把目标侧已经决定要做的动作**提交给 L3**，让它与其它候选一起
+/// 竞争，并且把它预期的后果如实带上来。
+///
+/// 为什么不等到计划单元写好再一起做：动作类候选在这之前根本没有入口。§6 第 5–8 步
+/// （选择、许可、执行、后置条件核对）整条链虽然都实现了、也各自有测试，却从来没有被真实
+/// 数据走过一遍。**一个没被跑过的路径和一个不存在的路径，在故障面前没有区别。**
+///
+/// 它也**不**自己编造动作、不自己放宽任何东西：投递进来的意图要依次过 L2 的证据存在性校验、
+/// L3 的候选竞争、以及策略代理的许可判定三道关。
+#[derive(Debug)]
+pub struct PendingAction {
+    core: LeafCore,
+    queued: Vec<QueuedAction>,
+}
+
+impl PendingAction {
+    /// 构造。
+    pub fn new() -> Result<Self, ContractError> {
+        Ok(Self {
+            core: LeafCore::new(
+                "unit:leaf:pending-action",
+                "desktop-and-files",
+                "file-write-v1",
+                "pending-action-v1",
+            )?,
+            queued: Vec::new(),
+        })
+    }
+
+    /// 投递一个待推进的动作。
+    ///
+    /// 意图与期望必须一起给出。§6 第 3 步要求"单元读取授权证据，在**动作前**记录可检查的
+    /// 预测"——一个不说明自己期望什么就请求动作的单元，事后无法判断自己是否判断错了，而
+    /// §6 第 8 步的"先比较旧预测与新观测"就成了无米之炊。
+    ///
+    /// 同一个动作重复投递是幂等的，**不**用后来的期望覆盖先到的：动作标识一旦使用就代表
+    /// 那一次具体动作，改期望说明改的其实是另一次动作，那应该用一个新的标识。
+    pub fn queue(
+        &mut self,
+        intent: ActionIntent,
+        expectation: Expectation,
+    ) -> Result<(), ContractError> {
+        if self
+            .queued
+            .iter()
+            .any(|queued| queued.intent.action_id == intent.action_id)
+        {
+            return Ok(());
+        }
+        self.queued.push(QueuedAction {
+            intent,
+            expectation,
+        });
+        self.core.note_belief_change();
+        Ok(())
+    }
+
+    /// 还有几个待推进。
+    pub fn pending(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// 尚未推进的动作标识。
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.queued
+            .iter()
+            .map(|queued| queued.intent.action_id.to_string())
+            .collect()
+    }
+
+    /// 取走一个动作（推进完成之后由 [`CognitiveUnit::handle_result`] 调用）。
+    pub fn release(&mut self, action_id: &ActionId) -> bool {
+        let before = self.queued.len();
+        self.queued
+            .retain(|queued| queued.intent.action_id != *action_id);
+        let removed = self.queued.len() != before;
+        if removed {
+            self.core.note_belief_change();
+        }
+        removed
+    }
+}
+
+impl CognitiveUnit for PendingAction {
+    fn unit_id(&self) -> &UnitId {
+        &self.core.unit_id
+    }
+
+    fn kind(&self) -> UnitKind {
+        UnitKind::Leaf
+    }
+
+    /// 动作意图不是从事件里来的。收到事件时本单元不做任何事——把它硬塞进"待推进"，
+    /// 等于让任何一条消息都能提议一次副作用。
+    fn observe(&mut self, _event: &Envelope, _at: WallClock) -> Result<(), ContractError> {
+        Ok(())
+    }
+
+    fn propose(&self, _at: WallClock) -> Result<CandidateSet, ContractError> {
+        let mut set = CandidateSet::empty();
+        for queued in &self.queued {
+            set.candidates.push(Candidate::RequestAction {
+                intent: Box::new(queued.intent.clone()),
+            });
+        }
+        Ok(set)
+    }
+
+    fn predict(&self, candidate: &Candidate, at: WallClock) -> Result<Prediction, ContractError> {
+        let Candidate::RequestAction { intent } = candidate else {
+            return Err(ContractError::MissingRefs {
+                field: "prediction.subject",
+            });
+        };
+        let queued = self
+            .queued
+            .iter()
+            .find(|queued| queued.intent.action_id == intent.action_id)
+            .ok_or(ContractError::MissingRefs {
+                field: "prediction.subject",
+            })?;
+
+        // 预测引用取自意图本身，而不是在这里新起一个：§6 第 3 步要求"动作前记录可检查的
+        // 预测"，而许可与受理都要靠这个引用把"当初预期什么"找回来。另起一个引用，
+        // 会让意图指向一份预测、账上记着另一份。
+        prediction_about(
+            intent.prediction_ref.as_str(),
+            intent.object_scope.as_str(),
+            format!("{} 对 {} 执行后应满足预期", intent.tool_id, intent.object_scope),
+            queued.expectation.clone(),
+            "执行后目标对象没有变成预期的样子".to_string(),
+            at,
+        )
+    }
+
+    fn handle_result(
+        &mut self,
+        outcome: &OutcomeVerified,
+        _at: WallClock,
+    ) -> Result<(), ContractError> {
+        // 三种判定都算走过了一轮：支持说明做对了，否定说明判断错了（同簇的
+        // [`PostconditionVerify`] 会据此要求重新观测），inconclusive 说明受了外部影响。
+        // 三种情况下这个动作都完成了一次闭环，继续挂着它只会让 L3 每一轮都重新提议它。
+        self.release(&outcome.action_id);
+        for reference in &outcome.observation_refs {
+            self.core.note_evidence(reference);
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> UnitSnapshot {
+        self.core.snapshot()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

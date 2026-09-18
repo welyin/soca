@@ -142,6 +142,15 @@ pub enum StorageError {
     #[error("找不到记忆条目 {memory_id}")]
     MemoryNotFound { memory_id: String },
 
+    #[error("找不到可用的人工批准 {approval_id}（不存在，或次数已耗尽）")]
+    ApprovalNotFound { approval_id: String },
+
+    #[error(
+        "审批标识 {approval_id} 已被另一份绑定占用；审批标识一旦使用不得复用\
+         （它是追溯依据的锚点）"
+    )]
+    ApprovalAlreadyRecorded { approval_id: String },
+
     #[error(
         "记忆标识 {memory_id} 已被另一份内容占用；记忆标识一旦使用不得复用\
          （它是追溯依据的锚点）"

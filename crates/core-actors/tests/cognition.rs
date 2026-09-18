@@ -334,12 +334,17 @@ fn a_cluster_is_a_cognitive_unit_like_a_leaf() {
     // 这里断言的是簇的合同产物与叶单元同形——同一个 trait、同一份快照校验。
     let cluster = cluster();
     assert_eq!(cluster.kind(), UnitKind::Cluster);
-    assert_eq!(cluster.leaf_count(), 3);
+
+    let ids = cluster.leaf_ids();
+    assert_eq!(cluster.leaf_count(), ids.len());
+    assert!(
+        ids.iter().any(|id| id.contains("pending-action")),
+        "待推进动作是「桌面与文件」簇的一个槽位：{ids:?}"
+    );
 
     let snapshot = cluster.snapshot();
     assert_eq!(snapshot.kind, UnitKind::Cluster);
     snapshot.validate().expect("簇快照必须自洽");
-    assert_eq!(cluster.leaf_ids().len(), 3);
 }
 
 #[test]
