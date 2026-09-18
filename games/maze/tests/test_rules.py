@@ -45,7 +45,57 @@ def test_the_manifest_and_this_adapter_agree_on_the_action_ids():
     # 而 `drop` 与 `done` **不在**表里（§10.1 要求禁用它们）。
     assert "drop" not in game.ACTION_IDS
     assert "done" not in game.ACTION_IDS
-    assert game.RULES_VERSION == MANIFEST["rules_version"]
+
+
+def test_every_variant_in_the_manifest_can_actually_be_opened():
+    # 清单是这一层的**规格**，而规格里的每一关都要真的能开起来。
+    #
+    # 加一关只改 JSON 却漏了适配器（或者环境标识写错了一个字），
+    # 会以"这一关起不来"的形式在很久以后暴露——而那时候没人会想到是清单的事。
+    variants = MANIFEST["variants"]
+    assert variants, "清单里一关都没有"
+    default = MANIFEST["default_variant"]
+    assert default in variants, "默认那一关不在清单里"
+
+    seen_rules = set()
+    for name, entry in variants.items():
+        config = game.variant_of(name)
+        assert config["rules_version"] == entry["rules_version"]
+        # 规则版本各不相同：它是宿主与账本区分"哪一套规则跑出来的这一局"的依据，
+        # 两关共用一个版本号，会让它们在账上长得一样。
+        assert config["rules_version"] not in seen_rules, f"{name} 的规则版本与别人重复"
+        seen_rules.add(config["rules_version"])
+        assert config["max_steps"] >= 50, f"{name} 的步数上限太小"
+
+        maze = game.Maze(name)
+        observation, _info = maze.env.reset(seed=7)
+        assert observation["image"].shape == (
+            MANIFEST["public"]["view_size"],
+            MANIFEST["public"]["view_size"],
+            3,
+        )
+        maze.env.close()
+
+
+def test_the_crossing_variant_has_a_goal_but_no_key_or_door():
+    # 用户要的那一种：起点、终点、墙体。
+    fair = game.truth(7, "crossing")
+    objects = {cell["object"] for cell in fair["cells"]}
+    assert "goal" in objects, "得有终点"
+    assert "door" not in objects and "key" not in objects, objects
+    assert fair["width"] == 9 and fair["height"] == 9
+
+
+def test_an_unknown_variant_is_refused_rather_than_silently_defaulted():
+    # 悄悄退回默认的表现是"我选了四房间，跑出来的却是门钥匙"——
+    # 而那不是故障，是有人以为自己在看另一局。
+    try:
+        game.variant_of("does-not-exist")
+    except game.Refused as refused:
+        assert refused.kind == "protocol"
+        assert "does-not-exist" in refused.reason
+    else:
+        raise AssertionError("未知变体不该被接受")
 
 
 def test_the_agent_stands_where_the_manifest_says_and_the_view_is_square():

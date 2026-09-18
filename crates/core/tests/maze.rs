@@ -67,7 +67,7 @@ fn subject() -> Subject {
 #[test]
 fn the_explorer_builds_a_consistent_map_and_gets_out() {
     let mut store = store();
-    let run = run_episode(&mut store, 7, 300, at(0)).expect("跑一局");
+    let run = run_episode(&mut store, 7, 300, "door-key", at(0)).expect("跑一局");
 
     // 一、视图约定被这次行走验证过了。
     assert_eq!(
@@ -105,7 +105,7 @@ fn every_step_can_say_why_it_was_taken() {
     // 探索器是确定性的，而**一个写不出理由的确定性决定，读的人只能把它当成随机**。
     // 这条测试钉的就是那一栏：每一步都要有理由，而且理由是具体的一句话。
     let mut store = store();
-    let run = run_episode(&mut store, 11, 40, at(0)).expect("跑一局");
+    let run = run_episode(&mut store, 11, 40, "door-key", at(0)).expect("跑一局");
 
     for step in &run.steps {
         assert!(!step.reason.is_empty(), "第 {} 步没有理由", step.index);
@@ -126,7 +126,7 @@ fn the_public_view_never_carries_the_seed_or_an_absolute_position() {
     // 注意区分：`MazeStep.position` 是**探索器自己算出来的**，它不进公开面——
     // 它存在是因为页面上要画一张地图。真正要保证的是 `view` 里没有世界坐标。
     let mut store = store();
-    let run = run_episode(&mut store, 3, 12, at(0)).expect("跑一局");
+    let run = run_episode(&mut store, 3, 12, "door-key", at(0)).expect("跑一局");
 
     let encoded = serde_json::to_string(&run.steps).expect("可序列化");
     for leaked in ["agent_pos", "agent_dir", "seed\"", "rng", "info"] {
@@ -146,7 +146,7 @@ fn the_agent_path_pays_every_toll_on_the_way() {
     // 每一步都要留下三样东西：一条**执行许可**、一条**回执**、一次**核验判定**。
     // 三样缺一，就说明那一步没有真的走那条循环——而"走没走"正是这一条要证的。
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("让主体走一局");
+    let run = play_through_actions(&mut subject, 7, 200, "door-key", at(0)).expect("让主体走一局");
 
     assert_eq!(run.path, RunPath::Agent, "走的应当是认知通路");
     assert_eq!(run.contradictions, 0, "地图仍然要自洽");
@@ -219,6 +219,35 @@ fn the_agent_path_pays_every_toll_on_the_way() {
 }
 
 #[test]
+fn the_crossing_variant_is_a_plain_maze_with_no_key_or_door() {
+    // 那一种传统迷宫：起点、终点、墙体——没有钥匙，没有门。
+    //
+    // 断言"没有"比断言"有"更要紧：**同一个探索器能跑通两关**这件事，只有在两关真的不同时
+    // 才有意义。`crossing` 要是悄悄退回了 DoorKey（比如变体没接上），那么"它也能跑墙与缺口"
+    // 就是一句空话，而页面上还会显示得好好的。
+    let mut subject = subject();
+    let run = play_through_actions(&mut subject, 7, 400, "crossing", at(0)).expect("走一局");
+    assert_eq!(run.variant, "crossing", "返回值要说清这是哪一关");
+    assert_eq!(run.contradictions, 0);
+    assert!(run.won(), "意外的相位：{}", run.outcome);
+
+    let truth = run.truth.clone().expect("真值");
+    assert_eq!(truth.width, 9, "这一关是 9×9");
+    let objects: Vec<&str> = truth.cells.iter().map(|cell| cell.object.as_str()).collect();
+    assert!(objects.contains(&"goal"), "得有终点");
+    assert!(!objects.contains(&"door"), "不该有门：{objects:?}");
+    assert!(!objects.contains(&"key"), "不该有钥匙：{objects:?}");
+
+    // 而同一 seed 在两关里是**不同的迷宫**。
+    let other = play_through_actions(&mut subject, 7, 300, "door-key", at(600)).expect("另一关");
+    assert_ne!(
+        (run.map.len(), truth.width),
+        (other.map.len(), other.truth.as_ref().map(|t| t.width).unwrap_or(0)),
+        "两关长得一样，多半是变体没接上"
+    );
+}
+
+#[test]
 fn the_walls_it_learned_match_the_truth() {
     // **整条链对地面真值的一次比对。**
     //
@@ -232,7 +261,7 @@ fn the_walls_it_learned_match_the_truth() {
     // 钥匙会被拿走、门会被打开，而真值那张图是**开局**的样子。
     // 拿它去比"现在"，会把一次正确的探索判成错的。
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 300, at(0)).expect("走一局");
+    let run = play_through_actions(&mut subject, 7, 300, "door-key", at(0)).expect("走一局");
     let truth = run.truth.clone().expect("真值");
     assert!(
         run.won(),
@@ -275,7 +304,7 @@ fn what_it_learned_becomes_memory_and_the_two_counts_converge() {
     // 一格一条。不等于就说明有一格没记上（那正是探索器有个私有字典的样子），
     // 或者有一条重复（那是"同一格反复被看见攒出多条"的样子）。
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("走一局");
+    let run = play_through_actions(&mut subject, 7, 200, "door-key", at(0)).expect("走一局");
 
     assert!(run.memories > 0, "一步都没往记忆里记");
     let active_cells = subject
@@ -320,7 +349,7 @@ fn revoking_the_capability_takes_back_what_was_learned_through_it() {
     // 这条推论只有在格子**真的**是记忆、而且**真的**指回那次观测时才成立。
     // 探索器里那个进程内的字典在这里会安静地什么也不变。
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("走一局");
+    let run = play_through_actions(&mut subject, 7, 200, "door-key", at(0)).expect("走一局");
     let before = subject
         .store()
         .recall(&owner(), None, at(0))
@@ -366,10 +395,10 @@ fn running_twice_on_the_same_subject_works_the_second_time_too() {
     //
     // 第二条尤其值得钉住：它的表现是"第二局一步没走"，而单看那句话像是探索器坏了。
     let mut subject = subject();
-    let first = play_through_actions(&mut subject, 7, 200, at(0)).expect("第一局");
+    let first = play_through_actions(&mut subject, 7, 200, "door-key", at(0)).expect("第一局");
     assert!(!first.steps.is_empty());
 
-    let second = play_through_actions(&mut subject, 7, 200, at(600)).expect("第二局");
+    let second = play_through_actions(&mut subject, 7, 200, "door-key", at(600)).expect("第二局");
     assert!(
         !second.steps.is_empty(),
         "第二局一步没走——多半是它绑到了一个额度已尽的旧目标上"
@@ -396,7 +425,7 @@ fn the_map_only_grows_and_every_cell_was_new_exactly_once() {
     //    开局那一笔**必须**单列：它发生在任何一步之前，并进哪一步都会让那一步看起来
     //    "什么也没做却学到了 23 格"。（这条断言第一版就没有它，于是 29 ≠ 64。）
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 200, at(0)).expect("走一局");
+    let run = play_through_actions(&mut subject, 7, 200, "door-key", at(0)).expect("走一局");
 
     assert!(!run.steps.is_empty());
     let mut previous = run.initial_cells;
@@ -430,8 +459,8 @@ fn the_same_seed_replays_the_same_walk() {
     // 确定性是"能看着它一步步走"的前提：换一次跑出来的不一样，就没有"刚才那一步"可谈。
     let mut first = store();
     let mut second = store();
-    let a = run_episode(&mut first, 5, 30, at(0)).expect("第一局");
-    let b = run_episode(&mut second, 5, 30, at(0)).expect("第二局");
+    let a = run_episode(&mut first, 5, 30, "door-key", at(0)).expect("第一局");
+    let b = run_episode(&mut second, 5, 30, "door-key", at(0)).expect("第二局");
 
     assert_eq!(a.steps.len(), b.steps.len());
     for (left, right) in a.steps.iter().zip(b.steps.iter()) {

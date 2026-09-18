@@ -176,6 +176,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       任务文本、朝向和携带物——<b>绝对坐标、完整地图、seed、info 一样都不出那道门</b>。
     </div>
     <div class="row">
+      <select id="maze-variant" style="width:auto" title="哪一关（清单里的变体）"></select>
       <select id="maze-path" style="width:auto">
         <option value="agent">认知通路：动作是一条候选，要排队、要许可</option>
         <option value="evaluator">评估器通路：动作直接交给宿主</option>
@@ -1076,8 +1077,9 @@ $("maze-run").onclick = async function () {
   try {
     const result = await api("maze/run", {
       seed: parseInt($("maze-seed").value, 10) || 7,
-      max_steps: 300,
+      max_steps: 400,
       path: $("maze-path").value,
+      variant: $("maze-variant").value,
     });
     mazeRun = result.run;
     mazeAt = mazeAtOnLoad === null
@@ -1089,7 +1091,8 @@ $("maze-run").onclick = async function () {
       "<b>" + escapeHtml(mazeRun.outcome) + "</b>　走了 " + mazeRun.steps.length + " 步　" +
       "认得 " + mazeRun.map.length + " 格　" +
       "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
-      "<br>开局一眼看见 " + (mazeRun.initial_cells || 0) + " 格　" +
+      "<br>关卡 <b>" + escapeHtml(mazeRun.variant || "—") + "</b>　" +
+      "开局一眼看见 " + (mazeRun.initial_cells || 0) + " 格　" +
       "记进 L1 " + (mazeRun.memories || 0) + " 条　" +
       "走的是<b>" + (mazeRun.path === "agent" ? "认知通路" : "评估器通路") + "</b>　" +
       (mazeRun.path === "agent"
@@ -1482,6 +1485,25 @@ $("message").addEventListener("keydown", function (event) {
 
 refresh();
 refreshModel();
+loadMazeVariants();
+
+// 关卡名单走一趟清单，而不是在这里写死一份：写死的那份会在加关卡时忘记跟着改，
+// 而表现是"新关卡明明加了，下拉框里没有它"。
+async function loadMazeVariants() {
+  try {
+    const result = await api("maze/variants", {});
+    const select = $("maze-variant");
+    select.innerHTML = (result.variants || [])
+      .map(function (item) {
+        return "<option value=\"" + escapeHtml(item.name) + "\"" +
+          (item.default ? " selected" : "") + ">" +
+          escapeHtml(item.name + "　" + item.title) + "</option>";
+      })
+      .join("");
+  } catch (error) {
+    log("取关卡名单失败：" + error.message, "err");
+  }
+}
 
 // `?maze=<种子>` 直接在打开时跑一局。
 //
@@ -1494,6 +1516,11 @@ refreshModel();
   const seed = parseInt(params.get("maze"), 10);
   $("maze-seed").value = String(Number.isFinite(seed) ? seed : 7);
   if (params.has("path")) { $("maze-path").value = params.get("path"); }
+  // 变体要等名单取回来才设得上，所以用 `setTimeout` 排在它后面。
+  if (params.has("variant")) {
+    const wanted = params.get("variant");
+    window.setTimeout(function () { $("maze-variant").value = wanted; }, 0);
+  }
   if (params.has("at")) { mazeAtOnLoad = parseInt(params.get("at"), 10) || 0; }
   window.setTimeout(function () { $("maze-run").click(); }, 0);
 })();

@@ -1,9 +1,8 @@
 {
   "game": "maze",
-  "rules_version": "maze-door-key-8x8-v1",
+  "default_variant": "door-key",
   "engine": {
     "kind": "minigrid",
-    "env_id": "MiniGrid-DoorKey-8x8-v0",
     "package": "minigrid",
     "pinned_version": "3.1.0",
     "runtime": "gymnasium",
@@ -42,10 +41,40 @@
       "note": "视图随 agent 朝向旋转，因此前方在视图里恒定。列的增减对应前后、行的增减对应左右；这条约定是规则事实，不含隐藏状态，认知单元靠它做无漂移里程计。由 games/maze/tests/test_rules.py 的位移测试守住。"
     }
   },
-  "budget": {
-    "max_steps": 640,
-    "reward_range": [0.0, 1.0],
-    "win_condition": "reach the goal after opening the door with the key"
+  "variants": {
+    "door-key": {
+      "title": "门钥匙房间",
+      "env_id": "MiniGrid-DoorKey-8x8-v0",
+      "rules_version": "maze-door-key-8x8-v1",
+      "budget": {
+        "max_steps": 640,
+        "reward_range": [0.0, 1.0],
+        "win_condition": "reach the goal after opening the door with the key"
+      },
+      "note": "原先那一版。多一把钥匙与一扇门，于是要做的事不止是走路。"
+    },
+    "crossing": {
+      "title": "墙与缺口（起点 → 终点）",
+      "env_id": "MiniGrid-SimpleCrossingS9N1-v0",
+      "rules_version": "maze-crossing-s9-v1",
+      "budget": {
+        "max_steps": 324,
+        "reward_range": [0.0, 1.0],
+        "win_condition": "find the opening in the wall and reach the goal"
+      },
+      "note": "传统的那一种：一道墙把格子分成两半，墙上有几个缺口，从起点绕到终点。没有钥匙、没有门——世界里只有墙、空地和目标。"
+    },
+    "four-rooms": {
+      "title": "四房间",
+      "env_id": "MiniGrid-FourRooms-v0",
+      "rules_version": "maze-four-rooms-v1",
+      "budget": {
+        "max_steps": 400,
+        "reward_range": [0.0, 1.0],
+        "win_condition": "reach the goal"
+      },
+      "note": "四个房间各开一个口，19×19。同样的规则集，地方大得多——用它看探索器在更长的路上会不会兜圈子。"
+    }
   },
   "scoring": {
     "exposed_reward": "0.0 until the episode ends, then the terminal reward",

@@ -75,6 +75,7 @@ pub fn handle(
         ("POST", "/api/scale") => scale_topology(subject, request, at),
         // §17 的"认知游戏"：真引擎、真投影、逐步回放。
         ("POST", "/api/maze/run") => run_maze(subject, request, at),
+        ("GET", "/api/maze/variants") => maze_variants(),
         ("POST", "/api/unit/sleep") => sleep_unit(subject, request, at),
         ("POST", "/api/unit/wake") => wake_unit(subject, request, at),
         ("POST", "/api/learning/apply") => admit_strategy(subject, request, at),
@@ -1049,6 +1050,50 @@ fn wake_unit(subject: &mut Subject, _request: &Request, at: WallClock) -> Respon
     }
 }
 
+/// 清单里有哪些迷宫变体（§10.1：`manifest.json` 是这一层的规格）。
+///
+/// 走一趟清单，而不是在页面里写死一份名单：写死的那份会在加关卡时忘记跟着改，
+/// 而表现是"新关卡明明加了，下拉框里没有它"——那种失败没有任何东西会报出来。
+fn maze_variants() -> Response {
+    let Some(root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+    else {
+        return Response::text(500, "找不到仓库根");
+    };
+    let path = root.join("games").join("maze").join("manifest.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Response::text(500, format!("读不了清单：{}", path.display()));
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
+        return Response::text(500, "清单不是合法 JSON");
+    };
+    let default = manifest
+        .get("default_variant")
+        .and_then(Value::as_str)
+        .unwrap_or("door-key")
+        .to_string();
+    let variants: Vec<Value> = manifest
+        .get("variants")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(name, entry)| {
+                    json!({
+                        "name": name,
+                        // 标题给界面用；清单是登记处，不是只有代码读的东西。
+                        "title": entry.get("title").and_then(Value::as_str).unwrap_or(name),
+                        "env_id": entry.get("env_id").and_then(Value::as_str),
+                        "default": *name == default,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Response::json(200, &json!({ "variants": variants, "default": default }))
+}
+
 /// 跑一局迷宫，把**每一步**都带回来（§17 的"认知游戏"那一行）。
 ///
 /// 一次调用跑完一整局，而不是"一步一个请求"。理由是这个引擎**一个回合一个进程**
@@ -1078,11 +1123,17 @@ fn run_maze(subject: &mut Subject, request: &Request, at: WallClock) -> Response
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("agent");
+    // 哪一关。名字由清单定义，这里**不校验**——校验在适配器那一层，
+    // 而它报出来的错比这里能编的更准（它还知道清单里有哪些名字）。
+    let variant = payload
+        .get("variant")
+        .and_then(Value::as_str)
+        .unwrap_or("door-key");
 
     let run = if path == "evaluator" {
-        soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, at)
+        soca_core::maze::run_episode(subject.store_mut(), seed, max_steps, variant, at)
     } else {
-        soca_core::maze::play_through_actions(subject, seed, max_steps, at)
+        soca_core::maze::play_through_actions(subject, seed, max_steps, variant, at)
     };
 
     match run {

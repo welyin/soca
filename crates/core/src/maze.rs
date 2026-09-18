@@ -245,6 +245,18 @@ pub struct TrueMap {
     pub cells: Vec<TrueCell>,
 }
 
+/// 建一个绑定某个变体的引擎工厂。
+///
+/// 变体名交给适配器，由它去 `manifest.json` 里查环境与规则版本——**这一层不认识
+/// `MiniGrid-*` 这些环境标识**，也不该认识：认识它们就等于把"这个引擎有哪些关卡"
+/// 抄进了 Rust 里，而那份抄本迟早与清单分叉。
+fn factory_for(variant: &str) -> ProcessFactory {
+    let mut config = ProcessEngineConfig::new(engine_program(), &adapter_path(), GameKind::Maze);
+    config.args.push("--variant".to_string());
+    config.args.push(variant.to_string());
+    ProcessFactory::new(config)
+}
+
 /// 一局是**谁**在走的。
 ///
 /// 两条路都合法，而它们不是一回事：§15.2 把"Evaluator 私有控制面负责 reset、种子与赛后指标"
@@ -264,6 +276,11 @@ pub enum RunPath {
 pub struct MazeRun {
     /// 这一局是谁在走的。
     pub path: RunPath,
+    /// 走的哪一个变体（清单里的名字）。
+    ///
+    /// 它要出现在这里，而不能靠调用方自己记着：同一个 seed 在不同变体下是**不同的迷宫**，
+    /// 而"这是哪一局"必须从返回值里读得出来——否则截图与回放都没法说清自己在看什么。
+    pub variant: String,
     /// 回合标识。
     pub episode_id: String,
     /// 用的种子。**它属于私有控制面**——回放要靠它，而公开面上没有它。
@@ -842,14 +859,10 @@ pub fn run_episode(
     store: &mut Store,
     seed: u64,
     max_steps: u32,
+    variant: &str,
     at: WallClock,
 ) -> Result<MazeRun, CoreError> {
-    let adapter = adapter_path();
-    let factory = ProcessFactory::new(ProcessEngineConfig::new(
-        engine_program(),
-        &adapter,
-        GameKind::Maze,
-    ));
+    let factory = factory_for(variant);
 
     let session_id = PublicId::new("session:maze")?;
     let episode_id = PublicId::new(format!("episode:maze:{seed}"))?;
@@ -940,6 +953,7 @@ pub fn run_episode(
 
     Ok(MazeRun {
         path: RunPath::Evaluator,
+        variant: variant.to_string(),
         episode_id: episode_id.to_string(),
         seed,
         outcome: observation.outcome.as_str().to_string(),
@@ -951,7 +965,7 @@ pub fn run_episode(
         memories: 0,
         // 真值两条路都要：它是**操作员的参照物**，与这一局走的是哪条路无关。
         // 取不到就算了（`None`），而不是让整个请求失败——它是参照物，不是这一局的一部分。
-        truth: true_map(seed).ok(),
+        truth: true_map(seed, variant).ok(),
         contradictions: explorer.contradictions,
         mission,
     })
@@ -982,14 +996,10 @@ pub fn play_through_actions(
     subject: &mut Subject,
     seed: u64,
     max_steps: u32,
+    variant: &str,
     at: WallClock,
 ) -> Result<MazeRun, CoreError> {
-    let adapter = adapter_path();
-    let factory = ProcessFactory::new(ProcessEngineConfig::new(
-        engine_program(),
-        &adapter,
-        GameKind::Maze,
-    ));
+    let factory = factory_for(variant);
 
     // 起新的一局之前，先把之前那几局**收干净**。
     //
@@ -1227,6 +1237,7 @@ pub fn play_through_actions(
 
     Ok(MazeRun {
         path: RunPath::Agent,
+        variant: variant.to_string(),
         episode_id: episode,
         seed,
         outcome,
@@ -1235,7 +1246,7 @@ pub fn play_through_actions(
         map: explorer.mapped(),
         initial_cells,
         memories: remembered,
-        truth: true_map(seed).ok(),
+        truth: true_map(seed, variant).ok(),
         contradictions: explorer.contradictions,
         mission,
     })
@@ -1248,10 +1259,19 @@ pub fn play_through_actions(
 /// 而"在同一局上问"需要给引擎加一条协议，那条协议一旦存在，任何拿到引擎的代码都能顺手
 /// 问一句"真值是什么"——它不会立刻出问题，而是以"某个单元突然很会走迷宫"的形式在很久
 /// 以后暴露出来。另一个进程问，则要求调用方显式地做这个动作，而那个动作在代码里看得见。
-pub fn true_map(seed: u64) -> Result<TrueMap, CoreError> {
+pub fn true_map(seed: u64, variant: &str) -> Result<TrueMap, CoreError> {
     let adapter = adapter_path();
     let output = std::process::Command::new(engine_program())
-        .args(["-B", "-X", "utf8", &adapter, "--truth", &seed.to_string()])
+        .args([
+            "-B",
+            "-X",
+            "utf8",
+            &adapter,
+            "--variant",
+            variant,
+            "--truth",
+            &seed.to_string(),
+        ])
         .output()
         .map_err(|error| CoreError::TrueMapUnavailable {
             reason: format!("起不了真值进程：{error}"),

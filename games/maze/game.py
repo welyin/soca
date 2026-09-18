@@ -32,6 +32,7 @@ RNG 状态、`info` 字典、专家动作）在构造感知时就被丢掉，宿
 """
 
 import json
+import pathlib
 import struct
 import sys
 
@@ -40,18 +41,28 @@ import minigrid  # noqa: F401  —— 导入即注册环境
 import numpy as np
 
 GAME = "maze"
-RULES_VERSION = "maze-door-key-8x8-v1"
-ENV_ID = "MiniGrid-DoorKey-8x8-v0"
+
+#: 清单。**环境、规则版本、步数上限都从这里读，不在这份文件里再抄一遍。**
+#:
+#: 抄一遍的代价不是"多写几个字"，而是**两处会分叉**：清单说 640 步而代码跑 256 步时，
+#: 两边都"有据可依"，而没有任何东西会报错。清单是这一层的规格，代码是它的实现——
+#: 实现去读规格，而不是各写一份。
+MANIFEST_PATH = pathlib.Path(__file__).with_name("manifest.json")
+
+
+def load_manifest():
+    with MANIFEST_PATH.open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+MANIFEST = load_manifest()
 
 #: 动作编号由 manifest.json 钉死。4（drop）与 6（done）**故意不在表里**：
 #: §10.1 要求禁用它们，而"表里没有"比"表里有但别用"更难绕过。
-ACTION_IDS = {
-    "turn_left": 0,
-    "turn_right": 1,
-    "forward": 2,
-    "pickup": 3,
-    "toggle": 5,
-}
+ACTION_IDS = dict(MANIFEST["public"]["action_ids"])
+
+#: 视图约定也来自清单——它是**规则事实**，不是这一层可以自己定的东西。
+VIEW_SIZE = MANIFEST["public"]["view_size"]
 
 # MiniGrid 的三条编码表（`minigrid.core.constants`）。这里手抄而不是 `import`，是为了让
 # "我们往外说了什么"在这一屏里读得完；对不上的风险由 `tests/test_rules.py` 的往返测试守。
@@ -120,6 +131,28 @@ def project_cell(cell):
     return {"object": obj, "color": color, "state": state}
 
 
+def variant_of(name):
+    """按名字取一份变体配置。名字为空时取默认那一份。
+
+    **名字不认识就报错**，而不是悄悄退回默认：退回默认的表现是"我选了四房间，
+    跑出来的却是门钥匙"——而那不是故障，是有人以为自己在看另一局。
+    """
+    variants = MANIFEST["variants"]
+    key = name or MANIFEST["default_variant"]
+    if key not in variants:
+        raise Refused(
+            "protocol",
+            f"未知的迷宫变体 {key!r}；清单里有 {sorted(variants)}",
+        )
+    entry = variants[key]
+    return {
+        "name": key,
+        "env_id": entry["env_id"],
+        "rules_version": entry["rules_version"],
+        "max_steps": int(entry["budget"]["max_steps"]),
+    }
+
+
 def agent_cell(image_shape):
     """agent 在视图里的位置（见 `manifest.json` 的 `view_convention`）。
 
@@ -185,13 +218,19 @@ def step_payload(env, observation, reward, terminated, truncated):
 
 
 class Maze:
-    """一局 DoorKey。一个进程一局（宿主每个回合起一个进程，见 `ProcessFactory`）。"""
+    """一局迷宫。一个进程一局（宿主每个回合起一个进程，见 `ProcessFactory`）。
 
-    def __init__(self):
-        self.env = gym.make(ENV_ID)
-        # 预算来自 manifest.json 的 `budget.max_steps`。MiniGrid 自己按网格尺寸算出的
-        # max_steps 比它小（8×8 是 256），所以这里显式对齐一次并记下差异：规格要的是 640。
-        self.env.unwrapped.max_steps = 640
+    **哪一局由变体决定**（清单里的 `variants`）：门钥匙房间、墙与缺口、四房间……
+    它们共用同一套公开面（同样的动作、同样的视图约定、同样的扣留清单），
+    差的是规则本身。所以变体不是"另一个游戏"，而是同一个游戏的不同关卡。
+    """
+
+    def __init__(self, variant=None):
+        self.variant = variant_of(variant)
+        self.env = gym.make(self.variant["env_id"])
+        # 步数上限按清单来。MiniGrid 自己按网格尺寸算出的那个通常更小
+        # （DoorKey-8x8 是 256），所以显式对齐一次——而"该是多少"由清单说，不由这里说。
+        self.env.unwrapped.max_steps = self.variant["max_steps"]
         self.reset_done = False
 
     def reset(self, seed):
@@ -244,7 +283,7 @@ class Maze:
         return step_payload(self.env, observation, reward, terminated, truncated)
 
 
-def truth(seed):
+def truth(seed, variant=None):
     """整座迷宫的真值。**私有控制面，不是引擎协议里的一条。**
 
     §15.2 那句"迷宫不泄露全图/绝对真值"约束的是**认知单元**：模型只收到公开观测。
@@ -260,7 +299,7 @@ def truth(seed):
     出发点为原点的**（公开面里没有绝对坐标，它只能这么记），而这里是世界坐标。
     两者之间差的就是这一个平移。
     """
-    maze = Maze()
+    maze = Maze(variant)
     observation, _info = maze.env.reset(seed=int(seed))
     start = (int(maze.env.unwrapped.agent_pos[0]), int(maze.env.unwrapped.agent_pos[1]))
     grid = maze.env.unwrapped.grid
@@ -328,9 +367,15 @@ def handle(maze, request):
         return {
             "type": "facts_result",
             "game": GAME,
-            "rules_version": RULES_VERSION,
+            # 规则版本是**变体的**：宿主与账本用它区分"哪一套规则跑出来的这一局"。
+            # 报一个共用的版本号，会让门钥匙那一局与墙与缺口那一局在账上长得一样。
+            "rules_version": maze.variant["rules_version"],
             # 供人读：宿主不用它做判定。
-            "engine": {"kind": "minigrid", "env_id": ENV_ID},
+            "engine": {
+                "kind": "minigrid",
+                "env_id": maze.variant["env_id"],
+                "variant": maze.variant["name"],
+            },
             "supports_snapshot": False,
         }
     if kind == "reset":
@@ -342,15 +387,52 @@ def handle(maze, request):
     raise Refused("protocol", f"未知的请求类型 {kind!r}")
 
 
+def arguments(argv):
+    """解析这一层的两个开关：`--variant` 与 `--truth`。
+
+    用手写而不是 argparse：这两个开关只有两个取值位，而 argparse 会顺手接受
+    `--variant=x` 这种写法与应用户一段它没有的语法。
+    """
+    variant = None
+    truth_seed = None
+    index = 1
+    while index < len(argv):
+        if argv[index] == "--variant" and index + 1 < len(argv):
+            variant = argv[index + 1]
+            index += 2
+        elif argv[index] == "--truth" and index + 1 < len(argv):
+            truth_seed = argv[index + 1]
+            index += 2
+        else:
+            raise Refused("protocol", f"看不懂的参数 {argv[index]!r}")
+    return variant, truth_seed
+
+
 def main(argv):
+    variant, truth_seed = arguments(argv)
+
     # 私有控制面：`--truth <seed>` 打一份真值就退出，不进入协议循环。
-    if len(argv) >= 3 and argv[1] == "--truth":
-        print(json.dumps(truth(argv[2]), ensure_ascii=False))
+    if truth_seed is not None:
+        # **显式 UTF-8，不用 `print`。** `print` 的编码跟着控制台的代码页走：
+        # 在 Windows 上它默认是 UTF-16 或 GBK，而调用方按 UTF-8 解——
+        # 表现是"真值不是合法 JSON"，而真因是打它的时候用了哪个编码。
+        # 协议那条路一直是这么做的（`sys.stdout.buffer`），这条路先前漏了。
+        payload = json.dumps(truth(int(truth_seed), variant), ensure_ascii=False)
+        sys.stdout.buffer.write(payload.encode("utf-8"))
+        sys.stdout.buffer.flush()
         return 0
 
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
-    maze = Maze()
+
+    try:
+        maze = Maze(variant)
+    except Refused as refused:
+        # 起不来的原因要能传出去。宿主在等一条 `facts_result`，而它同样接受一条 `error`——
+        # 让它去等一个永远不会回话的进程，表现是"引擎超时"，而真因是"变体名写错了"。
+        write_frame(stdout, {"type": "error", "kind": refused.kind, "reason": refused.reason})
+        return 1
+
     while True:
         try:
             request = read_frame(stdin)
