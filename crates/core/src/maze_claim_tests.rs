@@ -26,7 +26,8 @@ fn view(rows: [&str; 7], direction: u8) -> MazeView {
         .iter()
         .map(|row| row.chars().map(make).collect())
         .collect();
-    cells[AGENT_ROW as usize][AGENT_COLUMN as usize] = MazeCell {
+    let (row, column) = agent_cell(rows.len());
+    cells[row as usize][column as usize] = MazeCell {
         object: MazeObject::Agent,
         color: MazeColor::Red,
         state: MazeCellState::None,

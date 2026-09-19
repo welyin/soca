@@ -274,7 +274,15 @@ class Maze:
             importlib.import_module(path.stem)
 
         # 关卡自己的参数（尺寸之类）也从清单来：它属于**这一关**，不属于驱动。
-        self.env = gym.make(self.level["env_id"], **self.level.get("env_args", {}))
+        #
+        # **`view_size` 要真的传下去**，不能只写进清单当文档：它决定 agent 看得见多少
+        # （MiniGrid 的 `agent_view_size`），而"7×7 还是 3×3"是公开面的一部分。
+        # 清单声明了却不传，表现是"清单说 3×3，它其实看得见 7×7"——一个安静得查不出来的谎。
+        self.env = gym.make(
+            self.level["env_id"],
+            agent_view_size=self.manifest["public"]["view_size"],
+            **self.level.get("env_args", {}),
+        )
         # 步数上限按清单来。MiniGrid 自己按网格尺寸算出的那个通常更小
         # （DoorKey-8x8 是 256），所以显式对齐一次——而"该是多少"由清单说，不由这里说。
         self.env.unwrapped.max_steps = self.level["max_steps"]

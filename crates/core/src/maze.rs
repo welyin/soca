@@ -72,9 +72,16 @@ type CellValue = (String, String, String);
 type LearnedCells = Vec<((i32, i32), CellValue)>;
 
 /// agent 在视图里恒定所在的格子（`manifest.json` 的 `view_convention`）。
-const AGENT_ROW: i32 = 3;
+/// **agent 在视图里的位置**：MiniGrid 把它放在"最后一列的中点"（见清单的 `view_convention`）。
+///
+/// 它是从**视图形状**算出来的，不是常数：视图多大是**每个游戏自己声明的**
+/// （门钥匙 7×7、传统迷宫 3×3）。写死 3/6 的话，第二个尺寸上推出来的世界坐标会整片歪掉，
+/// 而每一步都"看着对"——只有 `contradictions` 会炸。
+fn agent_cell(size: usize) -> (i32, i32) {
+    ((size / 2) as i32, (size as i32) - 1)
+}
 /// 同上。
-const AGENT_COLUMN: i32 = 6;
+
 
 /// 仓库根。
 ///
@@ -125,6 +132,43 @@ impl Choice {
             });
         }
         Ok(path)
+    }
+
+    /// 这一关**自己宣告**能走多少步（清单里 `levels.<level>.budget.max_steps`）。
+    ///
+    /// 这是"一局能走多远"唯一的权威来源。它是**规则**说的事，不该由调用方另给一个数，
+    /// 更不该在某一层夹一个上限——请求里那个 640 与额度里那个 32 是同一类毛病：
+    /// 一个跟任务无关的数把它掐死。21×21 的迷宫要上千步。
+    pub fn declared_max_steps(&self) -> Result<u32, CoreError> {
+        let manifest = self.manifest_path()?;
+        let raw = std::fs::read_to_string(&manifest).map_err(|error| CoreError::UnknownGame {
+            game: format!("{}（读不了清单：{error}）", self.game),
+        })?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| CoreError::UnknownGame {
+                game: format!("{}（清单不是合法 JSON：{error}）", self.game),
+            })?;
+        let levels = parsed.get("levels").ok_or_else(|| CoreError::UnknownGame {
+            game: format!("{}（清单里没有 levels）", self.game),
+        })?;
+        let name = if self.level.is_empty() {
+            parsed
+                .get("default_level")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            self.level.clone()
+        };
+        levels
+            .get(&name)
+            .and_then(|level| level.get("budget"))
+            .and_then(|budget| budget.get("max_steps"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as u32)
+            .ok_or_else(|| CoreError::UnknownGame {
+                game: format!("{} 的等级 {name} 没说能走多少步", self.game),
+            })
     }
 
     /// 谁来驱动这个游戏。**路径写在清单里**，不写在这里：
@@ -503,7 +547,8 @@ fn front_object(view: &MazeView) -> String {
 
 /// 我面前那一格。
 fn front_cell(view: &MazeView) -> MazeCell {
-    view.view[AGENT_ROW as usize][(AGENT_COLUMN - 1) as usize]
+    let (row, column) = agent_cell(view.view.len());
+    view.view[row as usize][(column - 1) as usize]
 }
 
 /// 一格 → 地图里存的那个三元组。
@@ -641,11 +686,12 @@ fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
     match claim {
         Claim::Forward { .. } => {
             let size = before.view.len();
+            let (agent_row, agent_column) = agent_cell(size);
             let mut compared = 0usize;
             for row in 0..size {
                 for column in 0..size.saturating_sub(1) {
                     // agent 自己那一格在投影里被换成了 `agent`，不是世界的格子。
-                    if row == AGENT_ROW as usize && column + 1 == AGENT_COLUMN as usize {
+                    if row == agent_row as usize && column + 1 == agent_column as usize {
                         continue;
                     }
                     let source = before.view[row][column];
@@ -731,20 +777,21 @@ impl Explorer {
     /// 对上一格 +1，对不上 −1（对不上比没得对更有分量：它是一条**反证**），
     /// 地图里没有的格子不加不减——那只是没看过，不是矛盾。
     fn score(&self, view: &MazeView, at: (i32, i32)) -> i32 {
+        let (agent_row, agent_column) = agent_cell(view.view.len());
         let (fx, fy) = forward_vector(view.direction);
         let (lx, ly) = left_vector(view.direction);
         let mut score = 0;
         for row in 0..view.view.len() {
             for column in 0..view.view[row].len() {
-                if row == AGENT_ROW as usize && column == AGENT_COLUMN as usize {
+                if row == agent_row as usize && column == agent_column as usize {
                     continue;
                 }
                 let cell = view.view[row][column];
                 if cell.object == MazeObject::Unseen {
                     continue;
                 }
-                let forward = AGENT_COLUMN - column as i32;
-                let left = AGENT_ROW - row as i32;
+                let forward = agent_column - column as i32;
+                let left = agent_row - row as i32;
                 let world = (
                     at.0 + forward * fx + left * lx,
                     at.1 + forward * fy + left * ly,
@@ -866,17 +913,18 @@ impl Explorer {
         .to_string();
 
         let mut learned: LearnedCells = Vec::new();
+        let (agent_row, agent_column) = agent_cell(view.view.len());
         for row in 0..view.view.len() {
             for column in 0..view.view[row].len() {
-                if row == AGENT_ROW as usize && column == AGENT_COLUMN as usize {
+                if row == agent_row as usize && column == agent_column as usize {
                     continue;
                 }
                 let cell = view.view[row][column];
                 if cell.object == MazeObject::Unseen {
                     continue;
                 }
-                let forward = AGENT_COLUMN - column as i32;
-                let left = AGENT_ROW - row as i32;
+                let forward = agent_column - column as i32;
+                let left = agent_row - row as i32;
                 let (fx, fy) = forward_vector(view.direction);
                 let (lx, ly) = left_vector(view.direction);
                 let at = (
@@ -1545,12 +1593,17 @@ pub fn play_through_actions(
 
         subject.request_game_step(action.op_name(), at)?;
 
-        // 跑到这条动作被选中为止。上限是防呆：一个永远选不上的动作会让这里空转。
+        // 跑到这条动作被选中为止。**没有轮数上限**：等多少轮由额度说，不由一个数说。
+        //
+        // 这里先前夹着 `rounds_waited < 64`，与"32 次激活"和"640 步"是同一类毛病——
+        // 一个跟任务无关的数。而它其实不需要：每一轮都会扣一次动作，所以额度用完时
+        // `run_round` 会给出 `Finished`，下面那个 `_ => break` 就收尾了；
+        // 也就是说**界已经在那条路上了**，这里是重复设了一道更小的。
         let mut rounds_waited = 0u32;
         let mut advanced: Option<(AdvanceStep, Option<usize>)> = None;
         let mut refusal: Option<String> = None;
         let mut waited_on: Vec<WaitedRound> = Vec::new();
-        while rounds_waited < 64 {
+        loop {
             rounds_waited = rounds_waited.saturating_add(1);
             let round = subject.run_round(&SelectionPolicy::default(), ActionLevel::A1, at)?;
             let others_out = round

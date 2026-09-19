@@ -16,7 +16,7 @@
   },
   "public": {
     "observation_mode": "symbolic_maze",
-    "view_size": 7,
+    "view_size": 3,
     "mission_max_chars": 2048,
     "actions": ["turn_left", "turn_right", "forward", "pickup", "toggle"],
     "action_ids": {
@@ -38,8 +38,8 @@
     ],
     "view_convention": {
       "kind": "agent_centric_rotating",
-      "agent_row": 3,
-      "agent_column": 6,
+      "agent_row": 1,
+      "agent_column": 2,
       "forward_column_delta": -1,
       "left_row_delta": -1,
       "note": "视图随 agent 朝向旋转，因此前方在视图里恒定。列的增减对应前后、行的增减对应左右；这条约定是规则事实，不含隐藏状态，认知单元靠它做无漂移里程计。由 games/adapters/minigrid/tests/test_conformance.py 的位移测试守住。"

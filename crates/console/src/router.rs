@@ -1135,11 +1135,24 @@ fn run_maze(subject: &mut Subject, request: &Request, at: WallClock) -> Response
     // 种子属于**私有控制面**：它进引擎，不出现在任何公开观测里（§13）。
     // 界面上留一个能改它的口子，是为了"换一局"这件事可复现——而不是为了让它流到别处。
     let seed = payload.get("seed").and_then(Value::as_u64).unwrap_or(7);
-    let max_steps = payload
-        .get("max_steps")
-        .and_then(Value::as_u64)
-        .unwrap_or(300)
-        .clamp(1, 640) as u32;
+    // **一局能走多远由关卡自己宣告**（清单里的 `budget.max_steps`）。
+    //
+    // 这里先前夹着 `.clamp(1, 640)`，而它与额度里那个 32 是同一类毛病：一个跟任务无关的数
+    // 把活儿掐死。21×21 的迷宫要上千步，请求里给 3000 也没用——被这一行夹回 640，
+    // 而表现是"它走不完"。
+    //
+    // 拿不到宣告值时才退回请求里的数：那是给临时试跑用的，不是权威来源。
+    let declared = soca_core::maze::Choice::new(
+        payload
+            .get("game")
+            .and_then(Value::as_str)
+            .unwrap_or("door-key"),
+        payload.get("level").and_then(Value::as_str).unwrap_or(""),
+    )
+    .declared_max_steps()
+    .ok();
+    let max_steps = declared
+        .unwrap_or_else(|| payload.get("max_steps").and_then(Value::as_u64).unwrap_or(300) as u32);
 
     // 两条路都留着，因为 §15.2 把它们分开写了：一条是"Evaluator 私有控制面负责 reset、
     // 种子与赛后指标"，一条是"认知循环进入游戏"。**分开写的是它们，不是我们。**
