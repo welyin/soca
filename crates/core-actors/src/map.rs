@@ -21,9 +21,16 @@ use std::collections::{BTreeMap, VecDeque};
 use soca_contracts::{Carrying, MazeCell, MazeCellState, MazeColor, MazeObject, MazeView};
 
 /// 视图约定：agent 在视图中的行。
-pub const VIEW_AGENT_ROW: i32 = 3;
+/// agent 在视图里的位置：MiniGrid 把它放在"最后一列的中点"（见清单的 `view_convention`）。
+///
+/// **从视图形状算，不是常数。** 视图多大是**每个游戏自己声明的**（门钥匙 7×7、
+/// 传统迷宫 3×3），而写死 (3,6) 只对 7×7 成立——换一个尺寸之后每一格会被投到错的世界坐标上，
+/// 地图安静地整片歪掉，而每一步都"看着对"。7×7 时它算出 (3,6)，与从前逐字相同。
+pub fn agent_cell(size: usize) -> (i32, i32) {
+    ((size / 2) as i32, (size as i32) - 1)
+}
 /// 视图约定：agent 在视图中的列。
-pub const VIEW_AGENT_COLUMN: i32 = 6;
+
 
 /// 世界坐标：起点为原点，`dy` 为初始朝向，`dx` 为初始朝向的右手边。
 pub type Cell = (i32, i32);
@@ -181,14 +188,16 @@ impl KnowledgeMap {
     pub fn observe(&mut self, view: &MazeView, carrying: Carrying) -> MapUpdate {
         self.carrying = carrying;
         let mut update = MapUpdate::default();
+        // agent 在视图里的那一格**从形状算**，不写死。
+        let (agent_row, agent_column) = agent_cell(view.view.len());
 
         for (row_index, row) in view.view.iter().enumerate() {
             for (column_index, cell) in row.iter().enumerate() {
                 if cell.object == MazeObject::Unseen {
                     continue;
                 }
-                let forward = VIEW_AGENT_COLUMN - column_index as i32;
-                let lateral = row_index as i32 - VIEW_AGENT_ROW;
+                let forward = agent_column - column_index as i32;
+                let lateral = row_index as i32 - agent_row;
                 let target = self.to_world(forward, lateral);
 
                 // agent 自己那一格在视图里是"空"，但它说的不是世界，而是 agent 自己。

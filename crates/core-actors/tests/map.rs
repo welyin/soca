@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use soca_contracts::*;
-use soca_core_actors::{KnowledgeMap, VIEW_AGENT_COLUMN, VIEW_AGENT_ROW};
+use soca_core_actors::{agent_cell, KnowledgeMap};
 use soca_game_host::{Engine, EngineStep, ProcessEngine, ProcessEngineConfig};
 
 const PROBE_SEED: u64 = 7;
@@ -125,11 +125,15 @@ fn the_documented_view_convention_holds_on_a_live_engine() {
     let step = engine.reset(PROBE_SEED).expect("重置");
     let view = maze_view(&step);
 
-    assert_eq!(view.view.len(), 7);
-    assert!(view.view.iter().all(|row| row.len() == 7));
+    // 视图必须**是正方形、边长为奇数**——这是投影与坐标推导共同的前提。
+    // 先前这里写的是 `== 7`：那是门钥匙这一关的尺寸，而"视图多大"是每个游戏自己声明的
+    // （传统迷宫 3×3），写死它会在另一个游戏上永远不成立——与 32、640 同一类毛病。
+    let size = view.view.len();
+    assert!(size >= 3 && size % 2 == 1, "视图边长应当是至少 3 的奇数，实际 {size}");
+    assert!(view.view.iter().all(|row| row.len() == size));
     // agent 自己在视图里应当是可分辨的：那一格不是 unseen（引擎把它设成空/携带物）。
     assert_ne!(
-        view.view[VIEW_AGENT_ROW as usize][VIEW_AGENT_COLUMN as usize].object,
+        view.view[agent_cell(size).0 as usize][agent_cell(size).1 as usize].object,
         MazeObject::Unseen,
         "agent 自己那一格不应该是看不见的"
     );
@@ -155,7 +159,8 @@ fn walking_a_one_by_one_square_returns_to_the_origin_without_drift() {
     // 先确认前方与右侧可走，避免用一次注定失败的 forward 去测里程计。
     let start_view = maze_view(&reset);
     assert!(
-        start_view.view[(VIEW_AGENT_ROW - 1) as usize][VIEW_AGENT_COLUMN as usize]
+        start_view.view[(agent_cell(start_view.view.len()).0 - 1) as usize]
+            [agent_cell(start_view.view.len()).1 as usize]
             .object
             .ne(&MazeObject::Wall),
         "起点前方应当是空地，否则这条用例测的就不是里程计"
