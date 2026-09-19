@@ -136,6 +136,7 @@ fn the_door_claim_is_refuted_when_the_door_did_not_do_what_the_rules_say() {
     after.view[3][5] = door(MazeCellState::Open);
 
     let claim = Claim::FrontBecomes {
+        at: (0, 0),
         to: "open".to_string(),
     };
     assert!(claim_holds(&claim, &before, &after));
@@ -154,6 +155,7 @@ fn a_toggle_that_hits_nothing_is_refuted() {
     assert!(
         !claim_holds(
             &Claim::FrontBecomes {
+                at: (0, 0),
                 to: "none".to_string()
             },
             &nothing,

@@ -556,10 +556,13 @@ enum Claim {
     /// （墙的状态本来就是 `none`，按完还是 `none`），而那两步是白走的。
     /// 一局里真的出现过两次——见 `a_toggle_that_hits_nothing_is_refuted`。
     ///
+    /// `at` 是**我地图上那一格的世界坐标**。它必须带上，因为押错时要知道该怀疑谁：
+    /// 目标选择是从地图里读门的位置的，不把那一格忘掉，下一次还会把同一扇门树成目标。
+    ///
     /// 这一条押的是**门的规则**，不是"我想让它怎样"。锁着的门而手里没有钥匙时，
     /// 它**应当保持锁着**——所以那种情况下的"按了没反应"是**押中**，不是押错。
     /// 把后者当成失败，会把一个正确的世界模型判成错的。
-    FrontBecomes { to: String },
+    FrontBecomes { at: (i32, i32), to: String },
     /// 这一条动作没有可押的注。
     Unclaimed,
 }
@@ -571,7 +574,9 @@ impl Claim {
             Self::Forward => "我认得的那批格子会整体前移一格".to_string(),
             Self::Turn { to } => format!("朝向会变成 {to}"),
             Self::Carrying { to } => format!("携带物会变成 {to}"),
-            Self::FrontBecomes { to } => format!("我面前那一格的状态会变成 {to}"),
+            Self::FrontBecomes { at, to } => {
+                format!("我面前（{},{}）是一扇门，它的状态会变成 {to}", at.0, at.1)
+            }
             Self::Unclaimed => "这一步没有可押的注".to_string(),
         }
     }
@@ -620,7 +625,7 @@ fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
         }
         Claim::Turn { to } => after.direction == *to,
         Claim::Carrying { to } => format!("{:?}", after.carrying).to_lowercase() == *to,
-        Claim::FrontBecomes { to } => {
+        Claim::FrontBecomes { to, .. } => {
             // 前提与结论都要成立：**面前得是一扇门**，而且它的状态要变成 `to`。
             let front = front_cell(after);
             front.object == MazeObject::Door
@@ -631,6 +636,19 @@ fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
 }
 
 impl Explorer {
+    /// 忘掉某一格。**押错之后用来改行为。**
+    ///
+    /// 地图是目标选择唯一的依据：`choose_target` 从这张表里读门在哪、钥匙在哪。
+    /// 所以"我押错了"这句话要变成行为，就得落到这张表上——把那一格忘掉，
+    /// 下一次挑目标时它就不会再被挑中。
+    ///
+    /// 只忘掉一格而不是整张图：错的证据只指向那一格。整张图推倒重来的代价是
+    /// 把已经验证过的几十格一起扔掉，那比错误本身更贵。
+    fn forget(&mut self, at: (i32, i32)) {
+        self.map.remove(&at);
+        self.visited.remove(&at);
+    }
+
     /// 押一条注：这一步之后世界会怎么变。
     ///
     /// 押的时候看的是**视图**（朝向、携带物、我面前那一格），说出的话却是关于**世界**的——
@@ -648,9 +666,15 @@ impl Explorer {
                 MoveOp::Pickup => Claim::Carrying {
                     to: front_object(view),
                 },
-                MoveOp::Toggle => Claim::FrontBecomes {
-                    to: expected_door_state(front_cell(view), view.carrying),
-                },
+                MoveOp::Toggle => {
+                    // 押的是**我地图上的那一格**：我算出我站在哪、朝哪，于是我知道
+                    // 我按下的是哪一个世界坐标。押错时要怀疑的正是这个坐标。
+                    let (fx, fy) = forward_vector(view.direction);
+                    Claim::FrontBecomes {
+                        at: (self.position.0 + fx, self.position.1 + fy),
+                        to: expected_door_state(front_cell(view), view.carrying),
+                    }
+                }
             },
             // 迷宫不认识这两类动作（`Targeted` 与 `Flag` 是扫雷的），它们到不了这里。
             // 写 `Unclaimed` 而不是 `unreachable!()`：一个"这里绝不该发生"的断言放在
@@ -1477,12 +1501,24 @@ pub fn play_through_actions(
             // 而核对要的正是"动作前"和"动作后"这两张视图。
             let verdict = claim_holds(&claim, &view, &after);
             if !verdict {
-                // **押错就改行为，不是记一笔继续走。**
-                //
-                // 清掉计划：那条路线是从一个刚刚被打脸的模型里算出来的。沿它继续走，
-                // 只会把错的东西推到更多格子上——镜像那一类错尤其如此，它每一步都"看着对"。
                 explorer.model_errors += 1;
+                // **押错就改行为，分两步。**
+                //
+                // 一、清掉计划：那条路线是从一个刚刚被打脸的模型里算出来的。沿它继续走，
+                // 只会把错的东西推到更多格子上——镜像那一类错尤其如此，它每一步都"看着对"。
                 explorer.plan.clear();
+                // 二、对**那条错的注所指的那一格**起疑。
+                //
+                // 押的是"我面前（x,y）是一扇门"，而它不是——错的是**地图上那一格**，
+                // 而目标选择正是从地图里读门的位置的。把它忘掉，`choose_target` 下一次
+                // 就不会再把同一扇门树成目标。
+                //
+                // 少了第二步，错误只是被报出来而行为一步没变：那两步照样白走，
+                // 只是现在看得见（第一版就是这样，`model_errors` 停在 2）。
+                // 判据因此在下一局里是 `model_errors` 从 2 降到 1——**同一种错只犯一次**。
+                if let Claim::FrontBecomes { at, .. } = &claim {
+                    explorer.forget(*at);
+                }
             }
             held = Some(verdict);
             let learned = explorer.absorb(&after, Some(action));
