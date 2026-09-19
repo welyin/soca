@@ -43,6 +43,7 @@ RNG 状态、`info` 字典、专家动作）在构造感知时就被丢掉，宿
    认知单元靠它做无漂移里程计（见清单里的 `view_convention`）。
 """
 
+import importlib
 import json
 import pathlib
 import sys
@@ -163,6 +164,10 @@ def level_of(manifest, name):
         "env_id": entry["env_id"],
         "rules_version": entry["rules_version"],
         "max_steps": int(entry["budget"]["max_steps"]),
+        # **关卡参数必须一起带出来。** 这里一开始漏了它，于是清单里写着 `size: 21`
+        # 的那一关跑出来还是 15×15——而"两关都是 15×15"看着完全正常，
+        # 是 Rust 侧那条"这一关是 21"的断言把它揪出来的。
+        "env_args": dict(entry.get("env_args", {})),
     }
 
 
@@ -250,7 +255,26 @@ class Maze:
         # 动作编号由清单钉死。4（drop）与 6（done）**故意不在表里**：
         # §10.1 要求禁用它们，而"表里没有"比"表里有但别用"更难绕过。
         self.action_ids = dict(self.manifest["public"]["action_ids"])
-        self.env = gym.make(self.level["env_id"])
+
+        # 环境可以由**游戏自带**（清单里的 `env_module`）。
+        #
+        # 那是**关卡**，不是规则：走、撞墙、朝向、可见域仍全部由 MiniGrid 执行，
+        # 这个模块只决定墙长在哪、起点终点在哪（§10.1 禁的是手写第二套规则，
+        # 不是自己摆一张地图）。import 的副作用是把它注册进 Gymnasium，
+        # 所以下一行的 `gym.make` 才认得那个 id。
+        module = self.manifest.get("env_module")
+        if module:
+            # 路径按**仓库根**解析，不按当前工作目录：清单里那一行是相对仓库写的，
+            # 而进程的工作目录在 `cargo test`、控制台、以及某个打包好的可执行文件里各不相同。
+            root = pathlib.Path(__file__).resolve().parents[3]
+            path = pathlib.Path(module)
+            if not path.is_absolute():
+                path = root / path
+            sys.path.insert(0, str(path.parent))
+            importlib.import_module(path.stem)
+
+        # 关卡自己的参数（尺寸之类）也从清单来：它属于**这一关**，不属于驱动。
+        self.env = gym.make(self.level["env_id"], **self.level.get("env_args", {}))
         # 步数上限按清单来。MiniGrid 自己按网格尺寸算出的那个通常更小
         # （DoorKey-8x8 是 256），所以显式对齐一次——而"该是多少"由清单说，不由这里说。
         self.env.unwrapped.max_steps = self.level["max_steps"]

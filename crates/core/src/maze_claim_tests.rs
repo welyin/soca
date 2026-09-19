@@ -60,7 +60,7 @@ fn the_forward_claim_holds_when_the_world_really_moved() {
         ],
         3,
     );
-    assert!(claim_holds(&Claim::Forward, &before, &after));
+    assert!(claim_holds(&Claim::Forward { front: None }, &before, &after));
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn the_forward_claim_is_refuted_when_the_world_did_not_shift() {
         state: MazeCellState::None,
     };
     assert!(
-        !claim_holds(&Claim::Forward, &before, &broken),
+        !claim_holds(&Claim::Forward { front: None }, &before, &broken),
         "押的注错了就必须被推翻——推翻不了，这个核对就是摆设"
     );
 }
@@ -96,7 +96,7 @@ fn a_view_with_nothing_comparable_does_not_count_as_holding() {
         ],
         3,
     );
-    assert!(!claim_holds(&Claim::Forward, &blind, &blind));
+    assert!(!claim_holds(&Claim::Forward { front: None }, &blind, &blind));
 }
 
 /// 一扇门，状态给定。
@@ -163,6 +163,24 @@ fn a_toggle_that_hits_nothing_is_refuted() {
         ),
         "对着空地按 toggle 不该算成功——那一步什么也没做"
     );
+}
+
+#[test]
+fn the_pose_claim_is_refuted_when_the_cell_in_front_is_not_what_the_map_said() {
+    // 地图说"我面前是空地"，而眼前是墙——**位置漂了**。
+    // 这是位移那条注抓不到的东西：视图整体前移一格它一样对得上。
+    let claim = Claim::Forward {
+        front: Some(("empty".to_string(), "red".to_string(), "none".to_string())),
+    };
+    let matches = corridor();
+    let mut drifted = corridor();
+    drifted.view[3][5] = MazeCell {
+        object: MazeObject::Wall,
+        color: MazeColor::Red,
+        state: MazeCellState::None,
+    };
+    assert!(pose_agrees(&claim, &matches));
+    assert!(!pose_agrees(&claim, &drifted));
 }
 
 #[test]

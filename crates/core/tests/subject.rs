@@ -1232,7 +1232,7 @@ fn a_round_without_an_open_goal_reports_finished_instead_of_an_error() {
 }
 
 #[test]
-fn the_loop_stops_when_all_goals_exhaust_their_activations() {
+fn the_loop_stops_when_the_goal_runs_out_of_actions() {
     // §4.2：额度耗尽之后是"请求预算升级或返回部分结果"，两条路都需要一个明确的停止点。
     let mut subject = new_subject(Vec::new());
     let goal_id = subject
@@ -1240,7 +1240,7 @@ fn the_loop_stops_when_all_goals_exhaust_their_activations() {
             "为已授权目录生成摘要",
             UserChannel::Chat,
             scope(ActionLevel::A1),
-            GoalBudget::new(4, 1, 4096, 3_600_000).expect("只有一次激活的额度"),
+            GoalBudget::new(1, 1, 4096, 3_600_000).expect("只有一次激活的额度"),
             ExplorationQuota::new(0),
             at(0),
             None,

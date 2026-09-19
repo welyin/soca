@@ -226,14 +226,41 @@ fn the_classic_maze_game_has_a_goal_but_no_key_or_door() {
     // 才有意义。`crossing` 要是悄悄退回了 DoorKey（比如变体没接上），那么"它也能跑墙与缺口"
     // 就是一句空话，而页面上还会显示得好好的。
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 400, &Choice::new("classic-maze", "walls"), at(0)).expect("走一局");
+    let run = play_through_actions(&mut subject, 7, 400, &Choice::new("classic-maze", "maze"), at(0)).expect("走一局");
     assert_eq!(run.game, "classic-maze", "返回值要说清这是哪个游戏");
-    assert_eq!(run.level, "walls", "以及这个游戏里的哪一关");
+    assert_eq!(run.level, "maze", "以及这个游戏里的哪一关");
     assert_eq!(run.contradictions, 0);
     assert!(run.won(), "意外的相位：{}", run.outcome);
 
     let truth = run.truth.clone().expect("真值");
-    assert_eq!(truth.width, 9, "这一关是 9×9");
+    assert_eq!(truth.width, 15, "这一关是 15×15");
+    // 而且它得**真的是迷宫**，不是一块空地：死胡同是走廊网络的特征。
+    // 空地与四房间都有终点、都没有钥匙和门，所以上面那两句它们全都过。
+    let walls = std::collections::HashSet::from_iter(
+        truth
+            .cells
+            .iter()
+            .filter(|cell| cell.object == "wall")
+            .map(|cell| (cell.x, cell.y)),
+    );
+    let walkable = (1..truth.width - 1)
+        .flat_map(|x| (1..truth.height - 1).map(move |y| (x, y)))
+        .collect::<std::collections::HashSet<_>>()
+        .difference(&walls)
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let dead_ends = walkable
+        .iter()
+        .filter(|(x, y)| {
+            let neighbours = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+            let open = neighbours
+                .iter()
+                .filter(|(dx, dy)| walkable.contains(&(x + dx, y + dy)))
+                .count();
+            open == 1
+        })
+        .count();
+    assert!(dead_ends >= 4, "死胡同只有 {dead_ends} 个——这不是迷宫，是空地");
     let objects: Vec<&str> = truth.cells.iter().map(|cell| cell.object.as_str()).collect();
     assert!(objects.contains(&"goal"), "得有终点");
     assert!(!objects.contains(&"door"), "不该有门：{objects:?}");
@@ -258,13 +285,13 @@ fn the_four_rooms_level_runs() {
     //
     // 写这条测试是因为它在页面上是**空的 500**：响应体什么都没有，看不出是哪一步出的问题。
     let mut subject = subject();
-    let run = play_through_actions(&mut subject, 7, 400, &Choice::new("classic-maze", "four-rooms"), at(0)).expect("走一局");
+    let run = play_through_actions(&mut subject, 7, 400, &Choice::new("classic-maze", "large"), at(0)).expect("走一局");
     assert_eq!(run.game, "classic-maze");
-    assert_eq!(run.level, "four-rooms");
+    assert_eq!(run.level, "large");
     assert_eq!(run.contradictions, 0);
     assert!(!run.steps.is_empty(), "一步都没走");
     let truth = run.truth.clone().expect("真值");
-    assert_eq!(truth.width, 19);
+    assert_eq!(truth.width, 21);
 
     // **走不完不是失败**——额度用尽要说得出为什么，而不是崩掉。
     //

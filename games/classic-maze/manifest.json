@@ -3,7 +3,8 @@
   "kind": "maze",
   "title": "传统迷宫",
   "adapter": "games/adapters/minigrid/driver.py",
-  "default_level": "walls",
+  "env_module": "games/classic-maze/maze_env.py",
+  "default_level": "maze",
   "engine": {
     "kind": "minigrid",
     "package": "minigrid",
@@ -45,27 +46,29 @@
     }
   },
   "levels": {
-    "walls": {
-      "title": "墙与缺口（9×9）",
-      "env_id": "MiniGrid-SimpleCrossingS9N1-v0",
-      "rules_version": "classic-maze-walls-s9-v1",
+    "maze": {
+      "title": "迷宫 15×15（起点在角上，终点在正中）",
+      "env_id": "MiniGrid-ClassicMaze-v0",
+      "rules_version": "classic-maze-15x15-v1",
+      "env_args": { "size": 15 },
       "budget": {
-        "max_steps": 324,
+        "max_steps": 900,
         "reward_range": [0.0, 1.0],
-        "win_condition": "find the opening in the wall and reach the goal"
+        "win_condition": "reach the goal at the centre"
       },
-      "note": "传统的那一种：一道墙把格子分成两半，墙上有缺口，从起点绕到终点。世界里只有墙、空地和目标——没有钥匙，没有门。"
+      "note": "单格走廊、岔路、死胡同——递归回溯生成的生成树，所以任意两格之间恰有一条通路。起点在左下角，终点在正中。"
     },
-    "four-rooms": {
-      "title": "四房间（19×19）",
-      "env_id": "MiniGrid-FourRooms-v0",
-      "rules_version": "classic-maze-four-rooms-v1",
+    "large": {
+      "title": "迷宫 21×21",
+      "env_id": "MiniGrid-ClassicMaze-v0",
+      "rules_version": "classic-maze-21x21-v1",
+      "env_args": { "size": 21 },
       "budget": {
-        "max_steps": 400,
+        "max_steps": 1764,
         "reward_range": [0.0, 1.0],
-        "win_condition": "reach the goal"
+        "win_condition": "reach the goal at the centre"
       },
-      "note": "同样的规则，四个房间各开一个口。地方大得多——一份目标的激活额度大概率不够走到终点，恰好用来看§4.2那个升级触发器。"
+      "note": "同样的规则，地方大得多。一份目标的激活额度远不够走完，正好用来看§4.2那个升级触发器。"
     }
   },
   "scoring": {

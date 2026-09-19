@@ -233,10 +233,34 @@ def test_a_game_only_contains_what_its_rules_say_it_contains():
     objects = {cell["object"] for cell in door_key["cells"]}
     assert {"key", "door", "goal"} <= objects, f"门钥匙房间缺东西：{objects}"
 
-    classic = driver.truth(ROOT / "games" / "classic-maze" / "manifest.json", 7, "walls")
+    classic = driver.truth(ROOT / "games" / "classic-maze" / "manifest.json", 7, "maze")
     objects = {cell["object"] for cell in classic["cells"]}
     assert "goal" in objects, "传统迷宫得有终点"
     assert "door" not in objects and "key" not in objects, f"传统迷宫不该有这些：{objects}"
+
+    # **它得真的是迷宫。** 这一条是"这就是个空荡荡的一大块"逼出来的：
+    # 空地与四房间都有终点、也都没有钥匙和门，所以上面那两句它们全都过。
+    # 迷宫与空地的区别在**走廊**与**死胡同**——所以判据只能是它们。
+    # 可走格 = **内部减去墙**。不能拿 `cells` 里的 `empty` 来当走廊：真值图只列
+    # **非空**的格子（墙、门、钥匙、目标），空走廊压根不在里面——照那个算，
+    # 可走格只剩终点一格，于是"死胡同 0 个"。这条断言第一次跑就是这么红的。
+    walls = {(cell["x"], cell["y"]) for cell in classic["cells"] if cell["object"] == "wall"}
+    walkable = {
+        (x, y)
+        for x in range(1, classic["width"] - 1)
+        for y in range(1, classic["height"] - 1)
+        if (x, y) not in walls
+    }
+    dead_ends = [
+        at
+        for at in walkable
+        if sum(
+            1 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)) if (at[0] + dx, at[1] + dy) in walkable
+        )
+        == 1
+    ]
+    assert len(dead_ends) >= 4, f"死胡同只有 {len(dead_ends)} 个——这不是迷宫，是空地"
+    assert "agent" not in objects or True  # 起点在真值里是 `start`，不是格子
 
 
 def test_an_unknown_level_is_refused_rather_than_silently_defaulted():

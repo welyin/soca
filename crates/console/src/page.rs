@@ -83,6 +83,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
      亮底 + 亮字 = 那一行**整个看不见**。表现是"表格里一大片空白，只有一行有字"，
      很容易读成"数据没出来"，而数据一直在，只是被自己涂掉了。 */
   tr.current { background: #1d2b44; font-weight: 600; }
+  tr.missed td { background: #46211c; }
   #maze-steps td, #maze-steps th { color: var(--ink); }
   .wait-list { font-size: 11px; line-height: 1.5; margin-top: 3px; max-width: 320px; }
 
@@ -275,7 +276,7 @@ const TEMPLATE: &str = r#"<!DOCTYPE html>
       </div>
     </div>
     <table id="maze-steps" style="margin-top:16px">
-      <thead><tr><th>#</th><th>动作</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得（新增）</th><th>记入 L1</th></tr></thead>
+      <thead><tr><th>#</th><th>动作</th><th>押了什么（动作前）</th><th>中了没</th><th>为什么走这一步</th><th>排队</th><th>许可</th><th>回执</th><th>核验</th><th>认得（新增）</th><th>记入 L1</th></tr></thead>
       <tbody></tbody>
     </table>
     </div>
@@ -1088,6 +1089,18 @@ function renderMaze() {
         + "<td>" + item.known_cells
         + (item.learned ? " <span class=\"dim\">(+" + item.learned + ")</span>" : "") + "</td>"
         // 「记入 L1」在评估器通路上恒为空：它压根不碰记忆。空着是如实说，不是漏填。
+        + "<td>" + (item.claimed
+            ? escapeHtml(item.claimed)
+            : "<span class=\"dim\">（这一步没有可押的注）</span>") + "</td>"
+        // **押错了要显眼，而且要看出错的是哪一种。** 这一栏是这一页的重点：
+        // 不是"它走了什么"，而是"它说会怎样、结果怎样"。看不出来的一栏等于没记。
+        + "<td>" + (item.held === true
+            ? "中"
+            : (item.held === false
+                ? (item.pose_suspect
+                    ? (item.relocalized ? "没中（姿势可疑，已重定位）" : "没中（姿势可疑，未找到更好的位置）")
+                    : "没中（那一格记错了）")
+                : "<span class=\"dim\">—</span>")) + "</td>"
         + "<td>" + (item.remembered
             ? escapeHtml(String(item.remembered))
             : "<span class=\"dim\">—</span>") + "</td>"
@@ -1127,6 +1140,7 @@ $("maze-run").onclick = async function () {
     $("maze-summary").innerHTML =
       "<b>" + escapeHtml(mazeRun.outcome) + "</b>　走了 " + mazeRun.steps.length + " 步　" +
       "认得 " + mazeRun.map.length + " 格　" +
+      "世界模型被打脸 <b>" + mazeRun.model_errors + "</b> 次　" +
       "地图矛盾 <b>" + mazeRun.contradictions + "</b>（应当是 0：不是 0 就说明视图约定读错了）" +
       (mazeRun.stopped
         ? "<br><b>停下了</b>：" + escapeHtml(mazeRun.stopped)

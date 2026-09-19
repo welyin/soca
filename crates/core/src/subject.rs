@@ -1883,7 +1883,21 @@ impl Subject {
 
         // 先扣额度再干活。反过来的话，一次失败的运行不会留下痕迹，而额度记账一旦漏记，
         // 它就失去了作为"该升级预算了"触发器的意义（§4.2）。
-        self.goals.activate(&goal_id)?;
+        // **这一轮记在"动作"上，不记在"激活"上。**
+        //
+        // 两栏是为不同的事设的，而它们混在一起的代价是实测出来的：
+        //
+        // * **激活**是"把单元唤醒去想"。它花钱（token）、也是递归风险的来源——
+        //   §4.2 配着"调用深度 4"给的那个 32 是给它设的。
+        // * **动作**是"对外做了一件事"。它的上限由**任务自己宣告**：游戏就是清单里的
+        //   `max_steps`，文件写入就是那份资源的量。
+        //
+        // 混成一栏之后，一局 15×15 的迷宫在第 32 步被掐死（它要几十步），
+        // 而表现是"它走不完"——真因是拿错了表盘。模型咨询仍然记激活（见 `consult_model`），
+        // 所以"最多想 32 次"这条规矩原样保留，只是不再管走路。
+        if let Some(goal) = self.goals.goal_mut(&goal_id) {
+            goal.budget.spend_actions(1)?;
+        }
 
         let (candidates, selection) = self.select_filtered(policy, risk, at)?;
         let selected = selection.selected_index();

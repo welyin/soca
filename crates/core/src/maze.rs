@@ -178,6 +178,15 @@ pub struct MazeStep {
     pub claimed: String,
     /// 那条注**中了没有**。`None` 表示没有可押的注（那时它也不是"对了"）。
     pub held: Option<bool>,
+    /// 这一步"我面前那一格"与地图对不上——**姿势可疑**。
+    ///
+    /// 与 `held` 分开记：`held=false` 可能是"那一格记错了"，也可能是"我在哪搞错了"，
+    /// 而这两件事的处置完全不同（`forget` vs `relocalize`）。合成一个布尔值之后，
+    /// 复盘时就分不出刚才到底怀疑了谁。
+    pub pose_suspect: bool,
+    /// 重新定位**真的挪了位置**。`false` 有两种：姿势不可疑，或者可疑而找不到更好的位置
+    /// （地图解释不了眼前——那时它选择不动）。两者都要看得见，不能合成一句"修过了"。
+    pub relocalized: bool,
     /// **到这一步为止**的地图。
     ///
     /// 逐步存下来，而不是只存最终那一张：往回拖滑块时，地图应当**缩回当时的样子**。
@@ -497,6 +506,33 @@ fn front_cell(view: &MazeView) -> MazeCell {
     view.view[AGENT_ROW as usize][(AGENT_COLUMN - 1) as usize]
 }
 
+/// 一格 → 地图里存的那个三元组。
+///
+/// `absorb` 与 `pose_agrees` 共用它，而不是各写一份：两份里少写一个字段的那一天，
+/// 地图会安静地开始漏掉"颜色变了"这种差别。
+fn cell_value(cell: MazeCell) -> (String, String, String) {
+    (
+        format!("{:?}", cell.object).to_lowercase(),
+        format!("{:?}", cell.color).to_lowercase(),
+        format!("{:?}", cell.state).to_lowercase(),
+    )
+}
+
+/// **姿势对不对**：这一步走完，我面前那一格是不是地图上说的那一格。
+///
+/// 这一条与 `claim_holds` 分开，因为它们错了之后要做的事不同：
+/// 动作效果不对 → 怀疑**那一格**；面前那格对不上 → 怀疑**我在哪**。
+fn pose_agrees(claim: &Claim, after: &MazeView) -> bool {
+    let Claim::Forward {
+        front: Some(expect),
+    } = claim
+    else {
+        // 没有可对质的内容（地图还不认得那一格），就不算错。
+        return true;
+    };
+    &cell_value(front_cell(after)) == expect
+}
+
 /// 对面前那一格按下去之后，它的状态**应当**变成什么。
 ///
 /// 这一条是从**规则**推出来的，不是从愿望推出来的：
@@ -544,8 +580,15 @@ fn left_vector(direction: u8) -> (i32, i32) {
 /// 才能戳破它。
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Claim {
-    /// 前进：认得的那批格子整体前移一格（列号 +1）。
-    Forward,
+    /// 前进：认得的那批格子整体前移一格（列号 +1），**而且**我面前那一格与地图对得上。
+    ///
+    /// `front` 是**从地图上读出来的**结果——"走完这一步，我面前那一格该是什么"。
+    /// 它才是能抓住**位置漂移**的那一半：位移那条注分辨不出"撞墙了"和"走过一段
+    /// 一模一样的走廊"，两者的公开视图逐格相同，而绝对坐标是 §11.1 有意扣留的。
+    /// 但"我面前该是什么"依赖**我在哪**——位置一漂，它立刻对不上。
+    ///
+    /// `None` 表示地图还不认得那一格（第一次走到这儿），那时只查位移。
+    Forward { front: Option<(String, String, String)> },
     /// 转身：朝向会变成 `to`。
     Turn { to: u8 },
     /// 拾取：我的携带物会变成 `to`。
@@ -571,7 +614,12 @@ impl Claim {
     /// 给人看的那句话。页面上那一栏就是它。
     fn describe(&self) -> String {
         match self {
-            Self::Forward => "我认得的那批格子会整体前移一格".to_string(),
+            Self::Forward { front } => match front {
+                Some((object, _, _)) => {
+                    format!("我认得的那批格子会整体前移一格，而我面前应当是 {object}")
+                }
+                None => "我认得的那批格子会整体前移一格".to_string(),
+            },
             Self::Turn { to } => format!("朝向会变成 {to}"),
             Self::Carrying { to } => format!("携带物会变成 {to}"),
             Self::FrontBecomes { at, to } => {
@@ -591,7 +639,7 @@ impl Claim {
 /// 而它给的是**假的安全感**；只有能拿手造的反例把它推翻，才证得了它真的在看世界。
 fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
     match claim {
-        Claim::Forward => {
+        Claim::Forward { .. } => {
             let size = before.view.len();
             let mut compared = 0usize;
             for row in 0..size {
@@ -636,6 +684,81 @@ fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
 }
 
 impl Explorer {
+    /// **站着的姿势对不对**：我**现在**看见的前面那一格，与我地图上那一格对得上吗。
+    ///
+    /// 与 `pose_agrees` 的区别不是啰嗦：那一个查的是"**走完**这一步之后"，所以它只有在
+    /// 前进时才说话。而姿势错了的时候，人往往正站在那儿按一个按不响的开关——
+    /// 门钥匙那一局的 seed 23 就是这样：同一个位置上 `toggle` 连着失败五次，
+    /// 而姿势一次都没被怀疑过，因为那条路只在 `Forward` 上查。
+    fn front_matches_map(&self, view: &MazeView) -> bool {
+        let (fx, fy) = forward_vector(view.direction);
+        let at = (self.position.0 + fx, self.position.1 + fy);
+        match self.map.get(&at) {
+            Some(known) => known == &cell_value(front_cell(view)),
+            // 地图不认得那一格：没什么可对质的，不算错。
+            None => true,
+        }
+    }
+
+    /// 用刚刚看到的视图**重新定位**：在我认得的那些格子里，找一个更解释得通眼前的我的位置。
+    ///
+    /// 位置漂移是这一层最贵的一种错：地图上每一格的世界坐标都从它推出来，错了之后整张图
+    /// 会安静地歪掉，而每一步都"看着对"。而公开面里没有绝对坐标（§11.1 有意扣留），
+    /// 所以坐标唯一的来源是**已认得的格子与眼前视图对不对得上**。
+    ///
+    /// 朝向不参与搜索：它来自观测（公开的、每步都新鲜），没有理由怀疑它。
+    /// 候选位置只取地图上认得的格子——我可能正站在一格从没见过的地方，那时这里找不到，
+    /// 于是它什么也不做。**猜不出就别猜**：乱改位置比暂时歪着更糟。
+    fn relocalize(&mut self, view: &MazeView) -> bool {
+        let current = self.score(view, self.position);
+        let mut best = (current, self.position);
+        for at in self.map.keys().copied().collect::<Vec<_>>() {
+            let score = self.score(view, at);
+            if score > best.0 {
+                best = (score, at);
+            }
+        }
+        if best.1 != self.position && best.0 > current {
+            self.position = best.1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// "如果我在 `at`"，眼前这些看得见的格子与地图对得上的有多少。
+    ///
+    /// 对上一格 +1，对不上 −1（对不上比没得对更有分量：它是一条**反证**），
+    /// 地图里没有的格子不加不减——那只是没看过，不是矛盾。
+    fn score(&self, view: &MazeView, at: (i32, i32)) -> i32 {
+        let (fx, fy) = forward_vector(view.direction);
+        let (lx, ly) = left_vector(view.direction);
+        let mut score = 0;
+        for row in 0..view.view.len() {
+            for column in 0..view.view[row].len() {
+                if row == AGENT_ROW as usize && column == AGENT_COLUMN as usize {
+                    continue;
+                }
+                let cell = view.view[row][column];
+                if cell.object == MazeObject::Unseen {
+                    continue;
+                }
+                let forward = AGENT_COLUMN - column as i32;
+                let left = AGENT_ROW - row as i32;
+                let world = (
+                    at.0 + forward * fx + left * lx,
+                    at.1 + forward * fy + left * ly,
+                );
+                match self.map.get(&world) {
+                    Some(known) if known == &cell_value(cell) => score += 1,
+                    Some(_) => score -= 1,
+                    None => {}
+                }
+            }
+        }
+        score
+    }
+
     /// 忘掉某一格。**押错之后用来改行为。**
     ///
     /// 地图是目标选择唯一的依据：`choose_target` 从这张表里读门在哪、钥匙在哪。
@@ -656,7 +779,15 @@ impl Explorer {
     fn claim(&self, action: &GameAction, view: &MazeView) -> Claim {
         match action {
             GameAction::Move(move_action) => match move_action.op {
-                MoveOp::Forward => Claim::Forward,
+                MoveOp::Forward => {
+                    // 走完这一步我会站在哪、朝哪，都是这条路线自己算的——于是我能说出
+                    // **那时我面前该是什么**。地图不认得它就没得对，那时只查位移。
+                    let (fx, fy) = forward_vector(view.direction);
+                    let ahead = (self.position.0 + 2 * fx, self.position.1 + 2 * fy);
+                    Claim::Forward {
+                        front: self.map.get(&ahead).cloned(),
+                    }
+                }
                 MoveOp::TurnLeft => Claim::Turn {
                     to: (view.direction + 3) % 4,
                 },
@@ -1205,6 +1336,8 @@ pub fn run_episode(
             // **空着不是漏填**——它如实说明那一步没有预测、也没有核对。
             claimed: String::new(),
             held: None,
+            pose_suspect: false,
+            relocalized: false,
             map: explorer.mapped(),
             view: match &observation.percept {
                 Percept::Maze(view) => view.view.clone(),
@@ -1332,7 +1465,7 @@ pub fn play_through_actions(
             capability_policy_ref: capability.clone(),
             max_action_level: ActionLevel::A1,
         },
-        GoalBudget::new(512, MAX_ACTIVATIONS_PER_GOAL, 1 << 20, 3_600_000)?,
+        GoalBudget::new(max_steps, MAX_ACTIVATIONS_PER_GOAL, 1 << 20, 3_600_000)?,
         ExplorationQuota::new(0),
         at,
         None,
@@ -1388,8 +1521,22 @@ pub fn play_through_actions(
             break;
         }
 
-        let (action, reason) = explorer.decide(view.direction);
         let known_before = explorer.map.len();
+        let mut pose_suspect = false;
+        let mut relocalized = false;
+
+        // **站好之前不动手。**
+        //
+        // 先看姿势对不对，再看这一步怎么走：姿势错了，从它推出来的一切（面前是什么、
+        // 哪条路通、目标在哪）都跟着错，而那一步还是照走不误。
+        if !explorer.front_matches_map(&view) {
+            pose_suspect = true;
+            explorer.model_errors += 1;
+            explorer.plan.clear();
+            relocalized = explorer.relocalize(&view);
+        }
+
+        let (action, reason) = explorer.decide(view.direction);
 
         // **动作前押注。** 这一行是"认知循环"里先前缺的那一步：不是"做完再看发生了什么"，
         // 而是**先说它会怎么变**。它押的是关于世界的一句话，所以下一个观测能把它推翻——
@@ -1468,6 +1615,8 @@ pub fn play_through_actions(
                 claimed: claim.describe(),
                 // 押了，但这一步没轮到，所以**没验**——`None` 不是"没中"。
                 held: None,
+                pose_suspect: false,
+                relocalized: false,
                 remembered: 0,
                 waited_on,
             });
@@ -1499,8 +1648,17 @@ pub fn play_through_actions(
         if let Some(Percept::Maze(after)) = subject.game_percept() {
             // 核对押的注。**先核对，后吸收**：`absorb` 会把 `last_view` 换成新的，
             // 而核对要的正是"动作前"和"动作后"这两张视图。
-            let verdict = claim_holds(&claim, &view, &after);
-            if !verdict {
+            let effect_held = claim_holds(&claim, &view, &after);
+            let pose_held = pose_agrees(&claim, &after);
+            pose_suspect = !pose_held;
+            if !pose_held {
+                // **姿势可疑。** 我按地图说的走了一步，而面前那一格不是地图说的样子——
+                // 那么错的多半是"我以为我在哪"。位移那条注对此毫无办法（见 `Claim`），
+                // 所以这里要做的是**重新定位**，而不是把那一格从地图上划掉。
+                explorer.model_errors += 1;
+                explorer.plan.clear();
+                relocalized = explorer.relocalize(&after);
+            } else if !effect_held {
                 explorer.model_errors += 1;
                 // **押错就改行为，分两步。**
                 //
@@ -1520,7 +1678,7 @@ pub fn play_through_actions(
                     explorer.forget(*at);
                 }
             }
-            held = Some(verdict);
+            held = Some(effect_held && pose_held);
             let learned = explorer.absorb(&after, Some(action));
             if let Some(evidence) = &evidence {
                 step_remembered = subject.remember_grid_cells(
@@ -1547,6 +1705,8 @@ pub fn play_through_actions(
             learned: explorer.map.len().saturating_sub(known_before),
             claimed: claim.describe(),
             held,
+            pose_suspect,
+            relocalized,
             map: explorer.mapped(),
             view: match subject.game_percept() {
                 Some(Percept::Maze(view)) => view.view.clone(),
