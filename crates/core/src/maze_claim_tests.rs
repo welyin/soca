@@ -99,6 +99,70 @@ fn a_view_with_nothing_comparable_does_not_count_as_holding() {
     assert!(!claim_holds(&Claim::Forward, &blind, &blind));
 }
 
+/// 一扇门，状态给定。
+fn door(state: MazeCellState) -> MazeCell {
+    MazeCell {
+        object: MazeObject::Door,
+        color: MazeColor::Red,
+        state,
+    }
+}
+
+#[test]
+fn a_locked_door_without_a_key_is_predicted_to_stay_locked() {
+    // 门规则里最容易被想当然的一条：锁着的门而手里没有钥匙时，按下去**什么也不该发生**。
+    // 把这一条押成"会开"，会把每一次正确的"没反应"都记成世界模型出错——
+    // 于是真正出错的那一天，没有人能从 noise 里认出来。
+    assert_eq!(
+        expected_door_state(door(MazeCellState::Locked), Carrying::Key),
+        "open"
+    );
+    assert_eq!(
+        expected_door_state(door(MazeCellState::Locked), Carrying::None),
+        "locked"
+    );
+    // 而 `toggle` 是**开关**：开着的按下去应当变关。
+    assert_eq!(
+        expected_door_state(door(MazeCellState::Open), Carrying::None),
+        "closed"
+    );
+}
+
+#[test]
+fn the_door_claim_is_refuted_when_the_door_did_not_do_what_the_rules_say() {
+    let mut before = corridor();
+    before.view[3][5] = door(MazeCellState::Closed);
+    let mut after = before.clone();
+    after.view[3][5] = door(MazeCellState::Open);
+
+    let claim = Claim::FrontBecomes {
+        to: "open".to_string(),
+    };
+    assert!(claim_holds(&claim, &before, &after));
+    // 门没动（它本该开）——押的注必须被推翻。
+    assert!(!claim_holds(&claim, &before, &before));
+}
+
+#[test]
+fn a_toggle_that_hits_nothing_is_refuted() {
+    // 这一条是**真局逼出来的**：门钥匙那一局里有两次 `toggle` 押着"状态会变成 none"，
+    // 且都"押中"了——因为它对着的不是门，而空地按下去本来就不会变。
+    // 那两步是白走的，而先前的注把它记成了成功：**恒真**从后门溜了回来。
+    //
+    // 所以前提写进注里：我面前是**门**。
+    let nothing = corridor();
+    assert!(
+        !claim_holds(
+            &Claim::FrontBecomes {
+                to: "none".to_string()
+            },
+            &nothing,
+            &nothing
+        ),
+        "对着空地按 toggle 不该算成功——那一步什么也没做"
+    );
+}
+
 #[test]
 fn the_turn_claim_is_about_the_direction_that_actually_came_back() {
     let left = view(

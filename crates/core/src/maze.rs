@@ -42,7 +42,7 @@ mod claim_checks;
 use serde::{Deserialize, Serialize};
 use soca_contracts::{
     ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, DataClass, ExplorationQuota,
-    GameAction,
+    Carrying, GameAction, MazeCellState,
     GameKind, GameObservation, GoalBudget, GoalId, GrantScope, MazeCell, MazeObject, MazeView,
     MoveAction,
     MoveOp, Percept, PermissionScope, PublicId, SelectionPolicy, UserChannel, WallClock,
@@ -489,11 +489,30 @@ fn is_static(object: &str) -> bool {
 ///
 /// 拾取作用在面前那一格，所以"拾取之后手上会有什么"是可以从视图**直接读出来**的。
 fn front_object(view: &MazeView) -> String {
-    format!(
-        "{:?}",
-        view.view[AGENT_ROW as usize][(AGENT_COLUMN - 1) as usize].object
-    )
-    .to_lowercase()
+    format!("{:?}", front_cell(view).object).to_lowercase()
+}
+
+/// 我面前那一格。
+fn front_cell(view: &MazeView) -> MazeCell {
+    view.view[AGENT_ROW as usize][(AGENT_COLUMN - 1) as usize]
+}
+
+/// 对面前那一格按下去之后，它的状态**应当**变成什么。
+///
+/// 这一条是从**规则**推出来的，不是从愿望推出来的：
+///
+/// * 开着的门会被关上，关着的门会被打开（`toggle` 是开关，不是"开"）。
+/// * 锁着的门只有手里有钥匙才打得开；没有钥匙时它**保持锁着**——所以那种情况下的
+///   "按了没反应"是**押中**。把后者当成失败，会把一个正确的世界模型判成错的。
+/// * 不是门的东西没有状态可言，按下去什么也不该变。
+fn expected_door_state(front: MazeCell, carrying: Carrying) -> String {
+    let next = match front.state {
+        MazeCellState::Open => MazeCellState::Closed,
+        MazeCellState::Closed => MazeCellState::Open,
+        MazeCellState::Locked if matches!(carrying, Carrying::Key) => MazeCellState::Open,
+        other => other,
+    };
+    format!("{next:?}").to_lowercase()
 }
 
 /// 朝向 → 前方的世界位移。MiniGrid 的 `agent_dir`：0=右 1=下 2=左 3=上。
@@ -531,10 +550,17 @@ enum Claim {
     Turn { to: u8 },
     /// 拾取：我的携带物会变成 `to`。
     Carrying { to: String },
-    /// 这一条动作没有可押的注。
+    /// 开关门：**我面前那一格是一扇门**，而它的状态会变成 `to`。
     ///
-    /// `Toggle` 落在这里：门开着会变成关、锁着会变成开，而"变成什么"还取决于手里有没有钥匙
-    /// ——押一个连自己都说不清的注，等于把"恒真"换个写法。
+    /// 前提是押注的一部分，这不是啰嗦：只检查"状态变成 X"的话，对着墙按一下会**押中**
+    /// （墙的状态本来就是 `none`，按完还是 `none`），而那两步是白走的。
+    /// 一局里真的出现过两次——见 `a_toggle_that_hits_nothing_is_refuted`。
+    ///
+    /// 这一条押的是**门的规则**，不是"我想让它怎样"。锁着的门而手里没有钥匙时，
+    /// 它**应当保持锁着**——所以那种情况下的"按了没反应"是**押中**，不是押错。
+    /// 把后者当成失败，会把一个正确的世界模型判成错的。
+    FrontBecomes { to: String },
+    /// 这一条动作没有可押的注。
     Unclaimed,
 }
 
@@ -545,6 +571,7 @@ impl Claim {
             Self::Forward => "我认得的那批格子会整体前移一格".to_string(),
             Self::Turn { to } => format!("朝向会变成 {to}"),
             Self::Carrying { to } => format!("携带物会变成 {to}"),
+            Self::FrontBecomes { to } => format!("我面前那一格的状态会变成 {to}"),
             Self::Unclaimed => "这一步没有可押的注".to_string(),
         }
     }
@@ -593,6 +620,12 @@ fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
         }
         Claim::Turn { to } => after.direction == *to,
         Claim::Carrying { to } => format!("{:?}", after.carrying).to_lowercase() == *to,
+        Claim::FrontBecomes { to } => {
+            // 前提与结论都要成立：**面前得是一扇门**，而且它的状态要变成 `to`。
+            let front = front_cell(after);
+            front.object == MazeObject::Door
+                && format!("{:?}", front.state).to_lowercase() == *to
+        }
         Claim::Unclaimed => true,
     }
 }
@@ -615,7 +648,9 @@ impl Explorer {
                 MoveOp::Pickup => Claim::Carrying {
                     to: front_object(view),
                 },
-                MoveOp::Toggle => Claim::Unclaimed,
+                MoveOp::Toggle => Claim::FrontBecomes {
+                    to: expected_door_state(front_cell(view), view.carrying),
+                },
             },
             // 迷宫不认识这两类动作（`Targeted` 与 `Flag` 是扫雷的），它们到不了这里。
             // 写 `Unclaimed` 而不是 `unreachable!()`：一个"这里绝不该发生"的断言放在
