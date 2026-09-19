@@ -35,6 +35,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+#[cfg(test)]
+#[path = "maze_claim_tests.rs"]
+mod claim_checks;
+
 use serde::{Deserialize, Serialize};
 use soca_contracts::{
     ActionLevel, ActionRequest, ActionRequestTag, CapabilityPolicyRef, DataClass, ExplorationQuota,
@@ -170,6 +174,10 @@ pub struct MazeStep {
     /// 就只是一个结论——而"这一步新看见了三格"才是看得见的动作。转身那一类不改变视野的
     /// 步数会是 0，那也是对的：**它确实没学到东西**，而那件事值得被看见。
     pub learned: usize,
+    /// 这一步动作**之前**押的注，用一句人话写出来。
+    pub claimed: String,
+    /// 那条注**中了没有**。`None` 表示没有可押的注（那时它也不是"对了"）。
+    pub held: Option<bool>,
     /// **到这一步为止**的地图。
     ///
     /// 逐步存下来，而不是只存最终那一张：往回拖滑块时，地图应当**缩回当时的样子**。
@@ -390,6 +398,11 @@ pub struct MazeRun {
     /// 它应当是 0。不是 0 就说明视图约定被读错了（镜像或转置），而那件事不会以别的方式
     /// 报错——地图会静悄悄地整体翻转，每一步都"看起来对"。
     pub contradictions: usize,
+    /// **世界模型被打脸的次数。** 它会一直涨，除非每一次动作都真的按押的那样发生了。
+    ///
+    /// 与 `contradictions` 并列而不是合并：矛盾数是"地图自不自洽"，这一项是"我的因果模型对不对"。
+    /// 一局里后者不涨才算"这次行走验证了视图约定"——而前者在镜像时会**是 0**。
+    pub model_errors: usize,
     /// 任务描述（引擎给的公开文本）。
     pub mission: String,
 }
@@ -429,6 +442,12 @@ struct Explorer {
     /// 最近一次观测到的朝向（来自感知，不是推算的）。
     direction: u8,
     contradictions: usize,
+    /// **世界模型被打脸的次数。**
+    ///
+    /// 与 `contradictions` 分开记，因为它们是两件事：矛盾是"同一个世界格子出现了两种内容"
+    /// （地图互相打架），它是"我说这一步会那样，而它没那样"（我的因果模型错了）。
+    /// 后者在镜像时**不会**出现矛盾（镜像的地图自洽），所以少了这个计数就没有东西在看了。
+    model_errors: usize,
 }
 
 /// 一个目标，以及到了之后要做什么。
@@ -453,6 +472,7 @@ impl Default for Explorer {
             last_view: None,
             direction: 0,
             contradictions: 0,
+            model_errors: 0,
         }
     }
 }
@@ -463,6 +483,17 @@ impl Default for Explorer {
 /// 箱子会被推走，而墙、地板、空地和目标不会。
 fn is_static(object: &str) -> bool {
     matches!(object, "wall" | "empty" | "floor" | "goal" | "lava")
+}
+
+/// 我面前那一格是什么（视图里 agent 的前方）。
+///
+/// 拾取作用在面前那一格，所以"拾取之后手上会有什么"是可以从视图**直接读出来**的。
+fn front_object(view: &MazeView) -> String {
+    format!(
+        "{:?}",
+        view.view[AGENT_ROW as usize][(AGENT_COLUMN - 1) as usize].object
+    )
+    .to_lowercase()
 }
 
 /// 朝向 → 前方的世界位移。MiniGrid 的 `agent_dir`：0=右 1=下 2=左 3=上。
@@ -483,7 +514,116 @@ fn left_vector(direction: u8) -> (i32, i32) {
     (fy, -fx)
 }
 
+/// 动作前押下的一条注：**这一步之后世界会怎么变**。
+///
+/// 这是"世界模型"在这一层的对外形式。它押的必须是**可证伪**的——`Forward` 说
+/// "我认得的那批格子会整体前移一格"，而它错了就说明视图的轴、镜像或朝向约定里
+/// 有一处读反了。
+///
+/// 那类错误靠 `contradictions` 是**抓不到**的：镜像之后整张地图**自洽**，
+/// 每一格都和别的格子对得上，只有"走一步之后世界会怎么变"这句关于**因果**的话
+/// 才能戳破它。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Claim {
+    /// 前进：认得的那批格子整体前移一格（列号 +1）。
+    Forward,
+    /// 转身：朝向会变成 `to`。
+    Turn { to: u8 },
+    /// 拾取：我的携带物会变成 `to`。
+    Carrying { to: String },
+    /// 这一条动作没有可押的注。
+    ///
+    /// `Toggle` 落在这里：门开着会变成关、锁着会变成开，而"变成什么"还取决于手里有没有钥匙
+    /// ——押一个连自己都说不清的注，等于把"恒真"换个写法。
+    Unclaimed,
+}
+
+impl Claim {
+    /// 给人看的那句话。页面上那一栏就是它。
+    fn describe(&self) -> String {
+        match self {
+            Self::Forward => "我认得的那批格子会整体前移一格".to_string(),
+            Self::Turn { to } => format!("朝向会变成 {to}"),
+            Self::Carrying { to } => format!("携带物会变成 {to}"),
+            Self::Unclaimed => "这一步没有可押的注".to_string(),
+        }
+    }
+}
+
+/// 核对一条注：把动作**前**的视图与动作**后**的视图对一遍。
+///
+/// 纯函数，所以它可以拿两张手工造的视图直接测——见
+/// `a_mirrored_view_refutes_the_forward_claim`：把视图翻一下，`Forward` 立刻不成立。
+///
+/// 那条测试不是形式主义。一个"押了等于没押"的核对（恒真）跑一局也是绿色的，
+/// 而它给的是**假的安全感**；只有能拿手造的反例把它推翻，才证得了它真的在看世界。
+fn claim_holds(claim: &Claim, before: &MazeView, after: &MazeView) -> bool {
+    match claim {
+        Claim::Forward => {
+            let size = before.view.len();
+            let mut compared = 0usize;
+            for row in 0..size {
+                for column in 0..size.saturating_sub(1) {
+                    // agent 自己那一格在投影里被换成了 `agent`，不是世界的格子。
+                    if row == AGENT_ROW as usize && column + 1 == AGENT_COLUMN as usize {
+                        continue;
+                    }
+                    let source = before.view[row][column];
+                    if source.object == MazeObject::Unseen {
+                        continue;
+                    }
+                    let Some(target_row) = after.view.get(row) else {
+                        return false;
+                    };
+                    let Some(target) = target_row.get(column + 1) else {
+                        return false;
+                    };
+                    if target.object == MazeObject::Unseen {
+                        continue;
+                    }
+                    compared += 1;
+                    if *target != source {
+                        return false;
+                    }
+                }
+            }
+            // 一格都没比上就不算成立。否则视野全是 `unseen` 时这条注会**恒真**，
+            // 而那正是"假装在检查"最省事的一种写法。
+            compared >= 1
+        }
+        Claim::Turn { to } => after.direction == *to,
+        Claim::Carrying { to } => format!("{:?}", after.carrying).to_lowercase() == *to,
+        Claim::Unclaimed => true,
+    }
+}
+
 impl Explorer {
+    /// 押一条注：这一步之后世界会怎么变。
+    ///
+    /// 押的时候看的是**视图**（朝向、携带物、我面前那一格），说出的话却是关于**世界**的——
+    /// 所以它会被下一个观测打脸。
+    fn claim(&self, action: &GameAction, view: &MazeView) -> Claim {
+        match action {
+            GameAction::Move(move_action) => match move_action.op {
+                MoveOp::Forward => Claim::Forward,
+                MoveOp::TurnLeft => Claim::Turn {
+                    to: (view.direction + 3) % 4,
+                },
+                MoveOp::TurnRight => Claim::Turn {
+                    to: (view.direction + 1) % 4,
+                },
+                MoveOp::Pickup => Claim::Carrying {
+                    to: front_object(view),
+                },
+                MoveOp::Toggle => Claim::Unclaimed,
+            },
+            // 迷宫不认识这两类动作（`Targeted` 与 `Flag` 是扫雷的），它们到不了这里。
+            // 写 `Unclaimed` 而不是 `unreachable!()`：一个"这里绝不该发生"的断言放在
+            // 这么靠内的地方，会把一次上游的域错误变成一次进程崩溃。
+            _ => Claim::Unclaimed,
+        }
+    }
+
     /// 吸收一次公开感知：更新地图、位置与携带物。
     ///
     /// `last_action` 是**刚才那一步做了什么**。位置只在"刚才走的是前进"时挪一格。
@@ -1002,6 +1142,10 @@ pub fn run_episode(
             direction: direction_of(&observation),
             known_cells: explorer.map.len(),
             learned: explorer.map.len().saturating_sub(known_before),
+            // 评估器通路不押注也不核对：它把动作直接交给宿主，不经过 L3 与许可。
+            // **空着不是漏填**——它如实说明那一步没有预测、也没有核对。
+            claimed: String::new(),
+            held: None,
             map: explorer.mapped(),
             view: match &observation.percept {
                 Percept::Maze(view) => view.view.clone(),
@@ -1045,6 +1189,7 @@ pub fn run_episode(
         // 取不到就算了（`None`），而不是让整个请求失败——它是参照物，不是这一局的一部分。
         truth: true_map(choice, seed).ok(),
         contradictions: explorer.contradictions,
+        model_errors: explorer.model_errors,
         mission,
     })
 }
@@ -1187,6 +1332,11 @@ pub fn play_through_actions(
         let (action, reason) = explorer.decide(view.direction);
         let known_before = explorer.map.len();
 
+        // **动作前押注。** 这一行是"认知循环"里先前缺的那一步：不是"做完再看发生了什么"，
+        // 而是**先说它会怎么变**。它押的是关于世界的一句话，所以下一个观测能把它推翻——
+        // 而推翻必须留下痕迹，否则这次行走只是在"记录"，不是在"核对"。
+        let claim = explorer.claim(&action, &view);
+
         subject.request_game_step(action.op_name(), at)?;
 
         // 跑到这条动作被选中为止。上限是防呆：一个永远选不上的动作会让这里空转。
@@ -1256,6 +1406,9 @@ pub fn play_through_actions(
                 candidate_index: None,
                 permit_id: None,
                 verdict: None,
+                claimed: claim.describe(),
+                // 押了，但这一步没轮到，所以**没验**——`None` 不是"没中"。
+                held: None,
                 remembered: 0,
                 waited_on,
             });
@@ -1283,7 +1436,20 @@ pub fn play_through_actions(
         // 顺序不能反：`absorb` 会说出"这一步新认得了哪几格"，而那些格子正是那次观测
         // 看见的东西——挂到别的证据上，"这一格是从哪看出来的"就有一个错的答案。
         let mut step_remembered = 0usize;
+        let mut held: Option<bool> = None;
         if let Some(Percept::Maze(after)) = subject.game_percept() {
+            // 核对押的注。**先核对，后吸收**：`absorb` 会把 `last_view` 换成新的，
+            // 而核对要的正是"动作前"和"动作后"这两张视图。
+            let verdict = claim_holds(&claim, &view, &after);
+            if !verdict {
+                // **押错就改行为，不是记一笔继续走。**
+                //
+                // 清掉计划：那条路线是从一个刚刚被打脸的模型里算出来的。沿它继续走，
+                // 只会把错的东西推到更多格子上——镜像那一类错尤其如此，它每一步都"看着对"。
+                explorer.model_errors += 1;
+                explorer.plan.clear();
+            }
+            held = Some(verdict);
             let learned = explorer.absorb(&after, Some(action));
             if let Some(evidence) = &evidence {
                 step_remembered = subject.remember_grid_cells(
@@ -1308,6 +1474,8 @@ pub fn play_through_actions(
             direction: explorer.last_direction(),
             known_cells: explorer.map.len(),
             learned: explorer.map.len().saturating_sub(known_before),
+            claimed: claim.describe(),
+            held,
             map: explorer.mapped(),
             view: match subject.game_percept() {
                 Some(Percept::Maze(view)) => view.view.clone(),
@@ -1345,6 +1513,7 @@ pub fn play_through_actions(
         stopped,
         truth: true_map(choice, seed).ok(),
         contradictions: explorer.contradictions,
+        model_errors: explorer.model_errors,
         mission,
     })
 }
