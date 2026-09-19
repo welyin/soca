@@ -46,7 +46,7 @@ fn require_game_process() -> Option<PathBuf> {
     None
 }
 
-fn engine(root: &Path) -> ProcessEngine {
+fn engine(root: &Path, game: &str, level: &str) -> ProcessEngine {
     let interpreter = [
         root.join(".venv").join("Scripts").join("python.exe"),
         root.join(".venv").join("bin").join("python"),
@@ -61,7 +61,9 @@ fn engine(root: &Path) -> ProcessEngine {
         .join("adapters")
         .join("minigrid")
         .join("driver.py");
-    let manifest = root.join("games").join("door-key").join("manifest.json");
+    // **游戏与等级都由调用方给**：视图多大是每个游戏自己声明的，而这条路上必须
+    // 至少有一个尺寸不是 7×7 的用例——写死的坐标推导只会在那个用例上现形。
+    let manifest = root.join("games").join(game).join("manifest.json");
     let mut config = ProcessEngineConfig::new(
         interpreter,
         driver.to_str().expect("路径必须是 UTF-8"),
@@ -69,6 +71,10 @@ fn engine(root: &Path) -> ProcessEngine {
     );
     config.args.push("--manifest".to_string());
     config.args.push(manifest.display().to_string());
+    if !level.is_empty() {
+        config.args.push("--level".to_string());
+        config.args.push(level.to_string());
+    }
     config.working_directory = Some(root.to_path_buf());
     ProcessEngine::spawn(config).expect("启动迷宫进程")
 }
@@ -121,7 +127,7 @@ fn the_documented_view_convention_holds_on_a_live_engine() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let step = engine.reset(PROBE_SEED).expect("重置");
     let view = maze_view(&step);
 
@@ -144,11 +150,52 @@ fn the_documented_view_convention_holds_on_a_live_engine() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn the_convention_holds_on_a_three_by_three_view_too() {
+    // **视图多大是每个游戏自己声明的**（门钥匙 7×7、传统迷宫 3×3），而坐标推导
+    // 曾经写死着 (3,6)。写死之后，3×3 的视图会把"正前方那一格"投到世界的很远处——
+    // 地图看上去一切正常，只有对不上这件事本身没人看得见。
+    //
+    // 这条断言钉的就是它：**正前方那一格必须记在地图的 (0,1) 上**。
+    // 与视图大小无关，所以 7×7 与 3×3 都成立，而写死的那一版在 3×3 上必红。
+    let Some(root) = require_game_process() else {
+        return;
+    };
+    let mut engine = engine(&root, "classic-maze", "maze");
+    let step = engine.reset(PROBE_SEED).expect("重置");
+    let view = maze_view(&step);
+    let size = view.view.len();
+    assert_eq!(size, 3, "这一关声明的就是 3×3");
+
+    let mut map = KnowledgeMap::new();
+    let _ = map.observe(view, view.carrying);
+
+    // 视图里"正前方"是**同一行、列号减一**（`forward = agent_column - column`）。
+    // 这条断言第一版把它写成了上一行——那是左前方，于是我自己红了。
+    let (agent_row, agent_column) = agent_cell(size);
+    let front = view.view[agent_row as usize][(agent_column - 1) as usize];
+    assert_ne!(
+        front.object,
+        MazeObject::Unseen,
+        "正前方那一格离我一格，一定看得见"
+    );
+    // 用**地图自己的"前方"**去比，而不是我手算一个世界坐标：这样它同时不依赖
+    // 视图大小与朝向，而"地图的前方"与"看见的前方"对不上，就是坐标推导错了。
+    let recorded = map
+        .known(map.ahead())
+        .expect("正前方那一格应当已被记下——那是我自我定位的原点");
+    assert_eq!(
+        recorded.is_passable(),
+        front.object != MazeObject::Wall,
+        "地图上的前方必须就是眼前的正前方；对不上就是坐标推导用了错的视图尺寸"
+    );
+}
+
+#[test]
 fn walking_a_one_by_one_square_returns_to_the_origin_without_drift() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let mut map = KnowledgeMap::new();
 
     let reset = engine.reset(PROBE_SEED).expect("重置");
@@ -190,7 +237,7 @@ fn odometry_tracks_a_two_step_straight_line() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let mut map = KnowledgeMap::new();
     let reset = engine.reset(PROBE_SEED).expect("重置");
     if let Percept::Maze(view) = &reset.percept {
@@ -217,7 +264,7 @@ fn the_map_never_treats_an_unseen_cell_as_empty() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let mut map = KnowledgeMap::new();
     let reset = engine.reset(PROBE_SEED).expect("重置");
     let view = maze_view(&reset);
@@ -252,7 +299,7 @@ fn a_wall_straight_ahead_is_known_and_not_passable() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let mut map = KnowledgeMap::new();
     let reset = engine.reset(PROBE_SEED).expect("重置");
     if let Percept::Maze(view) = &reset.percept {
@@ -287,7 +334,7 @@ fn the_frontier_contains_only_known_passable_cells_next_to_the_unknown() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let mut map = KnowledgeMap::new();
     let reset = engine.reset(PROBE_SEED).expect("重置");
     if let Percept::Maze(view) = &reset.percept {
@@ -308,7 +355,7 @@ fn planning_uses_only_known_cells_so_an_unknown_target_is_unreachable() {
     let Some(root) = require_game_process() else {
         return;
     };
-    let mut engine = engine(&root);
+    let mut engine = engine(&root, "door-key", "");
     let mut map = KnowledgeMap::new();
     let reset = engine.reset(PROBE_SEED).expect("重置");
     if let Percept::Maze(view) = &reset.percept {
