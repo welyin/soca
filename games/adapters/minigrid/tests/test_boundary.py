@@ -128,7 +128,11 @@ class GameProcessTests(unittest.TestCase):
                 reset = self.receive()
                 self.assertEqual(reset["type"], "reset_result")
                 self.assertEqual(reset["step"]["outcome"], "running")
-                self.assertEqual(len(reset["step"]["percept"]["view"]), 7)
+                # 视图大小**按各自清单里的声明**来，不写死 7：
+                # 门钥匙是 7×7、传统迷宫是 3×3，而写死的那一个会在另一个游戏上永远不成立。
+                view_size = json.loads(manifest_of(game_dir).read_text("utf-8"))["public"]["view_size"]
+                self.assertEqual(len(reset["step"]["percept"]["view"]), view_size)
+                self.assertTrue(all(len(row) == view_size for row in reset["step"]["percept"]["view"]))
 
                 self.send({"type": "step", "action": {"op": "turn_left"}})
                 step = self.receive()

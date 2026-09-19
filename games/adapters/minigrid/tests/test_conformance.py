@@ -128,7 +128,14 @@ def test_moving_forward_shifts_everything_one_column_toward_the_agent():
                 break
             else:
                 raise AssertionError(f"{manifest['game']}/{name}：找不到一个前方不是墙的种子")
-        assert checked >= 10, f"{manifest['game']}：只比上了 {checked} 格，这条测试没测到东西"
+        # **阈值按视图大小来，不写死。** 先前写的是 10，那是按 7×7 定的；
+        # 3×3 的视图一共 9 格，能比上的就那么几格，于是这条断言在第二个尺寸上
+        # 永远不成立——而"断言没测到东西"与"几何算错了"是两件事，混在一起会把人指错方向。
+        floor = manifest["public"]["view_size"] - 1
+        assert checked >= floor, (
+            f"{manifest['game']}：只比上了 {checked} 格（视图 {manifest['public']['view_size']}×"
+            f"{manifest['public']['view_size']}，至少要 {floor}），这条测试没测到东西"
+        )
 
 
 def compare_shift(before, after, row_at, column_at, manifest, name):
