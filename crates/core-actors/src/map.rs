@@ -20,7 +20,6 @@ use std::collections::{BTreeMap, VecDeque};
 
 use soca_contracts::{Carrying, MazeCell, MazeCellState, MazeColor, MazeObject, MazeView};
 
-/// 视图约定：agent 在视图中的行。
 /// agent 在视图里的位置：MiniGrid 把它放在"最后一列的中点"（见清单的 `view_convention`）。
 ///
 /// **从视图形状算，不是常数。** 视图多大是**每个游戏自己声明的**（门钥匙 7×7、
@@ -29,8 +28,6 @@ use soca_contracts::{Carrying, MazeCell, MazeCellState, MazeColor, MazeObject, M
 pub fn agent_cell(size: usize) -> (i32, i32) {
     ((size / 2) as i32, (size as i32) - 1)
 }
-/// 视图约定：agent 在视图中的列。
-
 
 /// 世界坐标：起点为原点，`dy` 为初始朝向，`dx` 为初始朝向的右手边。
 pub type Cell = (i32, i32);

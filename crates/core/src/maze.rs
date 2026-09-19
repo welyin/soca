@@ -80,7 +80,6 @@ type LearnedCells = Vec<((i32, i32), CellValue)>;
 fn agent_cell(size: usize) -> (i32, i32) {
     ((size / 2) as i32, (size as i32) - 1)
 }
-/// 同上。
 
 
 /// 仓库根。
